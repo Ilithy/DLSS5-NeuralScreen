@@ -7,7 +7,7 @@ result is drawn back over the display in a click-through overlay.
 
 ```
 desktop capture -> motion guides -> NGX worker (D3D12) -> overlay on top of the screen
-  worker DDA        cv2 DIS 320x180    native/nvngx.dll        worker window + HUD
+  worker DDA        cv2 DIS 320x180    native/nvngx.dll        worker window + menu layer
 ```
 
 > **v1.0.0** — release build. The whole pipeline lives on the GPU: capture
@@ -45,9 +45,9 @@ desktop capture -> motion guides -> NGX worker (D3D12) -> overlay on top of the 
 
 | Key | Action |
 |---|---|
-| `F9` | NR on/off. **Off is a bypass**: the overlay stays on screen showing the raw capture + HUD (no neural effect), and the desktop runs faster. Everything hides only on real exit. |
-| `F8` | settings window |
-| `Insert` | start/stop video recording (MP4, AV1 NVENC, 60 fps, ~64 Mbps). Also available as a **Record** button in the settings window |
+| `F9` | NR on/off. **Off is a bypass**: the overlay stays on screen showing the raw capture (no neural effect), and the desktop runs faster. Everything hides only on real exit. |
+| `F8` | open/close the menu. While it is open the overlay takes mouse and keyboard, so the menu works on top of a game; closed, it is click-through again and the desktop behaves normally. |
+| `Insert` | start/stop video recording (MP4, AV1 NVENC, 60 fps, ~64 Mbps). Also a **Record** button in the menu |
 | `Ctrl+Alt+↑` / `Ctrl+Alt+↓` | processing scale ±0.05 |
 | `Ctrl+Alt+Q` | quit |
 
@@ -56,16 +56,32 @@ the keypress **only to us and not to the active app** — F9 inside a game
 toggles NR and the game never sees the key. The flip side: while
 NeuralScreen runs, F8, F9 and Insert belong to it.
 
-Tray icon: left click — settings, right click — menu (NR on/off, scale,
-quit). Settings window: profile (Faithful / Natural / Strong / Extreme),
-work scale, NR parameters, language (ru/en), screenshot button, **Exit**.
+Tray icon: left click opens the same menu, right click gives NR on/off,
+scale and quit.
+
+**The menu** lives inside the overlay itself — there is no separate settings
+window (there used to be one; it was a second interface over the same
+values, it stole focus from games, and it dragged the whole tcl/tk runtime
+along). It holds: live counters (FPS, resolution, work size, frames,
+recording time), NR on/off, profile (Faithful / Natural / Strong / Extreme),
+the four NR parameters, language (ru/en), light/dark theme, "open menu on
+launch", and the buttons Screenshot / Help / Record / Exit / Close.
+
+Drag it by the title bar, resize it by the bottom-right corner — both are
+highlighted when you point at them, and both are remembered in
+`config.json` (`menu_offset`, `menu_scale`).
+
+On launch the menu opens by itself. NeuralScreen draws on top of the desktop
+and otherwise gives no sign of life, so without this you could not tell
+whether it had started. Turn the toggle off and you get a short alert
+instead.
 
 **Three ways to close the app** (they differ, hence different names):
 
 | | Effect |
 |---|---|
-| `Ctrl+Alt+Q`, "Exit" in settings, "Exit" in tray | terminate: worker shut down, windows closed, no processes left |
-| "Close" in settings / window X | only hides the settings window, the app keeps running |
+| `Ctrl+Alt+Q`, "Exit" in the menu, "Exit" in tray | terminate: worker shut down, windows closed, no processes left |
+| "Close" in the menu, `F8`, `Esc` | only hides the menu, the app keeps running |
 
 ## Recording (Insert)
 
@@ -85,10 +101,12 @@ work scale, NR parameters, language (ru/en), screenshot button, **Exit**.
   second. The previous 30 fps time base could not represent them: frames were
   squeezed into half as many ticks, which is what made fast motion fall apart
   regardless of bitrate.
-- The HUD panel and the `@perseval_BLR` watermark are **burned into the
-  recording** (they are drawn onto the frame before encoding; the live
-  overlay itself is hidden from external capture, so OBS/ShadowPlay cannot
-  see it — see "Limitations").
+- **Only the open menu is burned into the recording** — nothing else. Our
+  own layer is hidden from external capture, so anything that must reach the
+  file is drawn onto the frame before encoding. The same applies to
+  screenshots. The HUD panel and the watermark used to be burned in as well;
+  they are gone from the screen, and in a file they read as someone else's
+  caption.
 - Recording works in both NR ON and NR OFF (bypass) modes; the file duration
   matches real time (PTS is built from the wall clock).
 
@@ -110,8 +128,9 @@ work scale, NR parameters, language (ru/en), screenshot button, **Exit**.
 
 ## Architecture
 
-Two processes. Python drives settings, optical-flow guides and the HUD; the
-C++ worker owns the D3D12 device, the capture, NGX and the overlay window.
+Two processes. Python drives settings, optical-flow guides and the menu
+layer; the C++ worker owns the D3D12 device, the capture, NGX and the
+overlay window.
 They talk over stdin/stdout with a binary protocol:
 
 | Message | Purpose |
@@ -138,19 +157,20 @@ writes it into a named mapping. No 4K frame ever crosses the CPU.
 
 **Output.** On `WNDO` the worker raises its own borderless D3D12-swapchain
 window across the screen and presents the NGX result itself: pixels never
-return to Python. The pygame window stays as a HUD layer — its background is
-filled with a chroma key and made transparent (`LWA_COLORKEY`); its global
-alpha (`LWA_ALPHA`) makes the HUD panel translucent without the pink
-blending artifact.
+return to Python. The pygame window stays as the menu layer — its background
+is filled with a chroma key and made transparent (`LWA_COLORKEY`). While the
+menu is open the window's global alpha (`LWA_ALPHA`) goes to 255, otherwise
+the bright frame underneath bleeds through the panel.
 
 **NR off (bypass).** `F9` does not stop the pipeline anymore. Frames are
 sent with `FRAME_FLAG_BYPASS`: the worker skips the NGX evaluate and
-presents the raw capture instead. The overlay (picture + HUD) stays alive;
-everything is hidden only on real exit.
+presents the raw capture instead. The overlay stays alive; everything is
+hidden only on real exit.
 
 **Recording path.** Frames are requested from the worker with
-`FRAME_FLAG_WANT_PIXELS` (the same mechanism as screenshots), HUD+watermark
-are drawn onto the frame with `draw_hud_onto()`, then PyAV encodes AV1 NVENC.
+`FRAME_FLAG_WANT_PIXELS` (the same mechanism as screenshots), the open menu
+is drawn onto the frame with `draw_capture_overlay()`, then PyAV encodes
+AV1 NVENC.
 
 Two constraints that look like quirks but are mandatory:
 
@@ -225,8 +245,8 @@ quality-versus-speed tradeoff.
    (`WDA_EXCLUDEFROMCAPTURE`) to prevent the DDA pipeline from feeding on
    itself. NVIDIA App may even refuse to record the desktop while
    NeuralScreen runs ("Python prevents desktop recording"). Use the built-in
-   **Insert** recording instead — it captures the actual NR frame, HUD and
-   watermark included.
+   **Insert** recording instead — it captures the actual NR frame, with the
+   menu on it if the menu is open.
 3. **Work resolution is capped at 2560×1440** (NGX feature 18 constraint).
 4. **End-to-end latency is 40–60 ms** — inherent to capture → NGX → present
    chains; visible when dragging windows.

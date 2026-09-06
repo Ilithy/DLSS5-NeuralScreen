@@ -10,9 +10,24 @@ extra = [
     "native/nvngx.dll",
     "native/nvngx_dlssnr.dll",
 ]
+# tcl/tk в архив не кладём: окно настроек на tkinter убрано, интерфейс
+# целиком живёт в оверлейном меню. Ничего из проекта tkinter не импортирует
+# (PIL/_tkinter_finder тянет его лениво и только для ImageTk).
+TK_SKIP = ("runtime/tcl/", "runtime/tcl86t.dll", "runtime/tk86t.dll",
+           "runtime/_tkinter.pyd", "runtime/Lib/tkinter/")
+
+
+def _skip(path: str) -> bool:
+    norm = path.replace("\\", "/")
+    return any(norm == p or norm.startswith(p) for p in TK_SKIP)
+
+
 for root, _dirs, fs in os.walk("runtime"):
     for f in fs:
-        extra.append(os.path.join(root, f))
+        path = os.path.join(root, f)
+        if _skip(path):
+            continue
+        extra.append(path)
 
 seen = set()
 uniq = []

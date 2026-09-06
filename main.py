@@ -78,7 +78,10 @@ from display import Display
 from guides import TemporalGuideGenerator
 from hotkeys import HotkeyController, describe as describe_hotkeys
 from recorder import VideoRecorder
-from settings_ui import SettingsWindow, STRINGS as UI_STRINGS
+from i18n import STRINGS as UI_STRINGS
+
+# Страница проекта: README, хоткеи, требования. Открывается кнопкой в меню.
+REPO_URL = "https://github.com/perseval-BLR/DLSS5-NeuralScreen"
 from tray import TrayController
 
 # --- Протокол воркера (совпадает с dlss5_converter/core.py) --------------
@@ -869,7 +872,6 @@ def main() -> int:
     worker_stop: threading.Event | None = None
     shm: SharedFrameBuffer | None = None
     display: Display | None = None
-    settings: SettingsWindow | None = None
     try:
         # Воркер и guides работают на work-разрешении (NGX feature создаётся
         # по размерам заголовка; guides.assert требует совпадения размеров)
@@ -891,6 +893,15 @@ def main() -> int:
 
         display = Display(width, height, fullscreen=bool(cfg["fullscreen"]))
         display.set_lang(lang)
+        # Программа рисует поверх рабочего стола и сама по себе никак себя не
+        # проявляет — без этого после запуска непонятно, работает она или нет.
+        startup_menu = bool(cfg.get("open_menu_on_start", True))
+        startup_pending = True
+        # Размер и положение меню — как их оставил пользователь.
+        display.menu.set_user_scale(float(cfg.get("menu_scale", 1.0)))
+        saved_offset = cfg.get("menu_offset")
+        if isinstance(saved_offset, (list, tuple)) and len(saved_offset) == 2:
+            display.menu.offset = [int(saved_offset[0]), int(saved_offset[1])]
         print(f"[main] Окно вывода {display.width}x{display.height}")
 
         # Трей-иконка: команды в очередь, main-цикл их читает
@@ -913,19 +924,9 @@ def main() -> int:
             print(f"[main] Хоткеи заняты другой программой: {', '.join(hotkeys.failed)}",
                   file=sys.stderr)
 
-        # Окно настроек (tkinter в отдельном потоке, как трей)
-        settings_commands: queue.Queue = queue.Queue()
-        settings = SettingsWindow(settings_commands, initial={
-            "work_scale": work_scale,
-            "profile": cfg["profile"],
-            "profiles": list(PROFILES),
-            "params": {k: params[k] for k in ("intensity", "local_tone", "local_structure", "skin_structure")},
-            "lang": lang,
-            "screen_w": width,
-            "screen_h": height,
-        })
-        settings.start()
-        print("[main] Окно настроек готово (F8)")
+        # Настройки живут в оверлейном меню (F8). Отдельного окна больше
+        # нет: оно было вторым интерфейсом с теми же полями, воровало фокус
+        # у игры и тянуло за собой весь tcl/tk в runtime.
 
         guides = TemporalGuideGenerator(work_w, work_h)
 
@@ -962,7 +963,17 @@ def main() -> int:
         last_perf_log = time.monotonic()
 
         def _save_screenshot(path: Path, rgba) -> None:
-            """Сохранить кадр в JPEG максимального качества."""
+            """Сохранить кадр в JPEG максимального качества.
+
+            Открытое меню попадает в скриншот: наш слой исключён из
+            захвата, поэтому его рисуем на кадр сами.
+            """
+            try:
+                surf = pygame.image.frombuffer(
+                    rgba, (rgba.shape[1], rgba.shape[0]), "RGBX")
+                display.draw_capture_overlay(surf)
+            except Exception as exc:
+                print(f"[main] Меню на скриншот не легло: {exc}", file=sys.stderr)
             try:
                 import cv2 as _cv2
                 path.parent.mkdir(parents=True, exist_ok=True)
@@ -1055,7 +1066,7 @@ def main() -> int:
             new_w, new_h = _work_size(width, height, work_scale)
             new_full_w = width if (new_w != width or new_h != height) else 0
             new_full_h = height if (new_w != width or new_h != height) else 0
-            print(f"[main] apply_settings: профиль {new_profile!r}, "
+            print(f"[main] Применяю: профиль {new_profile!r}, "
                   f"work_scale {work_scale:.2f} ({new_w}x{new_h}), params {params}")
             display.alert(UI_STRINGS[lang]["settings_applied"])
 
@@ -1225,11 +1236,100 @@ def main() -> int:
             dda_attempted = False
             gray_active = False
 
+        def _save_menu_layout() -> None:
+            """Запомнить размер и положение панели в config.json.
+
+            Пишем на закрытии меню и на выходе, а не на каждое движение мыши:
+            перетаскивание иначе молотило бы файл десятки раз в секунду.
+            """
+            try:
+                data = json.loads(args.config.read_text(encoding="utf-8"))
+                data["menu_scale"] = round(display.menu.user_scale, 2)
+                data["open_menu_on_start"] = startup_menu
+                data["menu_offset"] = [int(display.menu.offset[0]),
+                                       int(display.menu.offset[1])]
+                args.config.write_text(
+                    json.dumps(data, ensure_ascii=False, indent=2) + "\n",
+                    encoding="utf-8")
+            except Exception as exc:
+                print(f"[main] Не удалось сохранить вид меню: {exc}", file=sys.stderr)
+
+        def _menu_payload() -> dict:
+            """Текущее состояние для меню — один источник правды."""
+            return {
+                "nr": not paused,
+                "work_scale": work_scale,
+                "profile": cfg["profile"],
+                "profiles": list(PROFILES),
+                "params": {k: params[k] for k in
+                           ("intensity", "local_tone",
+                            "local_structure", "skin_structure")},
+                "lang": lang,
+                "recording": recorder is not None,
+                "work_size": f"{work_w}x{work_h}",
+                "rec_seconds": (recorder.duration_ms / 1000.0) if recorder else 0.0,
+                "open_on_start": startup_menu,
+            }
+
+        def _apply_menu_action(action: tuple) -> None:
+            """Действие из меню -> реальная настройка.
+
+            Меню ничего не меняет само: оно сообщает, чего хочет пользователь,
+            а решение принимается здесь, там же где живут params и cfg.
+            """
+            nonlocal lang, running, startup_menu
+            kind = action[0]
+            if kind == "nr":
+                tray_commands.put("toggle")
+            elif kind == "toggle" and action[1] == "open_on_start":
+                startup_menu = not startup_menu
+                _save_menu_layout()
+                print(f"[main] Меню при запуске: {'да' if startup_menu else 'нет'}")
+            elif kind == "param":
+                new_params = dict(params)
+                new_params[action[1]] = float(action[2])
+                request_apply(work_scale, cfg["profile"], new_params)
+            elif kind == "profile":
+                request_apply(work_scale, action[1], dict(PROFILES[action[1]]))
+            elif kind == "lang":
+                if action[1] in UI_STRINGS and action[1] != lang:
+                    lang = action[1]
+                    display.set_lang(lang)
+                    display.menu.set_state({"lang": lang})
+                    print(f"[main] Язык интерфейса -> {lang}")
+            elif kind == "theme":
+                print(f"[main] Тема меню -> {action[1]}")
+            elif kind == "button":
+                name = action[1]
+                if name == "close":
+                    display.menu.visible = False
+                    display.set_menu_opaque(False)
+                    display.set_menu_input(False)
+                    _save_menu_layout()
+                elif name == "exit":
+                    print(f"[main] Выход: кнопка в меню оверлея "
+                          f"(кадров обработано {frame_index})")
+                    running = False
+                elif name == "record":
+                    tray_commands.put("record")
+                elif name == "screenshot":
+                    tray_commands.put("screenshot_menu")
+                elif name == "github":
+                    # Хоткеи, профили и требования описаны только в README —
+                    # из самой программы про них узнать было неоткуда.
+                    try:
+                        import webbrowser
+                        webbrowser.open(REPO_URL)
+                        display.alert(UI_STRINGS[lang]["github_opened"])
+                    except Exception as exc:
+                        print(f"[main] Не удалось открыть {REPO_URL}: {exc}",
+                              file=sys.stderr)
+
         def request_apply(new_scale: float, new_profile: str, new_params: dict) -> None:
             """Применить настройки с coalescing по RESTART_COOLDOWN.
 
             Единая точка для окна настроек, трея и хоткеев: раньше проверку
-            кулдауна делал только apply_settings, а трей и стрелки звали
+            кулдауна делал только путь настроек, а трей и стрелки звали
             _do_restart напрямую — автоповтор стрелки давал шквал RNSZ.
             """
             nonlocal pending_apply
@@ -1239,51 +1339,6 @@ def main() -> int:
                       f"применится последнее значение")
             else:
                 _do_restart(new_scale, new_profile, new_params)
-
-        def apply_settings(payload: dict) -> None:
-            """Применить настройки из окна: work_scale/профиль/параметры/язык.
-
-            Смена work_scale или профиля/параметров требует рестарта воркера
-            (NGX feature создаётся по заголовку). Защита от быстрых изменений:
-            если рестарт был < RESTART_COOLDOWN назад — откладываем применение
-            (coalescing: применяется только последнее значение).
-            """
-            nonlocal lang  # остальное меняют _do_restart / request_apply
-            new_scale = float(payload.get("work_scale", work_scale))
-            new_scale = min(WORK_SCALE_MAX, max(WORK_SCALE_MIN, new_scale))
-            new_profile = payload.get("profile") or cfg["profile"]
-            if new_profile not in PROFILES:
-                new_profile = cfg["profile"]
-            # Параметры НОВОГО профиля как база (не текущие params — иначе
-            # при смене профиля остаются старые значения слайдеров)
-            new_params = dict(PROFILES[new_profile])
-            for key in ("intensity", "local_tone", "local_structure", "skin_structure"):
-                if key in (payload.get("params") or {}):
-                    new_params[key] = float(payload["params"][key])
-            new_lang = payload.get("lang", lang)
-            if new_lang not in UI_STRINGS:
-                new_lang = lang
-
-            scale_changed = abs(new_scale - work_scale) > 1e-6
-            params_changed = (new_profile != cfg["profile"]
-                              or any(abs(new_params[k] - params[k]) > 1e-6
-                                     for k in ("intensity", "local_tone", "local_structure", "skin_structure")))
-            lang_changed = new_lang != lang
-
-            if scale_changed or params_changed:
-                request_apply(new_scale, new_profile, new_params)
-            if lang_changed:
-                lang = new_lang
-                print(f"[main] Язык интерфейса -> {lang}")
-                display.set_lang(lang)
-                display.alert(UI_STRINGS[lang]["settings_applied"])
-            settings.sync({
-                "nr": not paused,
-                "work_scale": work_scale,
-                "profile": cfg["profile"],
-                "params": {k: params[k] for k in ("intensity", "local_tone", "local_structure", "skin_structure")},
-                "lang": lang,
-            })
 
         while running:
             loop_start = time.perf_counter()
@@ -1298,9 +1353,15 @@ def main() -> int:
                               f"(кадров обработано {frame_index})")
                         running = False
                     elif cmd == "settings":
-                        # Левый клик по иконке трея (default action) — открыть настройки
-                        settings.toggle()
-                        print(f"[main] Окно настроек {'открыто' if settings.is_visible() else 'закрыто'}")
+                        # F8 и левый клик по трею открывают меню в оверлее —
+                        # единственное место, где живут настройки.
+                        display.menu.set_state(_menu_payload())
+                        opened = display.menu.toggle()
+                        display.set_menu_opaque(opened)
+                        display.set_menu_input(opened)
+                        if not opened:
+                            _save_menu_layout()
+                        print(f"[main] Меню в оверлее {'открыто' if opened else 'закрыто'}")
                     elif cmd == "toggle":
                         paused = not paused
                         if not paused:
@@ -1308,6 +1369,20 @@ def main() -> int:
                         print(f"[main] NR {'OFF (bypass NGX)' if paused else 'ON'}")
                         display.alert(UI_STRINGS[lang]["nr_off" if paused else "nr_on"])
                         tray._set_state(nr=not paused)
+                    elif cmd == "screenshot_menu":
+                        # Диалог «Сохранить как» увёл бы фокус с оверлея,
+                        # поэтому кладём в screenshots/ с меткой времени.
+                        shot_dir = BASE_DIR / "screenshots"
+                        shot_dir.mkdir(exist_ok=True)
+                        stamp = time.strftime("%Y%m%d-%H%M%S")
+                        shot_path = shot_dir / f"neuralscreen-{stamp}.jpg"
+                        if present_mode:
+                            pending_shot = shot_path
+                            print(f"[main] Скриншот со следующего кадра: {shot_path}")
+                        elif output_rgba is not None:
+                            _save_screenshot(shot_path, output_rgba)
+                        else:
+                            display.alert("No frame yet")
                     elif cmd == "record":
                         # Insert: запись NR-кадра в MP4. Кадры запрашиваем у
                         # воркера через FRAME_FLAG_WANT_PIXELS (механизм
@@ -1337,10 +1412,6 @@ def main() -> int:
                                   f"({recorder.written} кадров, {secs:.1f}с)")
                             display.alert(UI_STRINGS[lang]["record_off"])
                             recorder = None
-                        # Кнопка в настройках меняет подпись сразу при нажатии;
-                        # тут отдаём ФАКТИЧЕСКОЕ состояние — если запись не
-                        # завелась, подпись вернётся на «Запись».
-                        settings.sync({"recording": recorder is not None})
                     elif cmd in ("scale_up", "scale_down"):
                         delta = WORK_SCALE_STEP if cmd == "scale_up" else -WORK_SCALE_STEP
                         new_scale = min(WORK_SCALE_MAX, max(WORK_SCALE_MIN, work_scale + delta))
@@ -1349,81 +1420,6 @@ def main() -> int:
                             print(f"[main] work_scale -> {new_scale:.2f} ({new_w}x{new_h})")
                             display.alert(UI_STRINGS[lang]["work_scale_changed"].format(new_scale, new_w, new_h))
                             request_apply(new_scale, cfg["profile"], params)
-                            settings.sync({"work_scale": new_scale, "lang": lang})
-            except queue.Empty:
-                pass
-
-            # Команды из окна настроек (tkinter-поток)
-            try:
-                while True:
-                    cmd = settings_commands.get_nowait()
-                    if isinstance(cmd, tuple) and cmd[0] == "apply_settings":
-                        apply_settings(cmd[1])
-                    elif isinstance(cmd, tuple) and cmd[0] == "screenshot":
-                        # Путь — из диалога «Сохранить как» в настройках.
-                        shot_path = Path(cmd[1]) if len(cmd) > 1 and cmd[1] else None
-                        if shot_path is None:
-                            shot_dir = BASE_DIR / "screenshots"
-                            shot_dir.mkdir(exist_ok=True)
-                            stamp = time.strftime("%Y%m%d-%H%M%S")
-                            shot_path = shot_dir / f"neuralscreen-{stamp}.jpg"
-                        if present_mode:
-                            # Кадр рисует воркер, в Python пикселей нет —
-                            # просим их у следующего кадра (FRAME_FLAG_WANT_PIXELS)
-                            pending_shot = shot_path
-                            print(f"[main] Скриншот со следующего кадра: {shot_path}")
-                        elif output_rgba is None:
-                            print("[main] Скриншот: кадра ещё нет "
-                                  "(NR не выдал ни одного)", file=sys.stderr)
-                            display.alert("No frame yet")
-                        else:
-                            _save_screenshot(shot_path, output_rgba)
-                    elif isinstance(cmd, tuple) and cmd[0] == "toggle_nr":
-                        # NR ON/OFF из окна настроек (чекбокс) — мгновенно
-                        want_on = bool(cmd[1])
-                        if want_on == paused:
-                            paused = not paused
-                            if not paused:
-                                work_frame = None  # свежий захват после паузы
-                            print(f"[main] NR {'OFF (пауза NGX)' if paused else 'ON'} (настройки)")
-                            display.alert(UI_STRINGS[lang]["nr_off" if paused else "nr_on"])
-                            tray._set_state(nr=not paused)
-                            if not paused:
-                                display.set_visible(True)
-                    elif isinstance(cmd, tuple) and cmd[0] == "record":
-                        # Кнопка в настройках — та же команда, что Insert.
-                        # Пересылаем в очередь трея, где живёт обработчик.
-                        tray_commands.put("record")
-                    elif isinstance(cmd, tuple) and cmd[0] == "exit_app":
-                        print(f"[main] Выход: кнопка в окне настроек "
-                              f"(кадров обработано {frame_index})")
-                        running = False
-                    elif isinstance(cmd, tuple) and cmd[0] == "set_lang":
-                        new_lang = cmd[1]
-                        if new_lang in UI_STRINGS and new_lang != lang:
-                            lang = new_lang
-                            print(f"[main] Язык интерфейса -> {lang}")
-                            display.set_lang(lang)
-                            display.alert(UI_STRINGS[lang]["settings_applied"])
-                    elif cmd == "settings_opened":
-                        settings.sync({
-                            "nr": not paused,
-                            "work_scale": work_scale,
-                            "profile": cfg["profile"],
-                            "params": {k: params[k] for k in ("intensity", "local_tone", "local_structure", "skin_structure")},
-                            "lang": lang,
-                        })
-                    elif cmd == "settings_closed":
-                        # После закрытия меню (tkinter был topmost) HUD-слой
-                        # pygame мог потерять colorkey-прозрачность (окно
-                        # непрозрачное, HUD не виден) и оказаться под окном
-                        # воркера. Восстанавливаем оба свойства.
-                        if present_mode:
-                            display.refresh_colorkey()
-                            try:
-                                display.raise_topmost()
-                            except Exception:
-                                pass
             except queue.Empty:
                 pass
 
@@ -1434,8 +1430,6 @@ def main() -> int:
                 pending_apply = None
                 print("[main] Применяю отложенные настройки")
                 _do_restart(p_scale, p_profile, p_params)
-                settings.sync({"work_scale": work_scale, "profile": cfg["profile"],
-                               "lang": lang})
 
             if not running:
                 break
@@ -1455,6 +1449,17 @@ def main() -> int:
             if want_motion_small and not motion_small and not motion_attempted:
                 motion_attempted = True
                 _sync_motion_size()
+
+            # --- Ввод в меню оверлея ---------------------------------
+            # События читаем только когда меню открыто: в остальное время
+            # окно click-through, событий нет, а лишний get() съедал бы
+            # очередь у pump() внутри отрисовки.
+            if display.menu.visible:
+                for ev in pygame.event.get():
+                    for action in display.menu.handle_event(ev):
+                        _apply_menu_action(action)
+                if not display.menu.dragging:
+                    display.menu.set_state(_menu_payload())
 
             # --- Захват вперёд: пока NGX считает кадр N, захватываем N+1 ---
             # work_frame == None бывает: первый кадр, после рестарта воркера
@@ -1599,17 +1604,16 @@ def main() -> int:
             t0 = time.perf_counter()
             try:
                 if recorder is not None and output_rgba is not None:
-                    # HUD-слой pygame исключён из захвата (WDA_EXCLUDEFROM
-                    # CAPTURE), поэтому в запись он не попадает — накладываем
-                    # HUD+водяной знак прямо на кадр перед энкодером.
+                    # Наш слой исключён из захвата (WDA_EXCLUDEFROM
+                    # CAPTURE), поэтому открытое меню кладём на кадр сами.
                     # frombuffer ссылается на numpy-буфер (без копии):
                     # blit пишет прямо в output_rgba.
                     try:
                         surf = pygame.image.frombuffer(
                             output_rgba, (output_rgba.shape[1], output_rgba.shape[0]), "RGBX")
-                        display.draw_hud_onto(surf)
-                    except Exception as hud_exc:
-                        print(f"[main] HUD-наложение на кадр не удалось: {hud_exc}",
+                        display.draw_capture_overlay(surf)
+                    except Exception as menu_exc:
+                        print(f"[main] Меню на кадр записи не легло: {menu_exc}",
                               file=sys.stderr)
                     recorder.write(output_rgba)
                 if present_mode:
@@ -1640,6 +1644,12 @@ def main() -> int:
                     pass
                 display = Display(width, height, fullscreen=bool(cfg["fullscreen"]))
                 display.set_lang(lang)
+                # Меню создаётся вместе с окном — возвращаем ему размер и
+                # положение, иначе после запуска игры оно прыгает в центр.
+                display.menu.set_user_scale(float(cfg.get("menu_scale", 1.0)))
+                saved = cfg.get("menu_offset")
+                if isinstance(saved, (list, tuple)) and len(saved) == 2:
+                    display.menu.offset = [int(saved[0]), int(saved[1])]
                 if present_mode:
                     # Новое окно снова должно стать прозрачным слоем поверх воркера
                     display.set_hud_only(True)
@@ -1656,6 +1666,18 @@ def main() -> int:
             })
 
             frame_index += 1
+            if startup_pending and frame_index >= 2:
+                # Ждём первый показанный кадр: открытое меню поверх ещё не
+                # заполненного окна мигает чёрным.
+                startup_pending = False
+                if startup_menu:
+                    display.menu.set_state(_menu_payload())
+                    display.menu.visible = True
+                    display.set_menu_opaque(True)
+                    display.set_menu_input(True)
+                    print("[main] Меню открыто при запуске")
+                else:
+                    display.alert(UI_STRINGS[lang]["started"], 3.5)
             work_frame = next_frame  # None → захват в начале следующей итерации
             fps_window.append(time.perf_counter() - loop_start)
             if len(fps_window) > 120:
@@ -1694,6 +1716,10 @@ def main() -> int:
             shutdown_worker(worker, worker_stop)
         if shm is not None:
             shm.close()
+        try:
+            _save_menu_layout()
+        except Exception:
+            pass
         if capture is not None:
             try:
                 capture.close()
@@ -1710,10 +1736,6 @@ def main() -> int:
             pass
         try:
             tray.stop()
-        except Exception:
-            pass
-        try:
-            settings.stop()
         except Exception:
             pass
         print("[main] Ресурсы освобождены")

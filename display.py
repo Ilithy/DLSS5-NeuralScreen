@@ -25,7 +25,7 @@ import os
 import sys
 import time
 from ctypes import wintypes
-from typing import Dict, List, Optional
+from typing import Dict, List
 
 # --- argtypes для user32: БЕЗ них ctypes передаёт int как 32-битный c_int.
 # HWND_TOPMOST=-1 превращается в 0xFFFFFFFF вместо 0xFFFFFFFFFFFFFFFF и
@@ -63,15 +63,13 @@ except Exception:
 import numpy as np
 import pygame
 
-from settings_ui import STRINGS
+from overlay_ui import OverlayMenu, palette as ui_palette
+
+from i18n import STRINGS
 
 # --- Brand palette (DLSS5-Video-Converter) -------------------------------
 BG_COLOR = (0x0D, 0x11, 0x17)      # #0D1117 dark background
 BG_ALPHA = 235                     # HUD panel translucency (почти непрозрачный — текст не сливается)
-ACCENT = (0xFF, 0xBF, 0x00)        # #FFBF00 amber accent
-TEXT_COLOR = (0xE6, 0xED, 0xF3)    # #E6EDF3 light text
-MUTED_COLOR = (0x8B, 0x94, 0x9E)   # #8B949E muted gray
-
 WDA_EXCLUDEFROMCAPTURE = 0x00000011
 
 # Цвет-ключ прозрачности для HUD-режима: пиксели ровно этого цвета layered-окно
@@ -82,10 +80,23 @@ LWA_COLORKEY = 0x1
 LWA_ALPHA = 0x2
 
 FONT_NAME = "consolas"
+# Базовые размеры вёрстки заданы для 1440p. На экранах выше интерфейс
+# масштабируется, ниже — остаётся как есть: уменьшать уже некуда, текст
+# станет нечитаемым. Отсюда правило «только вверх» (см. ui_scale).
 FONT_SIZE = 18
-HUD_PAD = 16
-HUD_LINE_H = 24
-HUD_PANEL_W = 340
+UI_BASE_HEIGHT = 1800
+ALERT_FONT_SIZE = 28
+
+
+def ui_scale_for(height: int) -> float:
+    """Множитель интерфейса по высоте экрана.
+
+    Только вверх: на 1800p и ниже — 1.0, на 4K — 1.2. Пропорциональное
+    уменьшение на 1080p сделало бы шрифт девятипиксельным, поэтому вниз не
+    масштабируем. База поднята с 1440 до 1800 — на 1.5 интерфейс выходил
+    крупноват.
+    """
+    return max(1.0, float(height) / UI_BASE_HEIGHT)
 
 
 class Display:
@@ -135,12 +146,16 @@ class Display:
         self.clock = pygame.time.Clock()
         self._hud: Dict = {}
         self._alerts: List[tuple[str, float]] = []  # (текст, expires_at)
-        self._font = self._load_font()
-        self._alert_font = self._load_font(size=28)
-        # Кэш HUD: (hud_dict, panel_surface, [(text_surf, x, y), ...]).
-        # Текстовые поверхности рендерятся ТОЛЬКО при изменении данных —
-        # font.render на каждый кадр дорог (4K-цикл ~18-20 мс/кадр).
-        self._hud_cache: Optional[tuple] = None
+        # Масштаб интерфейса и производные от него размеры вёрстки.
+        self.ui_scale = ui_scale_for(self.height)
+        self.font_size = max(8, int(round(FONT_SIZE * self.ui_scale)))
+        # Меню настроек живёт в этом же слое. Отдельное окно поверх игры
+        # воровало бы фокус и дралось за topmost, а тут мы уже поверх кадра
+        # и уже прозрачны по ключу.
+        self.menu = OverlayMenu(self.ui_scale, self._load_font)
+        self._font = self._load_font(size=self.font_size)
+        self._alert_font = self._load_font(
+            size=max(10, int(round(ALERT_FONT_SIZE * self.ui_scale))))
         # Отключаем vsync: flip() не должен ждать vblank (иначе FPS привязан
         # к частоте монитора и теряются кадры на медленном конвейере).
         try:
@@ -157,22 +172,37 @@ class Display:
         self._hud_only = False
         self._last_overlay = 0.0
         self._last_alert_count = 0
-        # Водяной знак: название + канал — под HUD-панелью (см. _draw_watermark).
-        # Фон запекается только в HUD-режиме (см. set_hud_only) — там края
-        # 18px-шрифта иначе блендятся с magenta-фоном и дают розовизну.
-        self._watermark = self._load_font(size=18).render(
-            "NeuralScreen · @perseval_BLR", True, (0xFF, 0xBF, 0x00))
-        # Версия БЕЗ запечённого фона — для наложения на записываемый кадр
-        # (draw_hud_onto): там нет CHROMA_KEY, плашка не нужна.
-        self._watermark_plain = self._load_font(size=18).render(
-            "NeuralScreen · @perseval_BLR", True, (0xFF, 0xBF, 0x00))
-        self._hud_panel_h = HUD_PAD * 2 + 6 * HUD_LINE_H  # высота HUD-панели (обновляется в _draw_hud)
+
+    def _sync_cursor(self) -> None:
+        """Курсор под зоной меню: стрелки перемещения и растягивания.
+
+        Ставим только при смене — set_cursor на каждом кадре заметно
+        мигает курсором.
+        """
+        want = (self.menu.desired_cursor if self.menu.visible
+                else pygame.SYSTEM_CURSOR_ARROW)
+        if want == getattr(self, "_cursor", None):
+            return
+        self._cursor = want
+        try:
+            pygame.mouse.set_cursor(want)
+        except Exception:
+            pass
+
+    @property
+    def theme(self) -> dict:
+        """Палитра темы меню — алерты держим в том же виде."""
+        return ui_palette(self.menu.state.get("theme", "light"))
+
+    @staticmethod
+    def _rgb(color: str) -> tuple[int, int, int]:
+        c = color.lstrip("#")
+        return int(c[0:2], 16), int(c[2:4], 16), int(c[4:6], 16)
 
     def set_lang(self, lang: str) -> None:
         """Сменить язык HUD-статуса (en/ru)."""
         if lang in STRINGS and lang != self._lang:
             self._lang = lang
-            self._hud_cache = None  # инвалидация кэша: статус рендерится заново
 
     def set_visible(self, visible: bool) -> None:
         """Показать/скрыть окно (SW_SHOW/SW_HIDE).
@@ -285,6 +315,59 @@ class Display:
 
     # -- public API -------------------------------------------------------
 
+    def set_menu_input(self, enabled: bool) -> None:
+        """Пропускать ли ввод в наш слой (пока открыто меню).
+
+        Обычно окно click-through: WS_EX_TRANSPARENT отдаёт клики тому, что
+        под ним. На время меню флаг снимается — клики достаются нам, а игра
+        под оверлеем их не получает. Ровно поведение ReShade.
+        WS_EX_NOACTIVATE снимаем тоже, иначе не будет клавиатуры.
+        """
+        try:
+            hwnd = pygame.display.get_wm_info()["window"]
+        except Exception as exc:
+            print(f"Display: WARNING нет hwnd для ввода в меню: {exc}")
+            return
+        GWL_EXSTYLE = -20
+        WS_EX_TRANSPARENT = 0x00000020
+        WS_EX_NOACTIVATE = 0x08000000
+        SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SWP_FRAMECHANGED = 0x2, 0x1, 0x4, 0x20
+        style = user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
+        if enabled:
+            style &= ~(WS_EX_TRANSPARENT | WS_EX_NOACTIVATE)
+        else:
+            style |= WS_EX_TRANSPARENT | WS_EX_NOACTIVATE
+        user32.SetWindowLongW(hwnd, GWL_EXSTYLE, style)
+        user32.SetWindowPos(hwnd, 0, 0, 0, 0, 0,
+                            SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED)
+        if enabled:
+            # Фокус нужен для клавиатуры. Мышь работает и без него — клик
+            # уходит окну под курсором, раз оно больше не прозрачное.
+            try:
+                user32.SetForegroundWindow(hwnd)
+                user32.SetActiveWindow(hwnd)
+            except Exception:
+                pass
+        self._click_through = not enabled
+
+    def set_menu_opaque(self, opaque: bool) -> None:
+        """Убрать глобальную полупрозрачность окна, пока открыто меню.
+
+        Слой живёт с альфой BG_ALPHA, чтобы HUD не залеплял картинку. Но
+        панель меню почти чёрная, и сквозь неё просвечивает яркий кадр —
+        читается как «слишком прозрачное». На время меню ставим 255.
+        """
+        if not self._hud_only:
+            return
+        try:
+            hwnd = pygame.display.get_wm_info()["window"]
+        except Exception:
+            return
+        r, g, b = CHROMA_KEY
+        key = (b << 16) | (g << 8) | r
+        alpha = 255 if opaque else BG_ALPHA
+        user32.SetLayeredWindowAttributes(hwnd, key, alpha, LWA_COLORKEY | LWA_ALPHA)
+
     def set_hud_only(self, enabled: bool, force: bool = False) -> None:
         """HUD-режим: кадр рисует воркер в своём окне, тут остаётся только HUD.
 
@@ -320,19 +403,6 @@ class Display:
         if not ok:
             print(f"Display: WARNING SetLayeredWindowAttributes failed "
                   f"(HUD-режим {'вкл' if enabled else 'выкл'})")
-        # В HUD-режиме фоном текста обязан быть BG_COLOR (не magenta-фон):
-        # антиалиасинг-края смешиваются с ним, а не с CHROMA_KEY. В обычном
-        # режиме фон не нужен — поверхность кладётся на кадр.
-        try:
-            self._watermark = self._load_font(size=18).render(
-                "NeuralScreen · @perseval_BLR", True, (0xFF, 0xBF, 0x00),
-                BG_COLOR if enabled else None)
-            # plain-версия не зависит от режима: всегда без фона (запись)
-            self._watermark_plain = self._load_font(size=18).render(
-                "NeuralScreen · @perseval_BLR", True, (0xFF, 0xBF, 0x00))
-        except Exception:
-            pass
-        self._hud_cache = None  # панель строится с разной прозрачностью в HUD-режиме
         self._last_overlay = 0.0  # ближайший draw_overlay перерисует немедленно
 
     def raise_topmost(self) -> None:
@@ -363,18 +433,27 @@ class Display:
         key = (b << 16) | (g << 8) | r
         user32.SetLayeredWindowAttributes(hwnd, key, BG_ALPHA, LWA_COLORKEY | LWA_ALPHA)
 
-    def draw_hud_onto(self, surface: pygame.Surface) -> None:
-        """Нарисовать HUD + водяной знак на произвольную поверхность.
+    def draw_capture_overlay(self, surface: pygame.Surface) -> None:
+        """Наложить открытое меню на кадр записи или скриншота.
 
-        Используется для записи: кадр записывается БЕЗ pygame-слоя (он
-        исключён из захвата через WDA_EXCLUDEFROMCAPTURE, иначе DDA снимал
-        бы наш же вывод), поэтому HUD и водяной знак накладываются на кадр
-        в Python перед отдачей энкодеру. Панель — ПОЛУпрозрачная, водяной
-        знак — без запечённого фона: на кадре нет CHROMA_KEY, и розовизна
-        от бленда с magenta исключена.
+        Кадр снимается БЕЗ нашего pygame-слоя: окно помечено
+        WDA_EXCLUDEFROMCAPTURE, иначе DDA снимал бы собственный вывод.
+        Поэтому всё, что должно попасть в файл, рисуется здесь, поверх
+        уже полученных пикселей.
+
+        Пекём только меню. HUD и водяной знак раньше запекались, но на
+        экране их нет — в файле они выглядели как чужая надпись.
         """
-        self._draw_hud(target=surface, alpha=BG_ALPHA)
-        self._draw_watermark(target=surface, baked=False)
+        if not self.menu.visible:
+            return
+        # Подсветка «взялся за край» — состояние курсора, в файле ей не
+        # место: она бы застыла на кадре без видимой причины.
+        hover, self.menu.hover = self.menu.hover, None
+        try:
+            self.menu.set_stats(self._hud)
+            self.menu.draw(surface)
+        finally:
+            self.menu.hover = hover
 
     def draw_overlay(self, min_interval: float = 0.1) -> None:
         """Перерисовать HUD поверх кадра, который показывает воркер.
@@ -389,14 +468,19 @@ class Display:
             pass
         now = time.monotonic()
         alerts = len(self._alerts)
+        # С открытым меню троттлинг выключаем: 10 Гц хватает статике HUD,
+        # но ползунок под мышью на такой частоте дёргается.
+        if self.menu.visible:
+            min_interval = 0.0
         if now - self._last_overlay < min_interval and alerts == self._last_alert_count:
             return
         self._last_overlay = now
         self._last_alert_count = alerts
         self.screen.fill(CHROMA_KEY)
-        self._draw_hud()
-        self._draw_watermark()
         self._draw_alerts()
+        self.menu.set_stats(self._hud)
+        self.menu.draw(self.screen)
+        self._sync_cursor()
         pygame.display.flip()
 
     def set_hud(self, data: dict) -> None:
@@ -438,9 +522,10 @@ class Display:
                 "RGBA")
         # Один blit+flip для обоих путей (основной RGBX и фолбэк RGBA)
         self.screen.blit(surface, (0, 0))
-        self._draw_hud()
-        self._draw_watermark()
         self._draw_alerts()
+        self.menu.set_stats(self._hud)
+        self.menu.draw(self.screen)
+        self._sync_cursor()
         pygame.display.flip()
 
     def poll_events(self) -> List[str]:
@@ -461,119 +546,31 @@ class Display:
 
     # -- HUD --------------------------------------------------------------
 
-    def _draw_watermark(self, target: pygame.Surface | None = None, baked: bool = True) -> None:
-        """Водяной знак: NeuralScreen · @perseval_BLR — сразу под HUD-панелью
-        (под счётчиком FRAMES). Высота панели берётся фактическая из _draw_hud.
-
-        baked: True — поверхность с запечённым BG (для HUD-слоя поверх
-        CHROMA_KEY, иначе розовые края). False — без фона (для записи,
-        наложения на кадр: плашка не нужна)."""
-        target = target if target is not None else self.screen
-        try:
-            mark = self._watermark if baked else self._watermark_plain
-            w, h = mark.get_size()
-            y = HUD_PAD + self._hud_panel_h + 8
-            target.blit(mark, (HUD_PAD, y))
-        except Exception:
-            pass
-
     def _draw_alerts(self) -> None:
-        """Всплывающие алерты по центру экрана: тёмная панель + янтарная рамка."""
+        """Всплывающий алерт: палитра меню, сверху по центру.
+
+        Раньше висел на трети высоты по центру тёмной плашкой с янтарной
+        рамкой — выбивался из общего вида и лез в середину кадра.
+        """
         now = time.monotonic()
         self._alerts = [(text, expires) for text, expires in self._alerts if expires > now]
         if not self._alerts:
             return
+        c = self.theme
         text, _ = self._alerts[-1]
-        surf = self._alert_font.render(text, True, ACCENT)
-        pad_x, pad_y = 24, 14
+        surf = self._alert_font.render(text, True, self._rgb(c["text"]))
+        pad_x = int(round(26 * self.ui_scale))
+        pad_y = int(round(14 * self.ui_scale))
         w = surf.get_width() + pad_x * 2
         h = surf.get_height() + pad_y * 2
-        x = (self.width - w) // 2
-        y = self.height // 3
-        panel = pygame.Surface((w, h), pygame.SRCALPHA)
-        # Непрозрачная панель в HUD-режиме — иначе бленд с CHROMA_KEY даёт
-        # розовый оттенок (colorkey не вырезает смешанный цвет).
-        alert_alpha = 255 if self._hud_only else 220
-        panel.fill((*BG_COLOR, alert_alpha))
-        self.screen.blit(panel, (x, y))
-        pygame.draw.rect(self.screen, ACCENT, (x, y, w, h), 2)
-        self.screen.blit(surf, (x + pad_x, y + pad_y))
-
-    def _draw_hud(self, target: pygame.Surface | None = None, alpha: int | None = None) -> None:
-        """Отрисовать HUD-панель. Кэш: тексты рендерятся только при
-        изменении данных (set_hud вызывается каждый кадр, font.render дорог).
-
-        target: куда рисовать (по умолчанию self.screen).
-        alpha: прозрачность панели. По умолчанию 255 в HUD-режиме (иначе
-        бленд с CHROMA_KEY даёт розовизну — colorkey не вырезает смешанный
-        цвет) и BG_ALPHA в обычном. Для НАЛОЖЕНИЯ НА КАДР (запись) передавать
-        BG_ALPHA: там нет magenta-фона, и панель должна быть полупрозрачной.
-        """
-        target = target if target is not None else self.screen
-        if alpha is None:
-            alpha = 255 if self._hud_only else BG_ALPHA
-        hud = self._hud
-        cache = self._hud_cache
-        if cache is not None and cache[0] == hud and cache[3] == alpha:
-            panel, items = cache[1], cache[2]
-        else:
-            panel, items = self._build_hud(hud, panel_alpha=alpha)
-            self._hud_cache = (hud, panel, items, alpha)
-        self._hud_panel_h = panel.get_height()  # фактическая высота — для водяного знака
-        target.blit(panel, (HUD_PAD, HUD_PAD))
-        for surf, x, y in items:
-            target.blit(surf, (x, y))
-
-    def _build_hud(self, hud: Dict, panel_alpha: int | None = None):
-        """Собрать панель HUD: (panel_surface, [(text_surf, x, y), ...])."""
-        lines = []
-        status = hud.get("status", "NR OFF")
-        # Локализация статуса: main передаёт канонические "NR ON"/"NR OFF",
-        # display переводит их через STRINGS[lang]
-        if status == "NR ON":
-            status = STRINGS[self._lang]["nr_on"]
-        elif status == "NR OFF":
-            status = STRINGS[self._lang]["nr_off"]
-        lines.append(("status", status))
-        fps = hud.get("fps")
-        if fps is not None:
-            lines.append(("text", f"FPS      {fps:>6.1f}"))
-        res = hud.get("resolution")
-        if res:
-            lines.append(("text", f"RES      {res}"))
-        profile = hud.get("profile")
-        if profile:
-            lines.append(("text", f"PROFILE  {profile}"))
-        params = hud.get("params") or {}
-        if params:
-            lines.append(("text", "PARAMS"))
-            for key, val in params.items():
-                lines.append(("text", f"  {key:<16} {val}"))
-        frames = hud.get("frames")
-        if frames is not None:
-            lines.append(("text", f"FRAMES   {frames}"))
-
-        panel_w = HUD_PANEL_W
-        panel_h = HUD_PAD * 2 + len(lines) * HUD_LINE_H
-        panel = pygame.Surface((panel_w, panel_h), pygame.SRCALPHA)
-        # В HUD-режиме панель обязана быть НЕпрозрачной: полупрозрачный
-        # бленд с CHROMA_KEY-фоном даёт цвет ≠ key — розовая плашка поверх.
-        # Для записи (наложение на кадр, magenta-фона нет) — BG_ALPHA.
-        if panel_alpha is None:
-            panel_alpha = 255 if self._hud_only else BG_ALPHA
-        panel.fill((*BG_COLOR, panel_alpha))
-
-        items = []
-        y = HUD_PAD + HUD_PAD // 2
-        for kind, text in lines:
-            color = ACCENT if kind == "status" else TEXT_COLOR
-            if kind == "text" and text.startswith("  "):
-                color = MUTED_COLOR
-            surf = self._font.render(text, True, color)
-            items.append((surf, HUD_PAD * 2, y))
-            y += HUD_LINE_H
-        return panel, items
-
+        rect = pygame.Rect((self.width - w) // 2, int(round(self.height * 0.045)), w, h)
+        radius = int(round(10 * self.ui_scale))
+        # Панель непрозрачная: полупрозрачность смешалась бы с цветом-ключом
+        # и дала грязный оттенок (colorkey не вырезает смешанный цвет).
+        pygame.draw.rect(self.screen, self._rgb(c["bg"]), rect, border_radius=radius)
+        pygame.draw.rect(self.screen, self._rgb(c["border"]), rect,
+                         max(1, int(round(self.ui_scale))), border_radius=radius)
+        self.screen.blit(surf, (rect.x + pad_x, rect.y + pad_y))
 
 def main() -> int:
     """Standalone smoke test: gradient frames + HUD until Esc/F9."""
