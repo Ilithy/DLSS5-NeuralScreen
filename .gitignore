@@ -16,5 +16,14 @@ native/nvngx_dlssnr.dll
 # Опциональный локальный Python-рантайм рядом с программой
 runtime/
 
+# Лог программы (pythonw-запуск без консоли)
+NeuralScreen.log
+
+# Записи с Insert
+recordings/
+
+# Старый релизный архив в корне (собирается при релизе заново)
+neuralscreen-alpha-full.zip
+
 # Скриншоты, снятые из окна настроек
 screenshots/

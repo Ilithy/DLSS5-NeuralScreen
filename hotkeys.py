@@ -37,6 +37,7 @@ VK_F9 = 0x78
 VK_UP = 0x26
 VK_DOWN = 0x28
 VK_Q = 0x51
+VK_INSERT = 0x2D
 
 WM_HOTKEY = 0x0312
 WM_QUIT = 0x0012
@@ -49,6 +50,7 @@ BINDINGS = {
     3: (MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, VK_UP, "scale_up", "Ctrl+Alt+Up"),
     4: (MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, VK_DOWN, "scale_down", "Ctrl+Alt+Down"),
     5: (MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, VK_Q, "quit", "Ctrl+Alt+Q"),
+    6: (MOD_NOREPEAT, VK_INSERT, "record", "Insert"),
 }
 
 

@@ -162,6 +162,10 @@ class Display:
         # 18px-шрифта иначе блендятся с magenta-фоном и дают розовизну.
         self._watermark = self._load_font(size=18).render(
             "NeuralScreen · @perseval_BLR", True, (0xFF, 0xBF, 0x00))
+        # Версия БЕЗ запечённого фона — для наложения на записываемый кадр
+        # (draw_hud_onto): там нет CHROMA_KEY, плашка не нужна.
+        self._watermark_plain = self._load_font(size=18).render(
+            "NeuralScreen · @perseval_BLR", True, (0xFF, 0xBF, 0x00))
         self._hud_panel_h = HUD_PAD * 2 + 6 * HUD_LINE_H  # высота HUD-панели (обновляется в _draw_hud)
 
     def set_lang(self, lang: str) -> None:
@@ -281,15 +285,18 @@ class Display:
 
     # -- public API -------------------------------------------------------
 
-    def set_hud_only(self, enabled: bool) -> None:
+    def set_hud_only(self, enabled: bool, force: bool = False) -> None:
         """HUD-режим: кадр рисует воркер в своём окне, тут остаётся только HUD.
 
         Фон заливается CHROMA_KEY и делается прозрачным через
         SetLayeredWindowAttributes(LWA_COLORKEY) — сквозь него виден оверлей
         воркера, а HUD, алерты и водяной знак рисуются поверх как раньше.
         Выключение возвращает обычный непрозрачный режим (LWA_ALPHA).
+        force=True: переприменить атрибуты даже если режим не менялся —
+        z-order-операции (SetWindowPos/TopMost после меню настроек) могут
+        сбросить LWA_COLORKEY, а ранний return оставил бы окно непрозрачным.
         """
-        if enabled == self._hud_only:
+        if enabled == self._hud_only and not force:
             return
         self._hud_only = enabled
         try:
@@ -301,7 +308,13 @@ class Display:
             # COLORREF — это 0x00BBGGRR, а не RGB
             r, g, b = CHROMA_KEY
             key = (b << 16) | (g << 8) | r
-            ok = user32.SetLayeredWindowAttributes(hwnd, key, 255, LWA_COLORKEY | LWA_ALPHA)
+            # Прозрачность панели — через ГЛОБАЛЬНУЮ альфу окна (LWA_ALPHA),
+            # а НЕ через альфу пикселей панели: полупрозрачный бленд SRCALPHA
+            # с magenta-фоном дал бы цвет ≠ key и розовую плашку (colorkey
+            # не вырезает смешанный цвет). Колоркей убирает фон целиком,
+            # а непрозрачная панель (+текст) становится слегка просвечивающей
+            # за счёт глобальной альфы.
+            ok = user32.SetLayeredWindowAttributes(hwnd, key, BG_ALPHA, LWA_COLORKEY | LWA_ALPHA)
         else:
             ok = user32.SetLayeredWindowAttributes(hwnd, 0, 255, LWA_ALPHA)
         if not ok:
@@ -314,6 +327,9 @@ class Display:
             self._watermark = self._load_font(size=18).render(
                 "NeuralScreen · @perseval_BLR", True, (0xFF, 0xBF, 0x00),
                 BG_COLOR if enabled else None)
+            # plain-версия не зависит от режима: всегда без фона (запись)
+            self._watermark_plain = self._load_font(size=18).render(
+                "NeuralScreen · @perseval_BLR", True, (0xFF, 0xBF, 0x00))
         except Exception:
             pass
         self._hud_cache = None  # панель строится с разной прозрачностью в HUD-режиме
@@ -328,6 +344,37 @@ class Display:
         кадром и станет невидим.
         """
         self._set_topmost()
+
+    def refresh_colorkey(self) -> None:
+        """Переприменить LWA_COLORKEY на окне pygame (HUD-слой).
+
+        Нужно после операций, которые могут сбросить layered-атрибуты окна
+        (z-order-перестановки с tkinter-меню настроек: окно остаётся
+        непрозрачным, HUD не виден). Ничего не пересоздаёт — только
+        SetLayeredWindowAttributes, в отличие от set_hud_only(force=True).
+        """
+        if not self._hud_only:
+            return
+        try:
+            hwnd = pygame.display.get_wm_info()["window"]
+        except Exception:
+            return
+        r, g, b = CHROMA_KEY
+        key = (b << 16) | (g << 8) | r
+        user32.SetLayeredWindowAttributes(hwnd, key, BG_ALPHA, LWA_COLORKEY | LWA_ALPHA)
+
+    def draw_hud_onto(self, surface: pygame.Surface) -> None:
+        """Нарисовать HUD + водяной знак на произвольную поверхность.
+
+        Используется для записи: кадр записывается БЕЗ pygame-слоя (он
+        исключён из захвата через WDA_EXCLUDEFROMCAPTURE, иначе DDA снимал
+        бы наш же вывод), поэтому HUD и водяной знак накладываются на кадр
+        в Python перед отдачей энкодеру. Панель — ПОЛУпрозрачная, водяной
+        знак — без запечённого фона: на кадре нет CHROMA_KEY, и розовизна
+        от бленда с magenta исключена.
+        """
+        self._draw_hud(target=surface, alpha=BG_ALPHA)
+        self._draw_watermark(target=surface, baked=False)
 
     def draw_overlay(self, min_interval: float = 0.1) -> None:
         """Перерисовать HUD поверх кадра, который показывает воркер.
@@ -414,13 +461,19 @@ class Display:
 
     # -- HUD --------------------------------------------------------------
 
-    def _draw_watermark(self) -> None:
+    def _draw_watermark(self, target: pygame.Surface | None = None, baked: bool = True) -> None:
         """Водяной знак: NeuralScreen · @perseval_BLR — сразу под HUD-панелью
-        (под счётчиком FRAMES). Высота панели берётся фактическая из _draw_hud."""
+        (под счётчиком FRAMES). Высота панели берётся фактическая из _draw_hud.
+
+        baked: True — поверхность с запечённым BG (для HUD-слоя поверх
+        CHROMA_KEY, иначе розовые края). False — без фона (для записи,
+        наложения на кадр: плашка не нужна)."""
+        target = target if target is not None else self.screen
         try:
-            w, h = self._watermark.get_size()
+            mark = self._watermark if baked else self._watermark_plain
+            w, h = mark.get_size()
             y = HUD_PAD + self._hud_panel_h + 8
-            self.screen.blit(self._watermark, (HUD_PAD, y))
+            target.blit(mark, (HUD_PAD, y))
         except Exception:
             pass
 
@@ -446,22 +499,32 @@ class Display:
         pygame.draw.rect(self.screen, ACCENT, (x, y, w, h), 2)
         self.screen.blit(surf, (x + pad_x, y + pad_y))
 
-    def _draw_hud(self) -> None:
+    def _draw_hud(self, target: pygame.Surface | None = None, alpha: int | None = None) -> None:
         """Отрисовать HUD-панель. Кэш: тексты рендерятся только при
-        изменении данных (set_hud вызывается каждый кадр, font.render дорог)."""
+        изменении данных (set_hud вызывается каждый кадр, font.render дорог).
+
+        target: куда рисовать (по умолчанию self.screen).
+        alpha: прозрачность панели. По умолчанию 255 в HUD-режиме (иначе
+        бленд с CHROMA_KEY даёт розовизну — colorkey не вырезает смешанный
+        цвет) и BG_ALPHA в обычном. Для НАЛОЖЕНИЯ НА КАДР (запись) передавать
+        BG_ALPHA: там нет magenta-фона, и панель должна быть полупрозрачной.
+        """
+        target = target if target is not None else self.screen
+        if alpha is None:
+            alpha = 255 if self._hud_only else BG_ALPHA
         hud = self._hud
         cache = self._hud_cache
-        if cache is not None and cache[0] == hud:
+        if cache is not None and cache[0] == hud and cache[3] == alpha:
             panel, items = cache[1], cache[2]
         else:
-            panel, items = self._build_hud(hud)
-            self._hud_cache = (hud, panel, items)
+            panel, items = self._build_hud(hud, panel_alpha=alpha)
+            self._hud_cache = (hud, panel, items, alpha)
         self._hud_panel_h = panel.get_height()  # фактическая высота — для водяного знака
-        self.screen.blit(panel, (HUD_PAD, HUD_PAD))
+        target.blit(panel, (HUD_PAD, HUD_PAD))
         for surf, x, y in items:
-            self.screen.blit(surf, (x, y))
+            target.blit(surf, (x, y))
 
-    def _build_hud(self, hud: Dict):
+    def _build_hud(self, hud: Dict, panel_alpha: int | None = None):
         """Собрать панель HUD: (panel_surface, [(text_surf, x, y), ...])."""
         lines = []
         status = hud.get("status", "NR OFF")
@@ -495,7 +558,9 @@ class Display:
         panel = pygame.Surface((panel_w, panel_h), pygame.SRCALPHA)
         # В HUD-режиме панель обязана быть НЕпрозрачной: полупрозрачный
         # бленд с CHROMA_KEY-фоном даёт цвет ≠ key — розовая плашка поверх.
-        panel_alpha = 255 if self._hud_only else BG_ALPHA
+        # Для записи (наложение на кадр, magenta-фона нет) — BG_ALPHA.
+        if panel_alpha is None:
+            panel_alpha = 255 if self._hud_only else BG_ALPHA
         panel.fill((*BG_COLOR, panel_alpha))
 
         items = []

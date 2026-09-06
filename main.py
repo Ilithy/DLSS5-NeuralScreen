@@ -31,6 +31,24 @@ import time
 import uuid
 from pathlib import Path
 
+# --- Лог в файл вместо консоли ------------------------------------------
+# Релиз запускается через pythonw.exe (без консольного окна): stdout/stderr
+# там равны None, и любой print упал бы. Перенаправляем их в NeuralScreen.log
+# рядом с main.py — все print продолжают работать, пользователь видит лог
+# файлом, а не окном. Ошибки старта (нет DLL и т.п.) дополнительно
+# показываются messagebox-ом (см. _fatal_dialog внизу).
+LOG_PATH = Path(__file__).resolve().parent / "NeuralScreen.log"
+
+
+def _init_logging() -> None:
+    """Перенаправить stdout/stderr в NeuralScreen.log (utf-8)."""
+    try:
+        log_file = open(LOG_PATH, "a", encoding="utf-8", buffering=1)
+        sys.stdout = log_file
+        sys.stderr = log_file
+    except Exception:
+        pass  # не получилось — print'ы просто пропадут, не упадём
+
 # DPI-awareness ДО любых импортов (cv2, capture, display, tray): если какой-то
 # модуль выставит awareness раньше (например, dxcam вызывает
 # SetProcessDpiAwareness(2) при создании Output), повторный вызов вернёт
@@ -53,11 +71,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import cv2
 import numpy as np
+import pygame  # HUD-наложение на записываемый кадр (image.frombuffer)
 
 from capture import ScreenCapture
 from display import Display
 from guides import TemporalGuideGenerator
 from hotkeys import HotkeyController, describe as describe_hotkeys
+from recorder import VideoRecorder
 from settings_ui import SettingsWindow, STRINGS as UI_STRINGS
 from tray import TrayController
 
@@ -812,6 +832,7 @@ def main() -> int:
     parser.add_argument("--config", type=Path, default=BASE_DIR / "config.json",
                         help="путь к config.json (по умолчанию рядом с main.py)")
     args = parser.parse_args()
+    _init_logging()  # pythonw: stdout/stderr -> NeuralScreen.log
 
     cfg = load_config(args.config)
     params = resolve_params(cfg)
@@ -820,6 +841,16 @@ def main() -> int:
     warmup = int(cfg["warmup"])
     work_scale = float(cfg["work_scale"])
     lang = str(cfg["lang"])
+
+    # Разрешение вывода — С РЕАЛЬНОГО МОНИТОРА, а не из застывшего
+    # config.json (монитор могли переключить на 1440p, а конфиг помнит 4K —
+    # оверлей/запись/окно воркера начнут расходиться с экраном).
+    capture = ScreenCapture(monitor_idx=monitor)
+    mon_w, mon_h = capture.resolution
+    if mon_w > 0 and mon_h > 0 and (mon_w, mon_h) != (width, height):
+        print(f"[main] Монитор {monitor} — {mon_w}x{mon_h} (конфиг: {width}x{height}), "
+              f"беру реальное разрешение")
+        width, height = mon_w, mon_h
 
     print(f"[main] NeuralScreen — профиль {cfg['profile']!r}, "
           f"разрешение {width}x{height}, монитор {monitor}")
@@ -831,7 +862,6 @@ def main() -> int:
     reader: WorkerReader | None = None
     worker_stop: threading.Event | None = None
     shm: SharedFrameBuffer | None = None
-    capture: ScreenCapture | None = None
     display: Display | None = None
     settings: SettingsWindow | None = None
     try:
@@ -851,7 +881,6 @@ def main() -> int:
         print(f"[main] Воркер запущен (pid {worker.pid}), заголовок отправлен "
               f"({work_w}x{work_h})")
 
-        capture = ScreenCapture(monitor_idx=monitor)
         print(f"[main] Захват монитора {monitor}: {capture.resolution}")
 
         display = Display(width, height, fullscreen=bool(cfg["fullscreen"]))
@@ -917,6 +946,7 @@ def main() -> int:
         dda_attempted = False     # пробовали для текущего воркера (не спамить)
         gray_active = False       # guides берут luminance из gray-канала воркера
         pending_shot: Path | None = None  # скриншот ждёт кадр с пикселями
+        recorder: VideoRecorder | None = None  # запись (Insert), MP4 AV1 NVENC
         work_frame = None  # текущий work-кадр; None → захватить в начале цикла
         fps_window: list[float] = []
         last_log = time.monotonic()
@@ -1272,6 +1302,35 @@ def main() -> int:
                         print(f"[main] NR {'OFF (bypass NGX)' if paused else 'ON'}")
                         display.alert(UI_STRINGS[lang]["nr_off" if paused else "nr_on"])
                         tray._set_state(nr=not paused)
+                    elif cmd == "record":
+                        # Insert: запись NR-кадра в MP4. Кадры запрашиваем у
+                        # воркера через FRAME_FLAG_WANT_PIXELS (механизм
+                        # скриншота, но для каждого кадра записи).
+                        if recorder is None:
+                            rec_dir = BASE_DIR / "recordings"
+                            rec_dir.mkdir(exist_ok=True)
+                            stamp = time.strftime("%Y%m%d-%H%M%S")
+                            path = str(rec_dir / f"neuralscreen-{stamp}.mp4")
+                            try:
+                                recorder = VideoRecorder(path, width, height, fps=30)
+                            except Exception as exc:
+                                print(f"[main] Запись не стартовала: {exc}", file=sys.stderr)
+                                display.alert(f"REC ERROR: {exc}")
+                                recorder = None
+                            else:
+                                print(f"[main] Запись начата: {path}")
+                                display.alert(UI_STRINGS[lang]["record_on"])
+                        else:
+                            rec_path = recorder.path
+                            try:
+                                recorder.close()
+                            except Exception as exc:
+                                print(f"[main] Ошибка закрытия записи: {exc}", file=sys.stderr)
+                            secs = recorder.duration_ms / 1000.0
+                            print(f"[main] Запись завершена: {rec_path} "
+                                  f"({recorder.written} кадров, {secs:.1f}с)")
+                            display.alert(UI_STRINGS[lang]["record_off"])
+                            recorder = None
                     elif cmd in ("scale_up", "scale_down"):
                         delta = WORK_SCALE_STEP if cmd == "scale_up" else -WORK_SCALE_STEP
                         new_scale = min(WORK_SCALE_MAX, max(WORK_SCALE_MIN, work_scale + delta))
@@ -1340,7 +1399,17 @@ def main() -> int:
                             "params": {k: params[k] for k in ("intensity", "local_tone", "local_structure", "skin_structure")},
                             "lang": lang,
                         })
-                    # settings_closed — ничего делать не нужно
+                    elif cmd == "settings_closed":
+                        # После закрытия меню (tkinter был topmost) HUD-слой
+                        # pygame мог потерять colorkey-прозрачность (окно
+                        # непрозрачное, HUD не виден) и оказаться под окном
+                        # воркера. Восстанавливаем оба свойства.
+                        if present_mode:
+                            display.refresh_colorkey()
+                            try:
+                                display.raise_topmost()
+                            except Exception:
+                                pass
             except queue.Empty:
                 pass
 
@@ -1416,7 +1485,7 @@ def main() -> int:
                 check_worker(worker, worker_logs)
                 t0 = time.perf_counter()
                 send_frame(worker, frame_index, work_frame, guide.motion, guide.reset,
-                           pts, shm, want_pixels=(pending_shot is not None),
+                           pts, shm, want_pixels=(pending_shot is not None or recorder is not None),
                            motion_small=motion_small,
                            no_color=bool(dda_mode),
                            bypass=bypass)
@@ -1515,7 +1584,31 @@ def main() -> int:
 
             t0 = time.perf_counter()
             try:
-                if output_rgba is None:
+                if recorder is not None and output_rgba is not None:
+                    # HUD-слой pygame исключён из захвата (WDA_EXCLUDEFROM
+                    # CAPTURE), поэтому в запись он не попадает — накладываем
+                    # HUD+водяной знак прямо на кадр перед энкодером.
+                    # frombuffer ссылается на numpy-буфер (без копии):
+                    # blit пишет прямо в output_rgba.
+                    try:
+                        surf = pygame.image.frombuffer(
+                            output_rgba, (output_rgba.shape[1], output_rgba.shape[0]), "RGBX")
+                        display.draw_hud_onto(surf)
+                    except Exception as hud_exc:
+                        print(f"[main] HUD-наложение на кадр не удалось: {hud_exc}",
+                              file=sys.stderr)
+                    recorder.write(output_rgba)
+                if present_mode:
+                    # В WNDO-режиме кадр на экране рисует воркер; в Python
+                    # пиксели приходят ТОЛЬКО по want_pixels (запись/скриншот).
+                    # Показывать их в pygame не нужно: это лишний блендинг 4K
+                    # (~22 мс) и мелькание кадра в HUD-слое поверх окна воркера.
+                    # HUD обновляется draw_overlay() с троттлингом (не каждый кадр).
+                    if pending_shot is not None and output_rgba is not None:
+                        _save_screenshot(pending_shot, output_rgba)
+                        pending_shot = None
+                    display.draw_overlay()
+                elif output_rgba is None:
                     # Кадр уже на экране — его показал воркер, тут только HUD
                     display.draw_overlay()
                 else:
@@ -1614,4 +1707,19 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except Exception as exc:
+        # pythonw: консоли нет — показать причину отказа пользователю окном,
+        # детали — в NeuralScreen.log.
+        import traceback
+        traceback.print_exc()
+        try:
+            import ctypes as _ct
+            _ct.windll.user32.MessageBoxW(
+                None,
+                f"NeuralScreen не запустился: {exc}\n\nПодробности в NeuralScreen.log рядом с программой.",
+                "NeuralScreen", 0x10)  # MB_ICONERROR
+        except Exception:
+            pass
+        sys.exit(1)

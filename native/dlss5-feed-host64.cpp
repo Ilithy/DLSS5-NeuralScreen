@@ -2090,19 +2090,23 @@ static bool EvaluateVideo(VideoState &v, int reset)
     return WaitFenceValue(h.fence, fence, 60000);
 }
 
-static bool DownloadVideoFrame(VideoState &v, std::vector<BYTE> &packed)
+static bool DownloadVideoFrame(VideoState &v, std::vector<BYTE> &packed,
+                               ID3D12Resource *src = nullptr,
+                               D3D12_RESOURCE_STATES src_before = D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                               D3D12_RESOURCE_STATES src_after = D3D12_RESOURCE_STATE_UNORDERED_ACCESS)
 {
+    if (src == nullptr) src = v.output;
     if (!BeginCommands()) return false;
-    D3D12_RESOURCE_BARRIER a = Transition(v.output, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+    D3D12_RESOURCE_BARRIER a = Transition(src, src_before,
                                            D3D12_RESOURCE_STATE_COPY_SOURCE);
     h.list->ResourceBarrier(1, &a);
-    D3D12_TEXTURE_COPY_LOCATION src = {}, dst = {};
-    src.pResource = v.output; src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
-    dst.pResource = v.readback; dst.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
-    dst.PlacedFootprint = v.out_fp;
-    h.list->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
-    D3D12_RESOURCE_BARRIER b = Transition(v.output, D3D12_RESOURCE_STATE_COPY_SOURCE,
-                                           D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    D3D12_TEXTURE_COPY_LOCATION s = {}, d = {};
+    s.pResource = src; s.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+    d.pResource = v.readback; d.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+    d.PlacedFootprint = v.out_fp;
+    h.list->CopyTextureRegion(&d, 0, 0, 0, &s, nullptr);
+    D3D12_RESOURCE_BARRIER b = Transition(src, D3D12_RESOURCE_STATE_COPY_SOURCE,
+                                           src_after);
     h.list->ResourceBarrier(1, &b);
     const UINT64 fence = EndCommands();
     if (!WaitFenceValue(h.fence, fence, 60000)) return false;
@@ -2525,9 +2529,18 @@ static int RunVideo()
                 if (!PresentBypass(v)) return 9;
             }
             else if (!PresentFrame(v)) return 9;
-            if (!bypass && (fh.reserved & FRAME_FLAG_WANT_PIXELS) != 0)
+            // Пиксели клиенту (скриншот/запись) — и в bypass-режиме: для
+            // записи нужен ровно тот кадр, что виден (сырой захват).
+            if ((fh.reserved & FRAME_FLAG_WANT_PIXELS) != 0)
             {
-                if (!DownloadVideoFrame(v, output)) return 9;
+                bool dl_ok = false;
+                if (bypass)
+                    dl_ok = DownloadVideoFrame(v, output, v.color.tex,
+                                               D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                                               D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+                else
+                    dl_ok = DownloadVideoFrame(v, output);
+                if (!dl_ok) return 9;
                 VideoResultHeader out = { OUT_MAGIC, fh.index, 1u,
                                           static_cast<uint32_t>(output.size()),
                                           g_last_eval_result, fh.pts };
