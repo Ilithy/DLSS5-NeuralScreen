@@ -1,20 +1,29 @@
 # NeuralScreen — DLSS 5 Neural Rendering Overlay for Windows Desktop
 
-**NeuralScreen applies NVIDIA DLSS 5 Neural Rendering (NGX Feature 18) to your
-entire Windows desktop in real time.** Every frame of the screen is processed
-by the same neural renderer used in DLSS 5 games (RTX 50-series), and the
-result is drawn back over the display in a click-through overlay.
+**NVIDIA DLSS 5 Neural Rendering (NGX Feature 18), applied to your whole
+Windows desktop in real time.** The screen is captured, run through the same
+neural renderer that DLSS 5 games use, and drawn back in a click-through
+overlay. RTX 50-series only.
+
+<table>
+<tr>
+<td><img src="docs/menu-light.png" alt="Menu, light theme" width="420"></td>
+<td><img src="docs/menu-dark.png" alt="Menu, dark theme" width="420"></td>
+</tr>
+</table>
+
+Everything is in one menu inside the overlay: `F8` opens it, and while it is
+open the overlay takes mouse and keyboard, so it works on top of a game.
 
 ```
 desktop capture -> motion guides -> NGX worker (D3D12) -> overlay on top of the screen
   worker DDA        cv2 DIS 320x180    native/nvngx.dll        worker window + menu layer
 ```
 
-> **v1.0.0** — release build. The whole pipeline lives on the GPU: capture
-> (Desktop Duplication), neural pass and presentation all happen inside the
-> worker; Python only computes optical-flow guides (0.1–0.2 ms/frame).
-> Measured on RTX 5070 Ti, 4K desktop, work 1920×1080: **55 FPS with NR on,
-> 121–133 FPS in NR-off bypass mode**.
+> **v1.0.0.** The whole pipeline lives on the GPU — capture, neural pass and
+> presentation all happen inside the worker; Python only computes
+> optical-flow guides (0.1–0.2 ms/frame). RTX 5070 Ti, 4K desktop, work
+> 1920×1080: **55 FPS with NR on, 121–133 FPS in bypass**.
 
 ## Requirements
 
