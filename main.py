@@ -344,7 +344,13 @@ def _drain_stderr(worker, logs: list[str], stop: threading.Event) -> None:
         for raw in iter(worker.stderr.readline, b""):
             if stop.is_set():
                 break
-            logs.append(raw.decode("utf-8", "replace").rstrip())
+            line = raw.decode("utf-8", "replace").rstrip()
+            logs.append(line)
+            # Замеры фаз воркера — в общий лог, но только когда профилировщик
+            # включён (NS_PHASE=1): иначе они оседают в буфере и видны только
+            # когда что-то упало.
+            if "[phase]" in line and os.environ.get("NS_PHASE") == "1":
+                print(line)
     except Exception:
         pass
 

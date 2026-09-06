@@ -1536,6 +1536,7 @@ static HANDLE                  g_dda_nt = nullptr;
 static ID3D12Resource         *g_dda_d12 = nullptr;
 static ID3D12Fence            *g_dda_signal = nullptr;   // shared, D3D11 side signals
 static ID3D11Fence            *g_dda_signal11 = nullptr;
+static HANDLE                  g_dda_fence_ev = nullptr;  // событийное ожидание копии D3D11
 static UINT64                  g_dda_fence_value = 1;
 static bool                    g_dda_ready = false;      // current frame is in v.color
 // Gray downsample (GRAY): write luminance (flow size) into a client mapping.
@@ -1568,6 +1569,7 @@ static void CloseDda()
     if (g_dda_d11) { g_dda_d11->Release(); g_dda_d11 = nullptr; }
     if (g_dda_signal) { g_dda_signal->Release(); g_dda_signal = nullptr; }
     if (g_dda_signal11) { g_dda_signal11->Release(); g_dda_signal11 = nullptr; }
+    if (g_dda_fence_ev) { CloseHandle(g_dda_fence_ev); g_dda_fence_ev = nullptr; }
 }
 
 // Compute pipeline to swizzle BGRA->RGBA (the DDA frame and v.color are both
@@ -1859,13 +1861,21 @@ static bool OpenDda(UINT w, UINT hgt)
     return true;
 }
 
+// Профилировщик фаз объявлен ниже (перед RunVideo), но щуп нужен здесь —
+// поэтому список фаз и прототипы вынесены вперёд.
+enum { PH_ACQ, PH_DDA, PH_UPLOAD, PH_EVAL, PH_PRESENT, PH_FRAME, PH_COUNT };
+static double PhaseNow();
+static void PhaseAdd(int idx, double t0);
+
 // Grab the latest desktop frame into v.color.tex (RGBA, GPU-resident).
 static bool DdaGrab(VideoState &v)
 {
     if (!g_dda_active) return false;
     IDXGIResource *res = nullptr;
     DXGI_OUTDUPL_FRAME_INFO fi = {};
+    const double t_acq = PhaseNow();
     HRESULT hr = g_dda_dup->AcquireNextFrame(100, &fi, &res);
+    PhaseAdd(PH_ACQ, t_acq);
     if (hr == DXGI_ERROR_WAIT_TIMEOUT) return false;      // desktop unchanged
     if (FAILED(hr))
     {
@@ -1936,11 +1946,27 @@ static bool DdaGrab(VideoState &v)
     g_dda_ctx->Flush();
     frame->Release(); res->Release(); g_dda_dup->ReleaseFrame();
 
-    // Ждать копию D3D11 с таймаутом (не вечный спин)
+    // Ждать копию D3D11 событием, а НЕ опросом со Sleep(1). Sleep(1) при
+    // стандартном разрешении таймера Windows спит до 15.6 мс, и это давало
+    // 13 мс на фазу dda при работе на 1-2 мс (замерено профилировщиком фаз:
+    // acq=0.0, dda=13.0). SetEventOnCompletion будит поток точно.
     const UINT64 want = g_dda_fence_value;
     const DWORD wait_ms = 5000;
-    const DWORD start = GetTickCount();
-    while (g_dda_signal->GetCompletedValue() < want && GetTickCount() - start < wait_ms) Sleep(1);
+    if (g_dda_fence_ev == nullptr)
+        g_dda_fence_ev = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    if (g_dda_signal->GetCompletedValue() < want)
+    {
+        if (g_dda_fence_ev != nullptr &&
+            SUCCEEDED(g_dda_signal->SetEventOnCompletion(want, g_dda_fence_ev)))
+            WaitForSingleObject(g_dda_fence_ev, wait_ms);
+        else
+        {
+            // Событие недоступно — прежний опрос как страховка.
+            const DWORD start = GetTickCount();
+            while (g_dda_signal->GetCompletedValue() < want &&
+                   GetTickCount() - start < wait_ms) Sleep(1);
+        }
+    }
     if (g_dda_signal->GetCompletedValue() < want)
     { Log("[dda] signal fence timeout"); return false; }
     ++g_dda_fence_value;
@@ -2259,6 +2285,85 @@ static void ReleaseVideoTextures(VideoState &v)
 // Forward declaration: определена ниже, вызывается в RunVideo при завершении.
 static void CleanupVideoNgx();
 
+// ---------------------------------------------------------------------------
+// Профилирование фаз кадра. Задача: понять, куда уходит время, и в частности
+// проверить гипотезу vblank — при 60 Гц бюджет 16.7 мс, и если Present пасует
+// конвейер по кратным ему значениям, это видно по гистограмме, а не по
+// среднему. Поэтому для Present считается ещё и распределение по корзинам.
+// ---------------------------------------------------------------------------
+static const char *kPhaseNames[PH_COUNT] =
+    { "acq(ждём стол)", "dda(всего)", "upload", "eval", "present", "frame" };
+static double g_ph_sum[PH_COUNT];
+static double g_ph_max[PH_COUNT];
+static unsigned g_ph_n[PH_COUNT];
+// Корзины Present, мс: <5, 5-12, 12-20 (~1 vblank), 20-28, 28-40 (~2 vblank), 40+
+static const double kPresentBins[] = { 5.0, 12.0, 20.0, 28.0, 40.0 };
+static unsigned g_ph_bins[6];
+static LARGE_INTEGER g_qpf;
+static UINT64 g_ph_tick;
+
+// Профилировщик включается переменной окружения NS_PHASE=1. По умолчанию
+// выключен: иначе он сорит в лог строкой каждые 2 секунды всю сессию.
+static int g_phase_on = -1;
+
+static bool PhaseEnabled()
+{
+    if (g_phase_on < 0)
+    {
+        char buf[8] = {};
+        const DWORD got = GetEnvironmentVariableA("NS_PHASE", buf, sizeof(buf));
+        g_phase_on = (got > 0 && buf[0] == '1') ? 1 : 0;
+        if (g_phase_on) Log("[phase] профилировщик фаз включён (NS_PHASE=1)");
+    }
+    return g_phase_on == 1;
+}
+
+static double PhaseNow()
+{
+    if (g_qpf.QuadPart == 0) QueryPerformanceFrequency(&g_qpf);
+    LARGE_INTEGER t;
+    QueryPerformanceCounter(&t);
+    return static_cast<double>(t.QuadPart) * 1000.0 / static_cast<double>(g_qpf.QuadPart);
+}
+
+static void PhaseAdd(int idx, double t0)
+{
+    if (!PhaseEnabled()) return;
+    const double ms = PhaseNow() - t0;
+    g_ph_sum[idx] += ms;
+    if (ms > g_ph_max[idx]) g_ph_max[idx] = ms;
+    ++g_ph_n[idx];
+    if (idx == PH_PRESENT)
+    {
+        int b = 0;
+        while (b < 5 && ms >= kPresentBins[b]) ++b;
+        ++g_ph_bins[b];
+    }
+}
+
+static void PhaseReport(bool bypass)
+{
+    if (!PhaseEnabled()) return;
+    const UINT64 now = GetTickCount64();
+    if (g_ph_tick == 0) { g_ph_tick = now; return; }
+    if (now - g_ph_tick < 2000) return;
+    g_ph_tick = now;
+
+    char line[640];
+    int off = _snprintf_s(line, sizeof(line), _TRUNCATE, "[phase] %s", bypass ? "bypass" : "NR");
+    for (int i = 0; i < PH_COUNT && off > 0; ++i)
+    {
+        if (g_ph_n[i] == 0) continue;
+        off += _snprintf_s(line + off, sizeof(line) - off, _TRUNCATE, " | %s %.1f/%.1f",
+                           kPhaseNames[i], g_ph_sum[i] / g_ph_n[i], g_ph_max[i]);
+        g_ph_sum[i] = 0.0; g_ph_max[i] = 0.0; g_ph_n[i] = 0;
+    }
+    Log("%s (среднее/макс, мс)", line);
+    Log("[phase] present по корзинам мс: <5=%u 5-12=%u 12-20=%u 20-28=%u 28-40=%u 40+=%u",
+        g_ph_bins[0], g_ph_bins[1], g_ph_bins[2], g_ph_bins[3], g_ph_bins[4], g_ph_bins[5]);
+    for (int b = 0; b < 6; ++b) g_ph_bins[b] = 0;
+}
+
 static int RunVideo()
 {
     _setmode(_fileno(stdin), _O_BINARY);
@@ -2484,11 +2589,14 @@ static int RunVideo()
             if (!WriteExact(stdout, &ack, sizeof(ack))) return 10;
             continue;
         }
+        const double t_frame = PhaseNow();
         if (g_dda_active)
         {
             // DDA-режим: цвет берём из Desktop Duplication прямо на GPU,
             // motion — из присланного кадра (клиент продолжает шлaть пары).
+            const double t_dda = PhaseNow();
             const bool got = DdaGrab(v);
+            PhaseAdd(PH_DDA, t_dda);
             if (!got && !g_dda_ready)
             {
                 // Ещё ни одного реального кадра с рабочего стола: держать
@@ -2498,13 +2606,20 @@ static int RunVideo()
                 if (!WriteExact(stdout, &empty, sizeof(empty))) return 10;
                 continue;
             }
-            if (!UploadMotionOnly(v, mv_ptr,
-                                  (fh.reserved & FRAME_FLAG_MOTION_SMALL) != 0 && g_motion_w != 0))
-                return 6;
+            const double t_up = PhaseNow();
+            const bool up_ok = UploadMotionOnly(v, mv_ptr,
+                                  (fh.reserved & FRAME_FLAG_MOTION_SMALL) != 0 && g_motion_w != 0);
+            PhaseAdd(PH_UPLOAD, t_up);
+            if (!up_ok) return 6;
         }
-        else if (!UploadVideoFrame(v, color_ptr, mv_ptr,
-                                   (fh.reserved & FRAME_FLAG_MOTION_SMALL) != 0 && g_motion_w != 0))
-            return 6;
+        else
+        {
+            const double t_up = PhaseNow();
+            const bool up_ok = UploadVideoFrame(v, color_ptr, mv_ptr,
+                                   (fh.reserved & FRAME_FLAG_MOTION_SMALL) != 0 && g_motion_w != 0);
+            PhaseAdd(PH_UPLOAD, t_up);
+            if (!up_ok) return 6;
+        }
         if (!warmup_done)
         {
             const uint32_t warmup = (std::min)(240u, (std::max)(1u, g_video_options.warmup));
@@ -2516,19 +2631,24 @@ static int RunVideo()
             Log("[pure] direct feature 18 confirmed after %u discarded warmup frames", warmup);
         }
         const bool bypass = (fh.reserved & FRAME_FLAG_BYPASS) != 0;
-        if (!bypass && !EvaluateVideo(v, (frame == 0 || fh.reset != 0) ? 1 : 0)) return 9;
+        if (!bypass)
+        {
+            const double t_eval = PhaseNow();
+            const bool ev_ok = EvaluateVideo(v, (frame == 0 || fh.reset != 0) ? 1 : 0);
+            PhaseAdd(PH_EVAL, t_eval);
+            if (!ev_ok) return 9;
+        }
         if (PresentModeActive(v))
         {
             // The overlay shows the result; the client gets an empty OUT1 as
             // the "frame done" signal and never sees the pixels -- unless it
             // explicitly asked for this one frame (screenshot).
-            if (bypass)
-            {
-                // NR OFF: показать сырой захват (v.color уже в full-res) —
-                // NGX evaluate пропущен, но конвейер жив (окно, HUD).
-                if (!PresentBypass(v)) return 9;
-            }
-            else if (!PresentFrame(v)) return 9;
+            const double t_pres = PhaseNow();
+            // NR OFF: показать сырой захват (v.color уже в full-res) —
+            // NGX evaluate пропущен, но конвейер жив (окно, HUD).
+            const bool pres_ok = bypass ? PresentBypass(v) : PresentFrame(v);
+            PhaseAdd(PH_PRESENT, t_pres);
+            if (!pres_ok) return 9;
             // Пиксели клиенту (скриншот/запись) — и в bypass-режиме: для
             // записи нужен ровно тот кадр, что виден (сырой захват).
             if ((fh.reserved & FRAME_FLAG_WANT_PIXELS) != 0)
@@ -2559,6 +2679,8 @@ static int RunVideo()
             VideoResultHeader out = { OUT_MAGIC, fh.index, 1u, static_cast<uint32_t>(output.size()), g_last_eval_result, fh.pts };
             if (!WriteExact(stdout, &out, sizeof(out)) || !WriteExact(stdout, output.data(), output.size())) return 10;
         }
+        PhaseAdd(PH_FRAME, t_frame);
+        PhaseReport(bypass);
         if (frame < 3 || ((frame + 1) % 30) == 0)
             Log("[video] delivered frame %u%s", frame + 1, live ? " (live)" : "");
         ++frame;
