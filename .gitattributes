@@ -1,0 +1,13 @@
+# Переводы строк фиксируем явно: на машине разработки core.autocrlf=true,
+# без этого файла рабочая копия после clone разъедется с тем, что в индексе.
+* text=auto eol=lf
+
+# Батники исполняет cmd.exe — им нужен CRLF
+*.bat text eol=crlf
+
+# Бинарники не трогать
+*.lib binary
+*.dll binary
+*.obj binary
+*.png binary
+*.jpg binary

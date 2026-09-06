@@ -1,0 +1,14 @@
+{
+  "monitor": 0,
+  "width": 3840,
+  "height": 2160,
+  "fullscreen": true,
+  "warmup": 120,
+  "work_scale": 0.5,
+  "lang": "en",
+  "profile": "Strong / Cinematic",
+  "intensity": null,
+  "local_tone": null,
+  "local_structure": null,
+  "skin_structure": null
+}
