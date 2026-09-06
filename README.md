@@ -13,8 +13,8 @@ desktop capture -> motion guides -> NGX worker (D3D12) -> overlay on top of the 
 > **v1.0.0** — release build. The whole pipeline lives on the GPU: capture
 > (Desktop Duplication), neural pass and presentation all happen inside the
 > worker; Python only computes optical-flow guides (0.1–0.2 ms/frame).
-> Measured on RTX 5070 Ti, 1440p desktop, work 1280×720: **64 FPS with NR on,
-> 64 FPS in NR-off bypass mode**.
+> Measured on RTX 5070 Ti, 4K desktop, work 1920×1080: **55 FPS with NR on,
+> 121–133 FPS in NR-off bypass mode**.
 
 ## Requirements
 
@@ -155,17 +155,29 @@ feature in-process). If `RNSZ` fails — fall back to a full worker restart.
 
 ## Performance
 
-Measured on RTX 5070 Ti, 1440p desktop, `work_scale` 0.5 (1280×720), static
-screen, pipeline fully on the GPU (DDA + GRAY + WNDO + MOTS):
+Measured on RTX 5070 Ti, 4K desktop, `work_scale` 0.5 (1920×1080), pipeline
+fully on the GPU (DDA + GRAY + WNDO + MOTS). Worker-side phase breakdown
+(enable with `NS_PHASE=1`):
 
 ```
-NR ON :  guides 0.1ms | send 0.0ms | recv 15.2ms | show 0.2ms  -> 64.0 FPS
-NR OFF (bypass):       recv ~15ms                          -> 64+ FPS
+                 acq   dda  upload   eval  present   frame     FPS
+NR ON            0.0   0.7     0.1   16.6      0.5    17.9      55
+NR OFF (bypass)  ~3    ~4      0.1      -      ~3      7.3  121-133
 ```
 
-Actually **NGX itself is ~1 ms**. The rest is pipeline. On real motion the
-guides cost rises (DISOpticalFlow on 320×180 ≈ 1.4 ms + upscale), but stays
-negligible compared to `recv`.
+**NGX evaluation is 16.6 ms — 93% of an NR frame.** Everything else together
+costs 1.3 ms, so the practical ceiling on this hardware is set by NGX, not by
+the plumbing. In bypass mode NGX is skipped and the loop waits on the desktop
+actually changing (`acq`), which is why it runs several times faster.
+
+An earlier revision of this section claimed "NGX itself is ~1 ms". That was a
+measurement error: the figure came from regressing round-trip time against
+work resolution, and such a regression only sees the resolution-dependent part
+(0.46 ms/MPix). NGX's large constant cost was invisible to it and got
+attributed to transport.
+
+The 1440p figures previously published here (64 FPS) predate the DDA fence
+fix and understate current performance; they have not been re-measured.
 
 ## Limitations (read before buying/recording)
 
