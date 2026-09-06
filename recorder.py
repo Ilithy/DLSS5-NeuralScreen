@@ -54,15 +54,17 @@ class VideoRecorder:
             self._stream.color_trc = 13         # AVCOL_TRC_IEC61966_2_1 = sRGB
         except Exception as exc:
             print(f"[record] color metadata failed: {exc}", file=__import__("sys").stderr)
-        # NVENC: битрейт 20 Мбит/с при 1440p — высокое качество для захвата
-        # с текстом/интерфейсом (~60 МБ в минуту; пользовательский выбор).
-        # max_bit_rate/rc_min_rate/rc_buffer_size в PyAV НЕ существуют
-        # (AttributeError 'an integer is required' при старте записи) —
-        # только bit_rate как потоковый атрибут.
+        # NVENC: битрейт 50 Мбит/с — запаса качества для интерфейса/текста
+        # (пользовательский выбор). «Рассыпание» картинки на длинных
+        # прогонах лечится НЕ только битрейтом, а коротким GOP и без
+        # B-фреймов: на переменном fps конвейера B-фреймы рассинхронизируют
+        # кадры, а длинный GOP без keyframe даёт артефакты на смене сцен.
         try:
-            self._stream.bit_rate = 20_000_000
-        except Exception:
-            pass  # кодек не принял параметр — оставить дефолты NVENC
+            self._stream.bit_rate = 50_000_000
+            self._stream.gop_size = 60          # keyframe каждые 2 с (30 fps)
+            self._stream.max_b_frames = 0       # P-only: стабильнее на VFR-входе
+        except Exception as exc:
+            print(f"[record] encoder params failed: {exc}", file=__import__("sys").stderr)
         self._frame_idx = 0
         self.written = 0
         self._started = time.perf_counter()
