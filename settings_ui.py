@@ -7,6 +7,7 @@ pygame не поддерживает два окна в одном процес�
     outbox (settings -> main):
         ("settings_opened",) / ("settings_closed",)
         ("apply_settings", payload)  — payload: work_scale, profile, params, lang
+        ("record",)                  — кнопка «Запись»: старт/стоп
         ("set_lang", lang)           — пользователь сменил язык в окне
         ("exit_app",)                — кнопка «Выход»: завершить программу
 
@@ -43,7 +44,7 @@ DANGER_HOVER = "#3D1D1D"
 FONT = ("Consolas", 10)
 FONT_SMALL = ("Consolas", 9)
 
-WINDOW_W, WINDOW_H = 420, 660
+WINDOW_W, WINDOW_H = 420, 716
 
 WORK_SCALE_MIN, WORK_SCALE_MAX, WORK_SCALE_STEP = 0.1, 1.0, 0.05
 PARAM_MIN, PARAM_MAX, PARAM_STEP = 0.0, 2.5, 0.05
@@ -69,6 +70,8 @@ STRINGS = {
         "close": "Close",
         "exit": "Exit",
         "screenshot": "Screenshot",
+        "record": "Record",
+        "record_stop": "Stop recording",
         "nr_on": "NR ON",
         "nr_off": "NR OFF",
         "record_on": "REC ● (Insert to stop)",
@@ -92,6 +95,8 @@ STRINGS = {
         "close": "Закрыть",
         "exit": "Выход",
         "screenshot": "Скриншот",
+        "record": "Запись",
+        "record_stop": "Остановить запись",
         "nr_on": "NR ВКЛ",
         "nr_off": "NR ВЫКЛ",
         "record_on": "ЗАПИСЬ ● (Insert — стоп)",
@@ -314,22 +319,33 @@ class SettingsWindow:
         self._build_row(body, "language")
 
         btns = tk.Frame(self._root, bg=BG)
-        btns.pack(fill="x", padx=18, pady=(0, 16))
+        btns.pack(fill="x", padx=18, pady=(0, 8))
         # Realtime-применение: кнопка «Применить» не нужна — слайдеры и
         # профиль применяются сразу (дебаунс 400 мс в _schedule_apply).
         # Слева — скриншот, справа — «Закрыть».
         self._widgets["screenshot"] = self._make_button(
             btns, s["screenshot"], "#21262D", TEXT, self._on_screenshot, BORDER)
         self._widgets["screenshot"].pack(side="left")
+        # Запись — тот же старт/стоп, что и по Insert: кнопка лишь кладёт
+        # команду в ту же очередь, никакой отдельной логики.
+        self._recording = False
+        self._widgets["record"] = self._make_button(
+            btns, s["record"], "#21262D", TEXT, self._on_record, BORDER)
+        self._widgets["record"].pack(side="left", padx=(12, 0))
+        # Второй ряд: действия над программой, а не над кадром. Разделение
+        # рядов заодно отодвигает «Выход» от «Закрыть» — раньше они стояли
+        # вплотную и «Выход» перекрывался.
+        btns2 = tk.Frame(self._root, bg=BG)
+        btns2.pack(fill="x", padx=18, pady=(0, 16))
         self._widgets["close"] = self._make_button(
-            btns, s["close"], "#21262D", TEXT, self._hide, BORDER)
+            btns2, s["close"], "#21262D", TEXT, self._hide, BORDER)
         self._widgets["close"].pack(side="right")
         # «Выход» завершает программу целиком, «Закрыть» лишь прячет окно —
         # поэтому разнесены по разным краям и выход выделен красным, чтобы
         # не нажать его вместо соседней кнопки.
         self._widgets["exit"] = self._make_button(
-            btns, s["exit"], "#21262D", DANGER, self._on_exit, DANGER_HOVER)
-        self._widgets["exit"].pack(side="left", padx=(12, 0))
+            btns2, s["exit"], "#21262D", DANGER, self._on_exit, DANGER_HOVER)
+        self._widgets["exit"].pack(side="left")
 
         self._apply_sync(self._initial)
         self._debounce_id = None
@@ -399,7 +415,7 @@ class SettingsWindow:
     def _make_button(self, parent: tk.Frame, text: str, bg: str, fg: str,
                      cmd, hover: str) -> tk.Button:
         btn = tk.Button(parent, text=text, bg=bg, fg=fg, relief="flat", bd=0,
-                        font=FONT, cursor="hand2", command=cmd, padx=20, pady=8,
+                        font=FONT, cursor="hand2", command=cmd, padx=14, pady=8,
                         activebackground=hover, activeforeground=fg)
         btn.bind("<Enter>", lambda e: btn.configure(bg=hover))
         btn.bind("<Leave>", lambda e: btn.configure(bg=bg))
@@ -425,6 +441,21 @@ class SettingsWindow:
     def _on_exit(self) -> None:
         """Кнопка «Выход» — завершить программу, а не спрятать окно."""
         self._outbox.put(("exit_app",))
+
+    def _on_record(self) -> None:
+        """Старт/стоп записи. Подпись меняем сразу, а окончательное
+        состояние приходит из main через sync — если запись не завелась,
+        подпись вернётся сама."""
+        self._outbox.put(("record",))
+        self._set_recording(not self._recording)
+
+    def _set_recording(self, on: bool) -> None:
+        self._recording = bool(on)
+        btn = self._widgets.get("record")
+        if btn is not None:
+            s = STRINGS[self._lang]
+            btn.configure(text=s["record_stop"] if self._recording else s["record"],
+                          fg=DANGER if self._recording else TEXT)
 
     def _on_screenshot(self) -> None:
         """Скриншот: диалог «Сохранить как» (JPEG 100%), путь — в main."""
@@ -527,6 +558,8 @@ class SettingsWindow:
             text=s["nr_on"] if self._vars["nr"].get() else s["nr_off"])
         self._widgets["close"].configure(text=s["close"])
         self._widgets["exit"].configure(text=s["exit"])
+        self._widgets["screenshot"].configure(text=s["screenshot"])
+        self._set_recording(self._recording)
         # Сегмент-переключатель: активный язык — янтарный, неактивный — muted
         self._widgets["lang_en_btn"].configure(
             fg=ACCENT if self._lang == "en" else MUTED)
@@ -551,6 +584,8 @@ class SettingsWindow:
     def _apply_sync_impl(self, payload: dict) -> None:
         if not payload:
             return
+        if "recording" in payload:
+            self._set_recording(payload["recording"])
         if payload.get("lang") in STRINGS:
             self._lang = payload["lang"]
         s = STRINGS[self._lang]

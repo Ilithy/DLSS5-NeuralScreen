@@ -1318,7 +1318,7 @@ def main() -> int:
                             stamp = time.strftime("%Y%m%d-%H%M%S")
                             path = str(rec_dir / f"neuralscreen-{stamp}.mp4")
                             try:
-                                recorder = VideoRecorder(path, width, height, fps=30)
+                                recorder = VideoRecorder(path, width, height, fps=60)
                             except Exception as exc:
                                 print(f"[main] Запись не стартовала: {exc}", file=sys.stderr)
                                 display.alert(f"REC ERROR: {exc}")
@@ -1337,6 +1337,10 @@ def main() -> int:
                                   f"({recorder.written} кадров, {secs:.1f}с)")
                             display.alert(UI_STRINGS[lang]["record_off"])
                             recorder = None
+                        # Кнопка в настройках меняет подпись сразу при нажатии;
+                        # тут отдаём ФАКТИЧЕСКОЕ состояние — если запись не
+                        # завелась, подпись вернётся на «Запись».
+                        settings.sync({"recording": recorder is not None})
                     elif cmd in ("scale_up", "scale_down"):
                         delta = WORK_SCALE_STEP if cmd == "scale_up" else -WORK_SCALE_STEP
                         new_scale = min(WORK_SCALE_MAX, max(WORK_SCALE_MIN, work_scale + delta))
@@ -1386,6 +1390,10 @@ def main() -> int:
                             tray._set_state(nr=not paused)
                             if not paused:
                                 display.set_visible(True)
+                    elif isinstance(cmd, tuple) and cmd[0] == "record":
+                        # Кнопка в настройках — та же команда, что Insert.
+                        # Пересылаем в очередь трея, где живёт обработчик.
+                        tray_commands.put("record")
                     elif isinstance(cmd, tuple) and cmd[0] == "exit_app":
                         print(f"[main] Выход: кнопка в окне настроек "
                               f"(кадров обработано {frame_index})")

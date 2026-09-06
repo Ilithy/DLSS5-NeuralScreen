@@ -47,7 +47,7 @@ desktop capture -> motion guides -> NGX worker (D3D12) -> overlay on top of the 
 |---|---|
 | `F9` | NR on/off. **Off is a bypass**: the overlay stays on screen showing the raw capture + HUD (no neural effect), and the desktop runs faster. Everything hides only on real exit. |
 | `F8` | settings window |
-| `Insert` | start/stop video recording (MP4, AV1 NVENC, 2560×1440 @ 20 Mbps) |
+| `Insert` | start/stop video recording (MP4, AV1 NVENC, 60 fps, ~64 Mbps). Also available as a **Record** button in the settings window |
 | `Ctrl+Alt+↑` / `Ctrl+Alt+↓` | processing scale ±0.05 |
 | `Ctrl+Alt+Q` | quit |
 
@@ -72,9 +72,19 @@ work scale, NR parameters, language (ru/en), screenshot button, **Exit**.
 `Insert` starts/stops recording of the **NR-processed frame** into
 `recordings/neuralscreen-<timestamp>.mp4`:
 
-- AV1 NVENC hardware encoding, 2560×1440 (or your desktop resolution),
-  30 fps, **20 Mbps**, sRGB/BT.709 color tags (metadata written both on the
+- AV1 NVENC hardware encoding at your desktop resolution, **60 fps**,
+  quality-targeted VBR (`cq 16`, ~64 Mbps in practice, ceiling 250 Mbps),
+  preset p6 + tune hq, sRGB/BT.709 color tags (metadata written both on the
   stream and on every frame — players render colors identical to the screen).
+- The bitrate is a **ceiling, not a target**: on fast motion the encoder is
+  allowed to spend more instead of dropping quality to hit a fixed number.
+  Raising quality costs no encoding time — that is dominated by the colour
+  conversion, not by the preset (measured: 1.6–1.7 s per 3 s of video at
+  every setting tried).
+- Recording runs at **60 fps** because the pipeline delivers ~55 frames per
+  second. The previous 30 fps time base could not represent them: frames were
+  squeezed into half as many ticks, which is what made fast motion fall apart
+  regardless of bitrate.
 - The HUD panel and the `@perseval_BLR` watermark are **burned into the
   recording** (they are drawn onto the frame before encoding; the live
   overlay itself is hidden from external capture, so OBS/ShadowPlay cannot

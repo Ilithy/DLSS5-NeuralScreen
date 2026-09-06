@@ -22,7 +22,20 @@ class VideoRecorder:
     """Пишет кадры в MP4 (av1_nvenc). Создаётся на старте записи, закрывается
     по Insert/выходу. НЕ потокобезопасен — вызывается только из main-цикла."""
 
-    def __init__(self, path: str, width: int, height: int, fps: float = 30.0):
+    #: Битрейт и параметры кодировщика вынесены в атрибуты класса, чтобы их
+    #: можно было менять без правки конструктора (замеры, эксперименты).
+    BIT_RATE = 120_000_000
+    ENCODER_OPTIONS = {
+        "preset": "p6",     # p1 быстрый ... p7 качественный
+        "tune": "hq",
+        "rc": "vbr",        # не фиксированный битрейт: на резком движении
+                            # кодер должен иметь право потратить больше
+        "cq": "16",         # целевое качество; битрейт — потолок, а не цель
+        "maxrate": "250M",
+        "bufsize": "500M",
+    }
+
+    def __init__(self, path: str, width: int, height: int, fps: float = 60.0):
         self.path = path
         self.width = width
         self.height = height
@@ -59,12 +72,25 @@ class VideoRecorder:
         # прогонах лечится НЕ только битрейтом, а коротким GOP и без
         # B-фреймов: на переменном fps конвейера B-фреймы рассинхронизируют
         # кадры, а длинный GOP без keyframe даёт артефакты на смене сцен.
+        # Битрейт как ПОТОЛОК при VBR с целевым качеством (cq), а не как цель:
+        # на резком движении (шутер) фиксированный битрейт заставляет кодер
+        # ронять качество, чтобы попасть в цифру. GOP короткий и без
+        # B-фреймов: на переменном fps конвейера B-фреймы рассинхронизируют
+        # кадры, а длинный GOP даёт артефакты на смене сцен.
         try:
-            self._stream.bit_rate = 50_000_000
-            self._stream.gop_size = 60          # keyframe каждые 2 с (30 fps)
-            self._stream.max_b_frames = 0       # P-only: стабильнее на VFR-входе
+            self._stream.bit_rate = self.BIT_RATE
+            self._stream.gop_size = max(30, int(round(fps)) * 2)  # keyframe раз в 2 с
+            self._stream.max_b_frames = 0
         except Exception as exc:
             print(f"[record] encoder params failed: {exc}", file=__import__("sys").stderr)
+        # Опции кодировщика идут строками через options — атрибутов
+        # max_bit_rate/rc_buffer_size у PyAV не существует.
+        if self.ENCODER_OPTIONS:
+            try:
+                self._stream.options = dict(self.ENCODER_OPTIONS)
+            except Exception as exc:
+                print(f"[record] encoder options failed: {exc}",
+                      file=__import__("sys").stderr)
         self._frame_idx = 0
         self.written = 0
         self._started = time.perf_counter()
