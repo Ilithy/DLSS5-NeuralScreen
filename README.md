@@ -1,223 +1,227 @@
 # NeuralScreen
 
-Оверлей DLSS 5 Neural Rendering (NGX feature 18) на весь рабочий стол Windows.
-Захватывает экран, прогоняет кадр через нейронный рендеринг NVIDIA и рисует
-результат поверх рабочего стола в окне, прозрачном для кликов.
+**DLSS 5 Neural Rendering (NGX feature 18) as a desktop-wide overlay for Windows.**
+
+NeuralScreen captures the entire desktop, runs every frame through NVIDIA's
+neural rendering (the same feature 18 used by DLSS 5 games), and draws the
+result over the screen in a click-through overlay window.
 
 ```
-захват экрана -> motion guides -> NGX-воркер (D3D12) -> оверлей поверх экрана
-   dxcam            cv2 DIS         native/nvngx.dll        pygame, click-through
+screen capture -> motion guides -> NGX worker (D3D12) -> overlay over the desktop
+  worker DDA       cv2 DIS 320x180     native/nvngx.dll      worker window + HUD
 ```
 
-## Требования
+> **Alpha v0.1.0+.** The full pipeline lives on the GPU: capture (Desktop
+> Duplication), neural pass and presentation all happen inside the worker;
+> Python only computes the optical-flow guides (0.1–0.2 ms/frame). Measured
+> on RTX 5070 Ti, 4K desktop, work 1920×1080: **32 FPS with NR on, 64 FPS in
+> NR-off bypass mode**. See "Performance".
 
-- **Windows 11** (нужен Desktop Duplication API и `WDA_EXCLUDEFROMCAPTURE`)
-- **NVIDIA RTX** с поддержкой DLSS 5 Neural Rendering. Разрабатывалось и
-  проверялось на RTX 5070 Ti, драйвер 616.56, 4K (3840×2160)
-- **Python 3.13** с пакетами из `requirements.txt`
-- **`native/nvngx_dlssnr.dll`** — рантайм NVIDIA (165 МБ). В репозитории его
-  нет: файл превышает лимит GitHub в 100 МБ. Берётся из поставки драйвера
-  либо из DLSS SDK и кладётся в `native/`
-- Для пересборки воркера — **MSVC 2022 Build Tools** (см. «Сборка»)
+## Requirements
 
-## Запуск
+- **Windows 11** (Desktop Duplication API + `WDA_EXCLUDEFROMCAPTURE`)
+- **NVIDIA RTX** with DLSS 5 Neural Rendering support. Developed and tested
+  on RTX 5070 Ti, driver 616.56, 4K (3840×2160)
+- **Python 3.13** with packages from `requirements.txt`
+- **`native/nvngx_dlssnr.dll`** — NVIDIA runtime (165 MB). Not in the repo
+  (GitHub 100 MB file limit) — grab it from the release assets and put it
+  into `native/`
+- To rebuild the worker — **MSVC 2022 Build Tools** (see "Building")
 
-Двойной клик по `NeuralScreen.bat`. Лаунчер ищет Python в таком порядке:
-переменная `NEURALSCREEN_PYTHON` → `runtime\python.exe` рядом с программой →
-путь разработки → `python` из `PATH`. Если воркер `native/nvngx.dll` не
-собран, лаунчер соберёт его сам.
+## Quick start
 
-Консоль не закрывается специально: в неё пишутся FPS и тайминги конвейера.
+1. Download the release archive (or clone the repo and add
+   `native/nvngx_dlssnr.dll` from the release assets).
+2. Double-click `NeuralScreen.bat`. The launcher looks for Python in this
+   order: `NEURALSCREEN_PYTHON` env var → `runtime\python.exe` next to the
+   app → dev path → `python` from `PATH`. If `native/nvngx.dll` is missing,
+   the launcher builds it automatically.
+3. The console stays open on purpose: FPS and pipeline timings are printed
+   there.
 
-## Управление
+> Anticheat note: a process named `nvngx.dll` plus a fullscreen overlay may
+> upset EAC/BattlEye/Vanguard. Do not run NeuralScreen in competitive online
+> games.
 
-| Клавиша | Действие |
+## Controls
+
+| Key | Action |
 |---|---|
-| `F9` | NR вкл/выкл (при выкл оверлей закрывается, захват не идёт) |
-| `F8` | окно настроек |
-| `Ctrl+Alt+↑` / `Ctrl+Alt+↓` | масштаб обработки ±0.05 |
-| `Ctrl+Alt+Q` | выход |
+| `F9` | NR on/off. **Off is a bypass**: the overlay stays on screen showing the raw capture + HUD (no neural effect), and the desktop runs twice as fast. Everything hides only on real exit. |
+| `F8` | settings window |
+| `Ctrl+Alt+↑` / `Ctrl+Alt+↓` | processing scale ±0.05 |
+| `Ctrl+Alt+Q` | quit |
 
-Хоткеи регистрируются через `RegisterHotKey`, а не опрашиваются: система
-доставляет нажатие **только нам и не передаёт активному приложению** — F9
-в игре переключает NR, и сама игра этой клавиши не видит. Обратная сторона:
-пока NeuralScreen запущен, F8 и F9 принадлежат ему, и другие программы
-(отладчики, игры) их не получат.
+Hotkeys are registered via `RegisterHotKey`, not polled: the system delivers
+the keypress **only to us and not to the active app** — F9 inside a game
+toggles NR and the game never sees the key. The flip side: while
+NeuralScreen runs, F8 and F9 belong to it.
 
-Стрелки и выход сделаны на `Ctrl+Alt` намеренно: голые стрелки регистрировать
-нельзя — они перестали бы работать во всей системе, а выход по одиночной
-клавише слишком легко нажать случайно.
+Arrows and quit are on `Ctrl+Alt` on purpose: bare arrows cannot be
+registered (they would stop working system-wide) and a single-key quit is
+too easy to press by accident.
 
-Иконка в трее: левый клик — настройки, правый — меню (NR вкл/выкл, масштаб,
-выход). В окне настроек — профиль, слайдеры параметров NR, масштаб, язык
-(ru/en), кнопка скриншота и **Выход**.
+Tray icon: left click — settings, right click — menu (NR on/off, scale,
+quit). Settings window: profile, NR parameter sliders, scale, language
+(ru/en), screenshot button and **Exit**.
 
-Три способа закрыть программу делают разное, поэтому названы по-разному:
+Three ways to close the app and what they do:
 
-| | Что делает |
+| | Effect |
 |---|---|
-| `Ctrl+Alt+Q`, «Выход» в настройках, «Выход» в трее | завершают программу: воркер погашен, окна закрыты, процессов не остаётся |
-| «Закрыть» в окне настроек и крестик | только прячут окно настроек, программа продолжает работать |
+| `Ctrl+Alt+Q`, "Exit" in settings, "Exit" in tray | terminate: worker shut down, windows closed, no processes left |
+| "Close" in settings / window X | only hides the settings window, the app keeps running |
 
-Окно настроек безрамочное и таскается за свой заголовок — включая метку
-канала справа от названия.
-
-Оверлей click-through (`WS_EX_TRANSPARENT | WS_EX_LAYERED | WS_EX_NOACTIVATE`
-плюс `HTTRANSPARENT` в оконной процедуре) — клики и фокус уходят приложениям
-под ним. Проверено инжекцией клика: `HTTRANSPARENT` и `WS_EX_TRANSPARENT`
-по отдельности НЕ пропускают нажатие, нужен именно `WS_EX_LAYERED`.
-
-Окна исключены из захвата (`WDA_EXCLUDEFROMCAPTURE`), иначе Desktop
-Duplication снимала бы собственный вывод и получилась бы обратная связь.
-Следствие: **заснять оверлей внешним скриншотером невозможно** — Lightshot,
-OBS и прочие увидят рабочий стол без него. Для этого есть кнопка Screenshot
-в окне настроек: она берёт кадр у воркера, а не с экрана.
+The overlay is click-through (`WS_EX_TRANSPARENT | WS_EX_LAYERED |
+WS_EX_NOACTIVATE` plus `HTTRANSPARENT`) — clicks and focus go to the apps
+underneath. Windows are excluded from capture (`WDA_EXCLUDEFROMCAPTURE`),
+otherwise Desktop Duplication would capture our own output and the pipeline
+would feed on itself. Consequence: **external screen recorders (OBS,
+Lightshot) cannot see the overlay** — use the Screenshot button in settings,
+it grabs the frame from the worker instead.
 
 ## config.json
 
-| Поле | Смысл |
+| Field | Meaning |
 |---|---|
-| `monitor` | индекс монитора для захвата |
-| `width`, `height` | разрешение вывода |
-| `fullscreen` | безрамочное окно на весь монитор |
-| `warmup` | прогревочные кадры NGX при старте |
-| `work_scale` | 0.1–1.0, разрешение обработки NGX относительно вывода |
+| `monitor` | monitor index for capture |
+| `width`, `height` | output resolution |
+| `fullscreen` | borderless fullscreen window |
+| `warmup` | NGX warmup frames at start |
+| `work_scale` | 0.25–1.0, NGX processing resolution relative to output |
 | `profile` | `Faithful`, `Natural`, `Strong / Cinematic`, `Extreme / Overdrive` |
-| `intensity`, `local_tone`, `local_structure`, `skin_structure` | `null` = взять из профиля |
+| `intensity`, `local_tone`, `local_structure`, `skin_structure` | `null` = take from profile |
 | `lang` | `ru` / `en` |
-| `worker_present` | воркер показывает кадр в своём окне (`false` — вывод через pygame) |
-| `motion_on_gpu` | поле движения растягивает воркер (`false` — считать на CPU) |
+| `worker_present` | worker shows the frame in its own window (`false` — pygame output) |
+| `motion_on_gpu` | worker upscales the motion field (`false` — CPU) |
+| `capture_in_worker` | worker captures the desktop itself (DDA, `false` — dxcam in Python) |
 
-Оба последних флага — аварийные выключатели: если что-то пойдёт не так на
-другой машине, `false` возвращает старый путь, который никуда не удалён.
+The three boolean flags are emergency switches: if something misbehaves on
+another machine, `false` returns to the old path (which is fully intact).
 
-## Архитектура
+## Architecture
 
-Два процесса. Python ведёт захват, motion guides и вывод; C++-воркер владеет
-D3D12-устройством и NGX. Общаются через stdin/stdout бинарным протоколом:
+Two processes. Python drives settings, optical-flow guides and the HUD; the
+C++ worker owns the D3D12 device, the capture, NGX and the overlay window.
+They talk over stdin/stdout with a binary protocol:
 
-| Сообщение | Назначение |
+| Message | Purpose |
 |---|---|
-| `D5V3` | заголовок потока: размеры, профиль, параметры NR |
-| `SHMI` / `SACK` | передача имени общей памяти под входной кадр |
-| `WNDO` / `WACK` | поднять/закрыть окно вывода воркера |
-| `MOTS` / `MACK` | поле движения приходит уменьшенным, растягивает воркер |
-| `FRM1` | кадр: заголовок, дальше либо тело (RGBA8 + motion), либо флаг «в общей памяти» |
-| `OUT1` | результат: RGBA8 full-res, либо `bytes=0` — кадр показал воркер |
-| `RNSZ` / `RACK` | смена work-разрешения на лету, без рестарта процесса |
+| `D5V3` | stream header: sizes, profile, NR parameters |
+| `SHMI` / `SACK` | shared-memory section name for the input frame |
+| `WNDO` / `WACK` | raise/close the worker's output window |
+| `MOTS` / `MACK` | motion arrives at reduced size, worker upscales it on GPU |
+| `DDA1` / `DACK` | worker takes over capture (Desktop Duplication), colour never touches the CPU |
+| `GRAY` / `GAK` | worker writes AREA-downsampled luminance (320×180) into a back-mapping for the guides |
+| `FRM1` | frame: header, then either payload (RGBA8 + motion) or "in shared memory" flag |
+| `OUT1` | result: RGBA8 full-res, or `bytes=0` — the worker already presented it |
+| `RNSZ` / `RACK` | change work resolution on the fly, no process restart |
 
-**Вывод.** По команде `WNDO` воркер поднимает своё безрамочное окно на весь
-экран с D3D12-swapchain и показывает результат NGX сам: `OUT1` приходит
-пустым, пиксели в Python не возвращаются вовсе. Уходят readback 33 МБ,
-обратный пайп и blit в pygame. Окно pygame при этом остаётся слоем HUD —
-фон заливается цветом-ключом и делается прозрачным (`LWA_COLORKEY`),
-перерисовка идёт 10 раз в секунду вместо каждого кадра.
+**Capture.** On `DDA1` the worker opens Desktop Duplication on the GPU:
+each frame is copied into a cross-device shared texture and swizzled to
+RGBA. Python stops capturing entirely — `grab` and `guides` in the log drop
+to 0.1 ms. Fallback (dxcam + full-frame send) stays intact.
 
-Скриншот в этом режиме берётся флагом `FRAME_FLAG_WANT_PIXELS`: для одного
-кадра воркер и покажет его, и вернёт пиксели.
+**Guides.** The optical flow needs a small gray frame. On `GRAY` the worker
+computes it with an honest block average (12×12 per cell at 4K → 320×180,
+matching `cv2.INTER_AREA`; bilinear would alias text and break the flow) and
+writes it into a named mapping. Python reads the flow input from there —
+no 4K frame ever crosses the CPU again.
 
-**Поле движения.** По команде `MOTS` клиент шлёт его в разрешении
-оптического потока (320×180, 0.23 МБ) вместо work-разрешения (12 МБ), а
-растягивает воркер вычислительным шейдером. Билинейная интерполяция считается
-вручную во float32, а не аппаратным сэмплером — у того веса квантуются до
-1/256 текселя. Формула повторяет `cv2.resize(INTER_LINEAR)`.
+**Output.** On `WNDO` the worker raises its own borderless D3D12-swapchain
+window across the screen and presents the NGX result itself: `OUT1` comes
+back empty, pixels never return to Python. The pygame window stays as a
+HUD layer — its background is filled with a chroma key and made transparent
+(`LWA_COLORKEY`); it redraws ~10 times per second instead of every frame.
+The worker window is excluded from capture to avoid the DDA feedback loop.
 
-Расхождение с прежним CPU-растяжением измерено на финальном кадре NGX и
-оказалось на уровне сдвига поля движения на **сотую долю пикселя** —
-контрольный опыт в `_work/diag_motion_sensitivity.py`. Учитывая, что сам
-поток считается на 320×180 и растягивается в семь раз, его собственная
-ошибка на порядки больше.
+**NR off (bypass).** `F9` does not stop the pipeline anymore. Frames are
+sent with `FRAME_FLAG_BYPASS`: the worker skips the NGX evaluate and
+presents the raw capture instead. The overlay (picture + HUD) stays alive
+and predictable; everything is hidden only on real exit. The next
+non-bypass frame resumes the neural pass.
 
-Стили click-through ставятся **после** создания swapchain:
-`CreateSwapChainForHwnd` отказывает на layered-окне, а уже созданная цепочка
-продолжает работать. Воркер объявляет себя per-monitor DPI aware до создания
-окна — иначе на масштабе 125% окно 3840×2160 создаётся физическим 4800×2700
-и картинка растягивается.
+**Screenshot** in present mode uses `FRAME_FLAG_WANT_PIXELS`: for one frame
+the worker both presents and returns the pixels.
 
-Входной кадр идёт через именованную секцию общей памяти: воркер грузит
-пиксели в текстуру прямо из маппинга, в пайп уходит только 24-байтовый
-заголовок. Раскладка секции фиксирована и не зависит от `work_scale`
-(RGBA8 full-res, следом motion со смещения `full_w*full_h*4`), поэтому смена
-разрешения не требует перевыговаривания. Слот один: класть следующий кадр
-можно только после ответа воркера на предыдущий. Если воркер не смог открыть
-маппинг, обмен автоматически откатывается на передачу тела через пайп.
+**Motion field.** On `MOTS` the client sends it at optical-flow resolution
+(320×180, 0.23 MB) instead of work resolution (12 MB); the worker upscales
+with a compute shader. Bilinear weights are computed manually in float32
+(the hardware sampler quantizes to 1/256 texel). Formula matches
+`cv2.resize(INTER_LINEAR)`. The difference against the CPU path measured on
+the final NGX frame is a hundredth of a pixel.
 
-Два ограничения, которые выглядят как странности, но обязательны:
+**Shared input.** The frame goes through a named section: the worker uploads
+texture data straight from the mapping, only a 24-byte header crosses the
+pipe. Layout is fixed and independent of `work_scale` (RGBA8 full-res,
+motion at a constant offset), so resolution changes don't require
+renegotiation. One slot: the next frame may be placed only after the worker
+replies to the previous one.
 
-- **Имя воркера обязано быть `nvngx.dll`.** NGX Core возвращает
-  `FAIL_PlatformError` на `Init_Ext` для любого другого имени процесса.
-  Проверено экспериментально.
-- **work-разрешение ограничено 2560×1440.** На 4K feature 18 молчит: воркер
-  зависает на нулевом кадре и в legacy-, и в upscale-режиме.
+Two constraints that look like quirks but are mandatory:
 
-Смена масштаба идёт через `RNSZ` (~60 мс, воркер пересоздаёт NGX feature у
-себя, окно и захват не трогаются). Если `RNSZ` не прошёл — фолбэк на полный
-рестарт процесса воркера.
+- **The worker binary must be named `nvngx.dll`.** NGX Core returns
+  `FAIL_PlatformError` on `Init_Ext` for any other process name. Verified
+  experimentally.
+- **Work resolution is capped at 2560×1440.** At 4K the feature 18 goes
+  silent: the worker hangs on frame zero in both legacy and upscale modes.
 
-## Производительность
+Scale changes go through `RNSZ` (~60 ms, the worker recreates the NGX
+feature in-process; window and capture untouched). If `RNSZ` fails — fall
+back to a full worker restart.
 
-Замерено на RTX 5070 Ti, 4K, `work_scale` 0.5 (1920×1080), статичный экран:
+## Performance
+
+Measured on RTX 5070 Ti, 4K desktop, `work_scale` 0.5 (1920×1080), static
+screen, pipeline fully on the GPU (DDA + GRAY + WNDO + MOTS):
 
 ```
-grab 2.2 мс | guides 2.2 мс | send 1.2 мс | recv 18.1 мс | show 0.6 мс  = ~24 мс -> 38-41 FPS
+NR ON :  guides 0.1ms | send 0.0ms | recv 30.3ms | show 0.7ms  -> 32.0 FPS
+NR OFF (bypass):       recv 15.0ms | show 0.4ms              -> 64.0 FPS
 ```
 
-Путь оптимизации (тот же стенд, тот же режим):
+The path so far (same bench, same mode):
 
-| Состояние | Кадр | FPS |
+| State | Frame | FPS |
 |---|---|---|
-| кадр и результат через stdio-пайпы | ~50 мс | 19.5 |
-| входной кадр через общую память | ~46 мс | 21.9 |
-| вывод в окне воркера | ~26 мс | 36-39 |
-| поле движения растягивает GPU | ~24 мс | 38-41 |
+| frame and result through stdio pipes | ~50 ms | 19.5 |
+| input frame through shared memory | ~46 ms | 21.9 |
+| output in the worker window | ~26 ms | 36–39 |
+| motion field upscaled on GPU | ~24 ms | 38–41 |
+| capture in worker (DDA) + guides from gray | ~31 ms | 32.0 |
+| **NR off via bypass** | **~16 ms** | **64.0** |
 
-Отдельно по `guides`, где выигрыш виден только на движении (на статике
-оптический поток не считается вовсе): 16.2 → 12.4 → **4.0 мс** на кадр.
+Actually **NGX itself is ~1 ms**. The rest is pipeline: `recv` does not
+depend on work resolution (31 ms both at 384×216 and 2560×1440). NR-on
+frames run in a 2-vblank rhythm at 60 Hz (30 ms), bypass in a 1-vblank
+rhythm (15 ms) — phase alignment of capture/present is the next optimization
+target, see the project notes.
 
-Из всего этого **собственно NGX — около 1 мс**. Остальное было и остаётся
-движением пикселей. Замерено регрессией `recv` по work-разрешению при
-фиксированном full: время ответа не зависело от объёма работы NGX (31 мс и на
-384×216, и на 2560×1440) — то есть упиралось в перекачку, а не в счёт.
+On real motion the guides cost rises (DISOpticalFlow on 320×180 ≈ 1.4 ms +
+upscale), but stays negligible compared to `recv`.
 
-**На реальном движении картина другая.** Цифры выше сняты на статике, где
-генератор motion уходит в короткое замыкание и оптический поток не считает
-вовсе. Когда на экране что-то происходит, включается полный путь и `guides`
-становится сопоставим с `recv`. Основная его стоимость — не сам поток
-(1.4 мс), а растяжение поля движения с 320×180 до work-разрешения и
-конвертация во float16: 6 миллионов значений на кадр.
-
-Что осталось узким местом:
-
-| Статья | Стоимость | Состояние |
-|---|---|---|
-| растяжение motion до work-разрешения | ~8 мс | **сделано**: шейдер в воркере |
-| upload кадра CPU→GPU в воркере | ~15 мс | осталось: перенести захват в воркер, тогда Desktop Duplication отдаёт текстуру, уже лежащую на GPU |
-
-Оставшаяся статья — самая крупная. Инфраструктура шейдера под неё уже есть,
-но понадобится второй шейдер: оптическому потоку нужен маленький серый кадр,
-и уменьшать его придётся **честным блочным усреднением**, а не билинейной
-выборкой. Наивный билинейный даунскейл в 12 раз — это фактически точечная
-выборка с сильным алиасингом: поток начнёт врать на мелких деталях и тексте,
-и NR потеряет стабильность между кадрами.
-
-## Сборка воркера
+## Building the worker
 
 ```
 native\build-host.bat
 ```
 
-Нужны MSVC 2022 Build Tools по пути
-`C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools`. Скрипт
-собирает `dlss5-feed-host64.cpp` в `native/nvngx.dll`, линкуясь с
-`native/lib/Windows_x86_64/x64/nvsdk_ngx_d.lib`. Заголовки NGX — в
+Requires MSVC 2022 Build Tools at
+`C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools`. The script
+builds `dlss5-feed-host64.cpp` into `native/nvngx.dll`, linking
+`native/lib/Windows_x86_64/x64/nvsdk_ngx_d.lib`. NGX headers are in
 `native/include/`.
 
-Артефакт `native/nvngx.dll` в репозиторий не кладётся.
+The artifact `native/nvngx.dll` is not committed to the repo.
 
-## Известные ограничения
+## Known limitations
 
-- Только Windows, только NVIDIA RTX с DLSS 5 NR.
-- work-разрешение упирается в 2560×1440 (ограничение NGX, см. выше).
-- FPS ограничен транспортом (~19.5 на 4K), а не GPU.
-- На статичном рабочем столе оптический поток отключается по порогу
-  `scene_score` — motion не считается, кадры идут дешевле.
+- Windows only, NVIDIA RTX with DLSS 5 NR only.
+- Work resolution capped at 2560×1440 (NGX constraint, see above).
+- Full-screen exclusive games: the overlay is designed for the desktop and
+  borderless windowed apps; on a display-mode switch the pipeline resets.
+- End-to-end latency is 40–60 ms — inherent to capture → NGX → present
+  chains; visible when dragging windows.
+- Anticheat: `nvngx.dll` + overlay is a red flag for EAC/BattlEye/Vanguard.
+- On a static desktop the optical flow turns off by the `scene_score`
+  threshold — motion is skipped and frames are cheaper.
