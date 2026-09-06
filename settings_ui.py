@@ -206,6 +206,12 @@ class SettingsWindow:
         self._visible = True
         self._center()
         self._root.deiconify()
+        # Безрамное окно (overrideredirect) не берёт фокус сам — без
+        # focus_force() после F8 нужно дополнительно кликать мышью.
+        # lift() вытаскивает его наверх topmost-стопки (поверх оверлея).
+        self._root.lift()
+        self._root.focus_force()
+        self._root.attributes("-topmost", True)
         self._outbox.put(("settings_opened",))
 
     def _hide(self) -> None:

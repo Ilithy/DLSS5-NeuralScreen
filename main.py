@@ -1480,7 +1480,7 @@ def main() -> int:
 
             t0 = time.perf_counter()
             try:
-                output_rgba = reader.recv(frame_index, timeout=60.0)
+                output_rgba = reader.recv(frame_index, timeout=5.0)
             except (TimeoutError, EOFError, RuntimeError, OSError) as exc:
                 consecutive_restarts += 1
                 if consecutive_restarts >= MAX_CONSECUTIVE_RESTARTS:
