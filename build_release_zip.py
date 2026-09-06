@@ -16,10 +16,50 @@ extra = [
 TK_SKIP = ("runtime/tcl/", "runtime/tcl86t.dll", "runtime/tk86t.dll",
            "runtime/_tkinter.pyd", "runtime/Lib/tkinter/")
 
+# Рантайм собирался под другие задачи и тащит пакеты, которых программа не
+# касается: веб-морду, таблицы, упаковщик. Проверено через sys.modules после
+# импорта всех модулей проекта — нужны только av, cv2, numpy, PIL, pygame,
+# pystray, dxcam, comtypes. Остальное вырезаем, это ~130 МБ до сжатия.
+DROP_PACKAGES = {
+    # gradio и его окружение
+    "gradio", "gradio_client", "hf_gradio", "huggingface_hub", "hf_xet",
+    "fastapi", "starlette", "uvicorn", "pydantic", "pydantic_core",
+    "annotated_types", "annotated_doc", "typing_inspection",
+    "safehttpx", "groovy", "pydub", "python_multipart", "multipart",
+    "orjson", "httpx", "httpcore", "h11", "anyio", "idna", "certifi",
+    "fsspec", "filelock", "jinja2", "markupsafe", "tqdm", "audioop",
+    "audioop_lts", "brotli", "_brotli", "yaml", "_yaml", "pyyaml",
+    "semantic_version", "tomlkit", "typer", "click", "shellingham",
+    "rich", "markdown_it", "markdown_it_py", "mdurl", "pygments",
+    # таблицы и время
+    "pandas", "pytz", "tzdata", "dateutil", "python_dateutil",
+    # упаковщик
+    "PyInstaller", "pyinstaller", "_pyinstaller_hooks_contrib",
+    "pyinstaller_hooks_contrib", "altgraph", "pefile", "peutils", "ordlookup",
+    "psutil",
+    # менеджер пакетов конечному пользователю не нужен
+    "pip",
+}
+SP = "runtime/Lib/site-packages/"
+
+
+def _drop_sitepackage(norm: str) -> bool:
+    if not norm.startswith(SP):
+        return False
+    entry = norm[len(SP):].split("/", 1)[0]
+    for name in DROP_PACKAGES:
+        # сам пакет, его .py-модуль, папка .libs и dist-info рядом
+        if (entry == name or entry == name + ".py" or entry == name + ".libs"
+                or entry.startswith(name + "-")):
+            return True
+    return False
+
 
 def _skip(path: str) -> bool:
     norm = path.replace("\\", "/")
-    return any(norm == p or norm.startswith(p) for p in TK_SKIP)
+    if any(norm == p or norm.startswith(p) for p in TK_SKIP):
+        return True
+    return _drop_sitepackage(norm)
 
 
 for root, _dirs, fs in os.walk("runtime"):
