@@ -12,5 +12,6 @@
   "local_structure": null,
   "skin_structure": null,
   "worker_present": true,
-  "motion_on_gpu": true
+  "motion_on_gpu": true,
+  "capture_in_worker": true
 }

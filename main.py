@@ -112,6 +112,24 @@ RESIZE_ACK_MAGIC = 0x4B434152  # 'RACK'
 RESIZE_FMT = "<10I4f2I"   # та же раскладка, что HEADER_FMT (magic вместо VIDEO_MAGIC)
 RACK_FMT = "<4Iq"         # magic, ok, ngx_result, reserved, pts (24 байта)
 
+# DDA1: воркер сам захватывает экран (Desktop Duplication) — цвет идёт
+# напрямую в GPU-текстуру, Python больше не передаёт 33 МБ кадра. Кадры
+# FRM1 уходят с флагом FRAME_FLAG_NO_COLOR: только motion, без цвета.
+DDA_MAGIC = 0x31414444  # 'DDA1'
+DDA_ACK_MAGIC = 0x4B434144  # 'DACK'
+DDA_FMT = "<4Iq"        # magic, width, height, flags, pts (24 байта)
+DDA_ACK_FMT = "<4Iq"    # magic, ok, reserved0, reserved1, pts
+FRAME_FLAG_NO_COLOR = 0x8  # в DDA-режиме: цвет не шлём (воркер берёт сам)
+FRAME_FLAG_BYPASS = 0x10  # NR OFF: пропустить NGX, показать сырой захват
+
+# GRAY: воркер пишет luminance (даунсэмпл экрана, ~320x180) в обратный
+# маппинг Python — для оптического потока guides. В DDA-режиме это
+# заменяет dxcam-захват: gray приходит прямо с GPU.
+GRAY_MAGIC = 0x59415247  # 'GRAY'
+GRAY_ACK_MAGIC = 0x4B434147  # 'GAK'
+GRAY_FMT = "<4Iq64s"    # magic, width, height, flags, pts, name (88 байт)
+GRAY_ACK_FMT = "<4Iq"   # magic, ok, reserved0, reserved1, pts
+
 # --- Профили DLSS 5 NR (порядок полей как в конвертере) -------------------
 PROFILES = {
     "Faithful": dict(profile=0, preset=0, style=0, auto_mask=0, ui_correction=0,
@@ -188,6 +206,41 @@ class SharedFrameBuffer:
         self._buf = np.ndarray((self.size,), dtype=np.uint8, buffer=self._mm)
         self.negotiated = False  # выставляет start_worker после SACK
 
+        # --- Обратный канал: gray (luminance) для guides в DDA-режиме ---
+        # Воркер пишет сюда даунсэмпл экрана (320x180 = размер потока),
+        # Python читает его вместо dxcam-захвата для DISOpticalFlow.
+        self.gray_w, self.gray_h = 0, 0
+        self.gray_bytes = 0
+        self.gray_name = f"NeuralScreenGray_{os.getpid()}_{uuid.uuid4().hex[:6]}"
+        self._gray_mm: mmap.mmap | None = None
+        self._gray_buf: np.ndarray | None = None  # (gray_bytes,) uint8
+
+    def open_gray(self, w: int, h: int) -> None:
+        """Открыть gray-секцию размером w*h (создать, если не была)."""
+        if self._gray_mm is not None and self.gray_w == w and self.gray_h == h:
+            return
+        self.close_gray()
+        self.gray_w, self.gray_h = w, h
+        self.gray_bytes = w * h
+        self._gray_mm = mmap.mmap(-1, self.gray_bytes, tagname=self.gray_name)
+        self._gray_buf = np.ndarray((self.gray_bytes,), dtype=np.uint8, buffer=self._gray_mm)
+
+    def read_gray(self) -> np.ndarray | None:
+        """Вернуть копию gray-кадра (320x180 uint8) или None, если не открыт."""
+        if self._gray_buf is None:
+            return None
+        return self._gray_buf.copy()
+
+    def close_gray(self) -> None:
+        if self._gray_buf is not None:
+            self._gray_buf = None
+        if self._gray_mm is not None:
+            try:
+                self._gray_mm.close()
+            except Exception:
+                pass
+            self._gray_mm = None
+
     def put(self, rgba: np.ndarray, motion: np.ndarray) -> None:
         """Положить кадр и motion в маппинг (по одному memcpy на каждый)."""
         color = rgba.reshape(-1)
@@ -204,6 +257,7 @@ class SharedFrameBuffer:
 
     def close(self) -> None:
         self.negotiated = False
+        self.close_gray()
         self._buf = None  # numpy держит буфер: без сброса mmap.close() бросит BufferError
         try:
             self._mm.close()
@@ -352,15 +406,29 @@ def _negotiate_shm(worker: subprocess.Popen, reader: "WorkerReader",
 def send_frame(worker: subprocess.Popen, index: int, rgba: np.ndarray,
                motion: np.ndarray, reset: bool, pts: int,
                shm: "SharedFrameBuffer | None" = None,
-               want_pixels: bool = False, motion_small: bool = False) -> None:
+               want_pixels: bool = False, motion_small: bool = False,
+               no_color: bool = False, bypass: bool = False) -> None:
     """Отправить кадр воркеру.
 
     С согласованной общей памятью в пайп уходит только 24-байтовый заголовок
     с флагом FRAME_FLAG_SHM, пиксели кладутся в маппинг. Иначе — старый путь:
     заголовок + RGBA8 + motion float16 телом в пайп.
+
+    no_color (DDA-режим): цвет берёт воркер сам из Desktop Duplication —
+    в пайп уходит только motion, rgba игнорируется.
+    bypass (NR OFF): воркер пропускает NGX и показывает сырой захват —
+    оверлей (окно, HUD) остаётся живым, эффект выключен.
     """
     flags = (FRAME_FLAG_WANT_PIXELS if want_pixels else 0) | \
-            (FRAME_FLAG_MOTION_SMALL if motion_small else 0)
+            (FRAME_FLAG_MOTION_SMALL if motion_small else 0) | \
+            (FRAME_FLAG_NO_COLOR if no_color else 0) | \
+            (FRAME_FLAG_BYPASS if bypass else 0)
+    if no_color:
+        # DDA-режим: только motion, без цвета (SHM не используется для цвета)
+        worker.stdin.write(struct.pack(FRAME_FMT, FRAME_MAGIC, index, int(reset), flags, pts))
+        worker.stdin.write(motion.tobytes())
+        worker.stdin.flush()
+        return
     if shm is not None and shm.negotiated:
         shm.put(rgba, motion)
         worker.stdin.write(struct.pack(FRAME_FMT, FRAME_MAGIC, index, int(reset),
@@ -416,6 +484,33 @@ def send_window(worker: subprocess.Popen, width: int, height: int,
     worker.stdin.flush()
 
 
+def send_dda(worker: subprocess.Popen, width: int, height: int,
+             flags: int = 0, pts: int = 0) -> None:
+    """DDA1: попросить воркера захватывать экран самому (Desktop Duplication).
+
+    width=height=0 — выключить захват и вернуться к передаче кадра из Python.
+    Пока активен, кадры FRM1 несут FRAME_FLAG_NO_COLOR (только motion).
+    """
+    worker.stdin.write(struct.pack(DDA_FMT, DDA_MAGIC, int(width), int(height),
+                                   int(flags), int(pts)))
+    worker.stdin.flush()
+
+
+def send_gray(worker: subprocess.Popen, width: int, height: int,
+              name: str, flags: int = 0, pts: int = 0) -> None:
+    """GRAY: передать воркеру имя обратного маппинга для luminance-кадра.
+
+    В DDA-режиме воркер пишет сюда даунсэмпл экрана (ширина x высота,
+    обычно 320x180 = размер поля потока), Python читает его для guides.
+    width=height=0 — выключить обратный канал.
+    """
+    if len(name) >= 64:
+        raise ValueError("имя gray-секции длиннее 63 символов")
+    worker.stdin.write(struct.pack(GRAY_FMT, GRAY_MAGIC, int(width), int(height),
+                                   int(flags), int(pts), name.encode("ascii")))
+    worker.stdin.flush()
+
+
 class WorkerReader:
     """Постоянный поток-читатель stdout воркера (один на воркера).
 
@@ -465,6 +560,16 @@ class WorkerReader:
                     rest = _read_exact(self._worker.stdout, struct.calcsize(RACK_FMT) - 4)
                     _magic, ok, ngx_result, _reserved, _pts = struct.unpack(RACK_FMT, magic_raw + rest)
                     self._queue.put(("rack", (ok, ngx_result)))
+                elif magic == DDA_ACK_MAGIC:
+                    # DACK (24 байта): подтверждение DDA1 — захват перешёл к воркеру
+                    rest = _read_exact(self._worker.stdout, struct.calcsize(DDA_ACK_FMT) - 4)
+                    _magic, ok, _r0, _r1, _pts = struct.unpack(DDA_ACK_FMT, magic_raw + rest)
+                    self._queue.put(("dack", ok))
+                elif magic == GRAY_ACK_MAGIC:
+                    # GAK: подтверждение GRAY — обратный канал luminance открыт
+                    rest = _read_exact(self._worker.stdout, struct.calcsize(GRAY_ACK_FMT) - 4)
+                    _magic, ok, _r0, _r1, _pts = struct.unpack(GRAY_ACK_FMT, magic_raw + rest)
+                    self._queue.put(("gak", ok))
                 elif magic == OUT_MAGIC:
                     rest = _read_exact(self._worker.stdout, struct.calcsize(OUT_FMT) - 4)
                     _magic, out_index, ok, byte_count, ngx_result, _pts = struct.unpack(OUT_FMT, magic_raw + rest)
@@ -529,6 +634,42 @@ class WorkerReader:
             if got == "wack":
                 if not payload:
                     raise RuntimeError("воркер не смог поднять окно вывода")
+                return
+
+    def wait_dack(self, timeout: float) -> None:
+        """Дождаться DACK — подтверждение команды DDA1 (захват у воркера)."""
+        deadline = time.monotonic() + timeout
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError(f"воркер не подтвердил DDA1 за {timeout:.0f}с")
+            try:
+                got, payload = self._queue.get(timeout=remaining)
+            except queue.Empty:
+                continue
+            if got is None:
+                raise payload if isinstance(payload, Exception) else EOFError("воркер остановился")
+            if got == "dack":
+                if not payload:
+                    raise RuntimeError("воркер не смог включить захват экрана")
+                return
+
+    def wait_gak(self, timeout: float) -> None:
+        """Дождаться GAK — подтверждение открытия обратного gray-канала."""
+        deadline = time.monotonic() + timeout
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError(f"воркер не подтвердил GRAY за {timeout:.0f}с")
+            try:
+                got, payload = self._queue.get(timeout=remaining)
+            except queue.Empty:
+                continue
+            if got is None:
+                raise payload if isinstance(payload, Exception) else EOFError("воркер остановился")
+            if got == "gak":
+                if not payload:
+                    raise RuntimeError("воркер не смог открыть gray-канал")
                 return
 
     def wait_sack(self, timeout: float) -> None:
@@ -767,10 +908,14 @@ def main() -> int:
         # Режим WNDO: кадр показывает воркер, в Python пиксели не приходят.
         want_present = bool(cfg.get("worker_present", True))
         want_motion_small = bool(cfg.get("motion_on_gpu", True))
+        want_dda = bool(cfg.get("capture_in_worker", True))  # DDA: цвет берёт воркер
         motion_small = False  # воркер растягивает поле движения сам
         motion_attempted = False  # пробовали для текущего воркера
         present_mode = False      # окно воркера сейчас поднято
         present_attempted = False  # пробовали для текущего воркера (не спамить)
+        dda_mode = False          # воркер захватывает экран сам
+        dda_attempted = False     # пробовали для текущего воркера (не спамить)
+        gray_active = False       # guides берут luminance из gray-канала воркера
         pending_shot: Path | None = None  # скриншот ждёт кадр с пикселями
         work_frame = None  # текущий work-кадр; None → захватить в начале цикла
         fps_window: list[float] = []
@@ -903,6 +1048,7 @@ def main() -> int:
             work_w, work_h = new_w, new_h
             guides = TemporalGuideGenerator(work_w, work_h, emit_small=motion_small)
             _sync_motion_size()  # разрешение потока могло измениться
+            _sync_gray()         # gray-канал живёт в воркере, размер = flow guides
             frame_index = 0
             pts = 0
             work_frame = None  # индексы сброшены — нужен свежий захват
@@ -956,7 +1102,7 @@ def main() -> int:
 
         def _disable_present() -> None:
             """Закрыть окно воркера и вернуться к отрисовке кадра в pygame."""
-            nonlocal present_mode
+            nonlocal present_mode, present_attempted
             if not present_mode:
                 return
             try:
@@ -965,6 +1111,7 @@ def main() -> int:
             except Exception as exc:
                 print(f"[main] Не удалось закрыть окно воркера: {exc}", file=sys.stderr)
             present_mode = False
+            present_attempted = False  # после паузы окно можно поднять снова
             display.set_hud_only(False)
 
         def _forget_present() -> None:
@@ -975,6 +1122,72 @@ def main() -> int:
             motion_small = False
             motion_attempted = False
             display.set_hud_only(False)
+
+        def _sync_gray() -> None:
+            """GRAY: перевыговорить обратный канал luminance под guides.
+
+            Воркер пишет в маппинг ровно flow-размер guides. Канал меняется
+            вместе с guides (после RNSZ flow может измениться), поэтому
+            пересинхронизация нужна в _enable_dda и после apply.
+            Отказ не смертелен — guides останутся на dxcam.
+            """
+            nonlocal gray_active
+            if not dda_mode:
+                return
+            try:
+                gw, gh = guides.flow_width, guides.flow_height
+                shm.open_gray(gw, gh)
+                send_gray(worker, gw, gh, shm.gray_name)
+                reader.wait_gak(timeout=15.0)
+                gray_active = True
+                print(f"[main] Gray-канал {gw}x{gh}: guides берут luminance из воркера")
+            except Exception as exc:
+                gray_active = False
+                print(f"[main] Gray-канал недоступен ({exc}) — guides через dxcam",
+                      file=sys.stderr)
+
+        def _enable_dda() -> None:
+            """Попросить воркера захватывать экран самому (DDA1).
+
+            Пока активен, кадры FRM1 несут FRAME_FLAG_NO_COLOR — цвет в пайп
+            не идёт, воркер берёт его из Desktop Duplication прямо на GPU.
+            Вместе с DDA активируем обратный gray-канал: воркер пишет туда
+            luminance (размер поля потока), guides читают его и не зависят
+            от dxcam. Отказ не смертелен: остаёмся на передаче из Python.
+            """
+            nonlocal dda_mode, dda_attempted, capture
+            dda_attempted = True
+            try:
+                # Кадр в DDA-режиме всё равно должен быть у guides (motion),
+                # поэтому dxcam продолжает работать — просто цвет не шлём воркеру.
+                send_dda(worker, width, height, 0)
+                reader.wait_dack(timeout=15.0)
+                dda_mode = True
+                _sync_gray()
+                print("[main] Захват экрана в воркере (DDA1): цвет не идёт через пайп")
+            except Exception as exc:
+                dda_mode = False
+                print(f"[main] Захват в воркере недоступен ({exc}) — кадры через Python",
+                      file=sys.stderr)
+
+        def _disable_dda() -> None:
+            """Выключить захват в воркере и вернуться к передаче кадра из Python."""
+            nonlocal dda_mode
+            if not dda_mode:
+                return
+            try:
+                send_dda(worker, 0, 0, 0)
+                reader.wait_dack(timeout=10.0)
+            except Exception as exc:
+                print(f"[main] Не удалось выключить захват в воркере: {exc}", file=sys.stderr)
+            dda_mode = False
+
+        def _forget_dda() -> None:
+            """Воркер перезапущен — его DDA-захват умер с процессом."""
+            nonlocal dda_mode, dda_attempted, gray_active
+            dda_mode = False
+            dda_attempted = False
+            gray_active = False
 
         def request_apply(new_scale: float, new_profile: str, new_params: dict) -> None:
             """Применить настройки с coalescing по RESTART_COOLDOWN.
@@ -1056,8 +1269,7 @@ def main() -> int:
                         paused = not paused
                         if not paused:
                             work_frame = None  # свежий захват после паузы
-                            display.set_visible(True)  # окно снова поверх
-                        print(f"[main] NR {'OFF (пауза NGX)' if paused else 'ON'}")
+                        print(f"[main] NR {'OFF (bypass NGX)' if paused else 'ON'}")
                         display.alert(UI_STRINGS[lang]["nr_off" if paused else "nr_on"])
                         tray._set_state(nr=not paused)
                     elif cmd in ("scale_up", "scale_down"):
@@ -1145,20 +1357,18 @@ def main() -> int:
             if not running:
                 break
 
-            if paused:
-                # NR OFF: окно скрыто, захват не нужен — рабочий стол не
-                # тормозит оверлеем. Только хоткеи/команды обрабатываются.
-                # Окно воркера тоже закрываем: кадры ему не идут, и оно
-                # так и висело бы поверх экрана с последним кадром.
-                if present_mode:
-                    _disable_present()
-                display.set_visible(False)
-                status = "NR OFF"
-                time.sleep(0.02)
-                continue
+            # NR OFF — bypass: конвейер продолжает крутиться (захват → показ
+            # сырого кадра в окне воркера), но NGX-эффект пропущен. Оверлей
+            # (картинка + HUD) остаётся живым и предсказуемым; прячем всё
+            # только при реальном выходе. Bypass-кадр шлём как обычный (флаг
+            # в заголовке), чтобы парность send/recv не нарушалась.
+            bypass = paused
+            # (для читаемости: в send_frame передаём bypass=bypass)
 
             if want_present and not present_mode and not present_attempted:
                 _enable_present()
+            if want_dda and not dda_mode and not dda_attempted:
+                _enable_dda()
             if want_motion_small and not motion_small and not motion_attempted:
                 motion_attempted = True
                 _sync_motion_size()
@@ -1171,7 +1381,7 @@ def main() -> int:
             # Воркер (v3, NGX Upscaling) сам ресайзит full→work→full на GPU:
             # Python шлёт full-res кадр, motion — work-res (guides создан
             # с work_w/work_h и сам уменьшает вход), получает full-res.
-            if work_frame is None:
+            if work_frame is None and not gray_active:
                 t0 = time.perf_counter()
                 frame = _safe_grab()
                 _perf("grab", t0)
@@ -1198,13 +1408,18 @@ def main() -> int:
             # и продолжает. Это финальная защита: программа не падает.
             try:
                 t0 = time.perf_counter()
-                guide = guides.process(work_frame)
+                if gray_active:
+                    guide = guides.process(gray=shm.read_gray())
+                else:
+                    guide = guides.process(work_frame)
                 _perf("guides", t0)
                 check_worker(worker, worker_logs)
                 t0 = time.perf_counter()
                 send_frame(worker, frame_index, work_frame, guide.motion, guide.reset,
                            pts, shm, want_pixels=(pending_shot is not None),
-                           motion_small=motion_small)
+                           motion_small=motion_small,
+                           no_color=bool(dda_mode),
+                           bypass=bypass)
                 _perf("send", t0)
             except (BrokenPipeError, OSError, EOFError, RuntimeError) as exc:
                 consecutive_restarts += 1
@@ -1228,6 +1443,7 @@ def main() -> int:
                     height if (work_w != width or work_h != height) else 0,
                     worker_stop, shm)
                 _forget_present()
+                _forget_dda()
                 _sync_motion_size()
                 frame_index = 0
                 pts = 0
@@ -1240,9 +1456,12 @@ def main() -> int:
             # между send и recv. Буферы: send_frame копирует данные в pipe
             # (tobytes), guides.process не держит ссылок на вход — buf_full
             # можно переиспользовать сразу.
-            t0 = time.perf_counter()
-            next_frame = _safe_grab()
-            _perf("grab", t0)
+            # В DDA-режиме кадр берёт воркер сам — Python не захватывает.
+            next_frame = None
+            if not gray_active:
+                t0 = time.perf_counter()
+                next_frame = _safe_grab()
+                _perf("grab", t0)
             if next_frame is not None:
                 if next_frame.shape[1] != width or next_frame.shape[0] != height:
                     t0 = time.perf_counter()
@@ -1280,6 +1499,7 @@ def main() -> int:
                     height if (work_w != width or work_h != height) else 0,
                     worker_stop, shm)
                 _forget_present()
+                _forget_dda()
                 _sync_motion_size()
                 frame_index = 0
                 pts = 0
@@ -1290,7 +1510,7 @@ def main() -> int:
             # копился за всю сессию, и три несвязанных сбоя (хоть с разницей
             # в час) выключали NR.
             consecutive_restarts = 0
-            status = "NR ON"
+            status = "NR OFF" if paused else "NR ON"
             pts += 1
 
             t0 = time.perf_counter()

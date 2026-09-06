@@ -59,8 +59,21 @@ class TemporalGuideGenerator:
         gray = cv2.cvtColor(rgba, cv2.COLOR_RGBA2GRAY)
         return cv2.resize(gray, (self.flow_width, self.flow_height), interpolation=cv2.INTER_AREA)
 
-    def process(self, rgba: np.ndarray) -> GuideFrame:
-        current = self._small_gray(rgba)
+    def process(self, rgba: np.ndarray | None = None,
+                gray: np.ndarray | None = None) -> GuideFrame:
+        """Посчитать guides: motion/reset/scene_score.
+
+        Либо rgba (BGR/RGBA full-res — сам даунсэмплит), либо готовый gray
+        (flow-размер, uint8 2D) — приходит из обратного канала воркера
+        (GRAY/DDA). Приоритет: gray (уже правильного размера).
+        """
+        if gray is not None:
+            current = gray.reshape(self.flow_height, self.flow_width).astype(np.uint8)
+            if current.shape != (self.flow_height, self.flow_width):
+                raise ValueError(
+                    f"gray {current.shape} != ожидаемый {(self.flow_height, self.flow_width)}")
+        else:
+            current = self._small_gray(rgba)
         pixels = self.width * self.height
         if self.previous_gray is None:
             motion = self._zero_small if self.emit_small else self._zero_motion

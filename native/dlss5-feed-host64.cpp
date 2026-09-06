@@ -17,8 +17,11 @@
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <windows.h>
+#include <d3d11.h>
+#include <d3d11_4.h>
 #include <d3d12.h>
 #include <dxgi1_4.h>
+#include <d3dcompiler.h>
 #include <cstdio>
 #include <cstdarg>
 #include <cstdint>
@@ -710,6 +713,10 @@ static constexpr uint32_t WINDOW_MAGIC     = 0x4F444E57u; // "WNDO" -- client ->
 static constexpr uint32_t WINDOW_ACK_MAGIC = 0x4B434157u; // "WACK" -- worker -> client reply to WNDO
 static constexpr uint32_t MOTION_MAGIC     = 0x53544F4Du; // "MOTS" -- client -> worker: motion arrives at this reduced size
 static constexpr uint32_t MOTION_ACK_MAGIC = 0x4B43414Du; // "MACK" -- worker -> client reply to MOTS
+static constexpr uint32_t DDA_MAGIC        = 0x31414444u; // "DDA1" -- client -> worker: worker takes over capture
+static constexpr uint32_t DDA_ACK_MAGIC    = 0x4B434144u; // "DACK" -- worker -> client reply to DDA1
+static constexpr uint32_t GRAY_MAGIC       = 0x59415247u; // "GRAY" -- client -> worker: gray goes back into this mapping
+static constexpr uint32_t GRAY_ACK_MAGIC   = 0x4B434147u; // "GAK"  -- worker -> client reply to GRAY
 // WNDO flags
 static constexpr uint32_t WINDOW_FLAG_CAPTURABLE = 0x1u; // debug: do NOT hide the window from screen capture
 static constexpr uint32_t WINDOW_FLAG_DISABLE    = 0x2u; // tear the window down, go back to sending pixels
@@ -721,6 +728,14 @@ static constexpr uint32_t FRAME_FLAG_WANT_PIXELS = 0x2u;
 // bit 2: the motion payload of this frame is at the reduced size agreed by
 // MOTS; the worker upscales it to the work resolution on the GPU.
 static constexpr uint32_t FRAME_FLAG_MOTION_SMALL = 0x4u;
+// bit 3: DDA capture is active — this frame carries NO colour payload.
+// The worker takes the colour from Desktop Duplication itself and reads
+// only the motion block from the pipe.
+static constexpr uint32_t FRAME_FLAG_NO_COLOR = 0x8u;
+// bit 4: NR OFF — skip the NGX evaluate and present the raw captured
+// colour instead. Keeps the overlay alive (picture + HUD) while the
+// neural pass is disabled; the next non-bypass frame resumes NGX.
+static constexpr uint32_t FRAME_FLAG_BYPASS = 0x10u;
 static constexpr size_t   VIDEO_HEADER_LEGACY_SIZE = 56; // magic..skin_structure (no full_w/full_h)
 
 #pragma pack(push, 1)
@@ -798,6 +813,38 @@ struct VideoMotionCmd
     int64_t pts;
 };
 struct VideoMotionAck
+{
+    uint32_t magic, ok, reserved0, reserved1;
+    int64_t pts;
+};
+// DDA1: client -> worker. "Take over capture from the desktop yourself."
+// width/height = required capture size (usually the full output size);
+// flags: bit0 WANT pixels back (screenshot), bit1 = present overlay stays on.
+// The worker opens Desktop Duplication (D3D11) and feeds the NGX pipeline
+// straight from GPU textures; the client no longer sends FRM1 frames while
+// active. Sending DDA1 with width=0 stops capture and reverts to pipe frames.
+struct VideoDdaCmd
+{
+    uint32_t magic, width, height, flags;
+    int64_t pts;
+};
+struct VideoDdaAck
+{
+    uint32_t magic, ok, reserved0, reserved1;
+    int64_t pts;
+};
+// GRAY: client -> worker. "Downsample the captured colour to luminance
+// (width x height, typically 320x180 = flow size) and write it into this
+// named mapping — the client needs it for the optical-flow guides. The
+// DDA capture must be active; the block is computed after the swizzle."
+// Layout: width*height bytes, R8 (single channel), client-owned mapping.
+struct VideoGrayCmd
+{
+    uint32_t magic, width, height, flags;
+    int64_t pts;
+    char name[64];
+};
+struct VideoGrayAck
 {
     uint32_t magic, ok, reserved0, reserved1;
     int64_t pts;
@@ -1065,6 +1112,43 @@ static bool PresentFrame(VideoState &v)
             ok = SUCCEEDED(g_present_swap->Present(0, 0));
         else
             Log("[present] fence wait timed out");
+    }
+    bb->Release();
+    return ok;
+}
+
+// NR OFF (FRAME_FLAG_BYPASS): показать сырой захват (v.color) вместо NGX-результата.
+// v.color — full-res в upscale-режиме и work-res в 1:1 — совпадает с окном,
+// которое PresentModeActive уже проверил по output-размеру.
+static bool PresentBypass(VideoState &v)
+{
+    ID3D12Resource *bb = nullptr;
+    if (FAILED(g_present_swap->GetBuffer(g_present_swap->GetCurrentBackBufferIndex(),
+                                         __uuidof(ID3D12Resource),
+                                         reinterpret_cast<void **>(&bb))) || bb == nullptr)
+    { Log("[present] bypass GetBuffer failed"); return false; }
+
+    bool ok = false;
+    if (BeginCommands())
+    {
+        D3D12_RESOURCE_BARRIER pre[] = {
+            Transition(bb, D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_COPY_DEST),
+            Transition(v.color.tex, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                       D3D12_RESOURCE_STATE_COPY_SOURCE),
+        };
+        h.list->ResourceBarrier(_countof(pre), pre);
+        h.list->CopyResource(bb, v.color.tex);
+        D3D12_RESOURCE_BARRIER post[] = {
+            Transition(bb, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PRESENT),
+            Transition(v.color.tex, D3D12_RESOURCE_STATE_COPY_SOURCE,
+                       D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE),
+        };
+        h.list->ResourceBarrier(_countof(post), post);
+        const UINT64 fv = EndCommands();
+        if (WaitFenceValue(h.fence, fv, 2000))
+            ok = SUCCEEDED(g_present_swap->Present(0, 0));
+        else
+            Log("[present] bypass fence wait timed out");
     }
     bb->Release();
     return ok;
@@ -1436,6 +1520,474 @@ static bool ScaleMotionInto(VideoState &v, const BYTE *mv, bool mv_was_ready)
     return true;
 }
 
+// ---------------------------------------------------------------------------
+// Desktop Duplication capture (DDA1). When active, the colour frame is taken
+// by this worker straight from the desktop (D3D11 DDA -> NT shared texture ->
+// D3D12), swizzled BGRA->RGBA into v.color.tex, and the client keeps sending
+// only motion. All guarded by g_dda_active, the pipe path stays untouched.
+// ---------------------------------------------------------------------------
+static bool                    g_dda_active = false;   // DDA1 with w>0 has been acked
+static UINT                    g_dda_w = 0, g_dda_h = 0;
+static ID3D11Device           *g_dda_d11 = nullptr;
+static ID3D11DeviceContext    *g_dda_ctx = nullptr;
+static IDXGIOutputDuplication *g_dda_dup = nullptr;
+static ID3D11Texture2D        *g_dda_shared = nullptr;
+static HANDLE                  g_dda_nt = nullptr;
+static ID3D12Resource         *g_dda_d12 = nullptr;
+static ID3D12Fence            *g_dda_signal = nullptr;   // shared, D3D11 side signals
+static ID3D11Fence            *g_dda_signal11 = nullptr;
+static UINT64                  g_dda_fence_value = 1;
+static bool                    g_dda_ready = false;      // current frame is in v.color
+// Gray downsample (GRAY): write luminance (flow size) into a client mapping.
+static HANDLE                  g_gray_file = nullptr;   // client's mapping handle
+static BYTE                   *g_gray_map = nullptr;    // mapped view
+static size_t                  g_gray_bytes = 0;
+static UINT                    g_gray_w = 0, g_gray_h = 0;
+static ID3D12Resource         *g_gray_readback = nullptr; // R8 buffer for gray
+static ID3D12Resource         *g_gray_uav = nullptr;      // R8 UAV texture (area kernel writes)
+static bool                    g_gray_mapped = false;
+
+static void CloseGray()
+{
+    g_gray_mapped = false;
+    if (g_gray_map) { UnmapViewOfFile(g_gray_map); g_gray_map = nullptr; }
+    if (g_gray_file) { CloseHandle(g_gray_file); g_gray_file = nullptr; }
+    g_gray_bytes = 0;
+    g_gray_w = g_gray_h = 0;
+}
+
+static void CloseDda()
+{
+    g_dda_active = false;
+    g_dda_ready = false;
+    if (g_dda_d12) { g_dda_d12->Release(); g_dda_d12 = nullptr; }
+    if (g_dda_nt)  { CloseHandle(g_dda_nt); g_dda_nt = nullptr; }
+    if (g_dda_shared) { g_dda_shared->Release(); g_dda_shared = nullptr; }
+    if (g_dda_dup) { g_dda_dup->Release(); g_dda_dup = nullptr; }
+    if (g_dda_ctx) { g_dda_ctx->Release(); g_dda_ctx = nullptr; }
+    if (g_dda_d11) { g_dda_d11->Release(); g_dda_d11 = nullptr; }
+    if (g_dda_signal) { g_dda_signal->Release(); g_dda_signal = nullptr; }
+    if (g_dda_signal11) { g_dda_signal11->Release(); g_dda_signal11 = nullptr; }
+}
+
+// Compute pipeline to swizzle BGRA->RGBA (the DDA frame and v.color are both
+// RGBA; DDA gives B8G8R8A8). Shares the worker's D3D12 device.
+static ID3D12RootSignature  *g_dda_rs = nullptr;
+static ID3D12PipelineState  *g_dda_pso = nullptr;
+static ID3D12DescriptorHeap *g_dda_heap = nullptr;
+static ID3D12Resource       *g_dda_dst = nullptr;       // swizzled RGBA into color
+static const char kDdaSwizzleHlsl[] =
+    "Texture2D<float4>   gSrc : register(t0);\n"
+    "RWTexture2D<float4> gDst : register(u0);\n"
+    "[numthreads(8, 8, 1)]\n"
+    "void CSMain(uint3 id : SV_DispatchThreadID)\n"
+    "{\n"
+    "    uint2 sz; gDst.GetDimensions(sz.x, sz.y);\n"
+    "    if (id.x >= sz.x || id.y >= sz.y) return;\n"
+    "    float4 c = gSrc.Load(int3(id.xy, 0));\n"
+    // B8G8R8A8 SRV уже декодируется HLSL в RGBA-семантику правильных
+    // компонентов: c.r = красный, c.b = синий. Никакого свопа делать
+    // НЕЛЬЗЯ — float4(c.b,...) давал перепутанные каналы (двойной своп).
+    "    gDst[id.xy] = c;\n"
+    "}\n";
+
+static bool EnsureDdaSwizzle()
+{
+    if (g_dda_pso) return true;
+    ID3DBlob *code = nullptr, *err = nullptr;
+    HRESULT hr = D3DCompile(kDdaSwizzleHlsl, sizeof(kDdaSwizzleHlsl) - 1, "dda-swizzle.hlsl",
+                            nullptr, nullptr, "CSMain", "cs_5_0", 0, 0, &code, &err);
+    if (FAILED(hr)) { Log("[dda] swizzle compile failed: %s", err ? (char *)err->GetBufferPointer() : "?"); return false; }
+    D3D12_ROOT_PARAMETER prm[2] = {};
+    D3D12_DESCRIPTOR_RANGE r0 = { D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0 };
+    D3D12_DESCRIPTOR_RANGE r1 = { D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 1, 0 };
+    prm[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    prm[0].DescriptorTable.NumDescriptorRanges = 1; prm[0].DescriptorTable.pDescriptorRanges = &r0;
+    prm[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+    prm[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    prm[1].DescriptorTable.NumDescriptorRanges = 1; prm[1].DescriptorTable.pDescriptorRanges = &r1;
+    prm[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+    D3D12_ROOT_SIGNATURE_DESC rsd = {};
+    rsd.NumParameters = 2; rsd.pParameters = prm;
+    ID3DBlob *sig = nullptr;
+    if (FAILED(D3D12SerializeRootSignature(&rsd, D3D_ROOT_SIGNATURE_VERSION_1, &sig, &err)))
+    { Log("[dda] RS serialize failed"); return false; }
+    if (FAILED(h.dev->CreateRootSignature(0, sig->GetBufferPointer(), sig->GetBufferSize(),
+                                          __uuidof(ID3D12RootSignature),
+                                          reinterpret_cast<void **>(&g_dda_rs))))
+    { Log("[dda] RS create failed"); return false; }
+    sig->Release();
+    D3D12_COMPUTE_PIPELINE_STATE_DESC pd = {};
+    pd.pRootSignature = g_dda_rs;
+    pd.CS.pShaderBytecode = code->GetBufferPointer(); pd.CS.BytecodeLength = code->GetBufferSize();
+    if (FAILED(h.dev->CreateComputePipelineState(&pd, __uuidof(ID3D12PipelineState),
+                                                 reinterpret_cast<void **>(&g_dda_pso))))
+    { Log("[dda] PSO create failed"); return false; }
+    code->Release();
+    D3D12_DESCRIPTOR_HEAP_DESC hd = {};
+    hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+    hd.NumDescriptors = 2; hd.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+    if (FAILED(h.dev->CreateDescriptorHeap(&hd, __uuidof(ID3D12DescriptorHeap),
+                                           reinterpret_cast<void **>(&g_dda_heap))))
+    { Log("[dda] heap create failed"); return false; }
+    Log("[dda] swizzle pipeline ready");
+    return true;
+}
+
+static void BindDdaDescriptors(ID3D12Resource *src)
+{
+    const UINT stride = h.dev->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+    D3D12_CPU_DESCRIPTOR_HANDLE cpu = g_dda_heap->GetCPUDescriptorHandleForHeapStart();
+    D3D12_SHADER_RESOURCE_VIEW_DESC sd = {};
+    sd.Format = DXGI_FORMAT_B8G8R8A8_UNORM; sd.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+    sd.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    sd.Texture2D.MipLevels = 1;
+    h.dev->CreateShaderResourceView(src, &sd, cpu);
+    D3D12_UNORDERED_ACCESS_VIEW_DESC ud = {};
+    ud.Format = DXGI_FORMAT_R8G8B8A8_UNORM; ud.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
+    cpu.ptr += stride;
+    h.dev->CreateUnorderedAccessView(g_dda_dst, nullptr, &ud, cpu);
+}
+
+// ---------------------------------------------------------------------------
+// Gray downsample (GRAY): честное блочное усреднение RGBA -> R8 luminance.
+// Блок ровно ceil(src/dst) (12x12 при 3840x2160 -> 320x180) — то, что делает
+// cv2.resize(INTER_AREA). Билинейная выборка НЕ годится: алиасинг на тексте
+// ломает оптический поток (проверено Клодом).
+// ---------------------------------------------------------------------------
+static ID3D12RootSignature  *g_gray_rs = nullptr;
+static ID3D12PipelineState  *g_gray_pso = nullptr;
+static const char kGrayHlsl[] =
+    "Texture2D<float4>   gSrc : register(t0);\n"
+    "RWTexture2D<float>  gDst : register(u0);\n"
+    "cbuffer Sizes : register(b0) { uint gSrcW; uint gSrcH; uint gDstW; uint gDstH; };\n"
+    "[numthreads(8, 8, 1)]\n"
+    "void CSMain(uint3 id : SV_DispatchThreadID)\n"
+    "{\n"
+    "    if (id.x >= gDstW || id.y >= gDstH) return;\n"
+    "    uint bx = (gSrcW + gDstW - 1) / gDstW;\n"
+    "    uint by = (gSrcH + gDstH - 1) / gDstH;\n"
+    "    uint x0 = id.x * bx, y0 = id.y * by;\n"
+    "    uint x1 = min(x0 + bx, gSrcW), y1 = min(y0 + by, gSrcH);\n"
+    "    float sum = 0.0f;\n"
+    "    for (uint y = y0; y < y1; ++y)\n"
+    "        for (uint x = x0; x < x1; ++x)\n"
+    "        {\n"
+    "            float4 c = gSrc.Load(int3(x, y, 0));\n"
+    "            sum += dot(c.rgb, float3(0.299f, 0.587f, 0.114f));\n"
+    "        }\n"
+    "    gDst[id.xy] = sum / (float)((x1 - x0) * (y1 - y0));\n"
+    "}\n";
+
+static bool EnsureGrayPipeline()
+{
+    if (g_gray_pso) return true;
+    ID3DBlob *code = nullptr, *err = nullptr;
+    HRESULT hr = D3DCompile(kGrayHlsl, sizeof(kGrayHlsl) - 1, "gray-area.hlsl",
+                            nullptr, nullptr, "CSMain", "cs_5_0", 0, 0, &code, &err);
+    if (FAILED(hr)) { Log("[gray] compile failed: %s", err ? (char *)err->GetBufferPointer() : "?"); return false; }
+    D3D12_DESCRIPTOR_RANGE r0 = { D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0 };
+    D3D12_DESCRIPTOR_RANGE r1 = { D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 1, 0 };
+    D3D12_ROOT_PARAMETER prm[3] = {};
+    prm[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+    prm[0].Constants.Num32BitValues = 4; prm[0].Constants.ShaderRegister = 0;
+    prm[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+    prm[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    prm[1].DescriptorTable.NumDescriptorRanges = 1; prm[1].DescriptorTable.pDescriptorRanges = &r0;
+    prm[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+    prm[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    prm[2].DescriptorTable.NumDescriptorRanges = 1; prm[2].DescriptorTable.pDescriptorRanges = &r1;
+    prm[2].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+    D3D12_ROOT_SIGNATURE_DESC rsd = {};
+    rsd.NumParameters = 3; rsd.pParameters = prm;
+    ID3DBlob *sig = nullptr;
+    if (FAILED(D3D12SerializeRootSignature(&rsd, D3D_ROOT_SIGNATURE_VERSION_1, &sig, &err)))
+    { Log("[gray] RS serialize failed"); return false; }
+    if (FAILED(h.dev->CreateRootSignature(0, sig->GetBufferPointer(), sig->GetBufferSize(),
+                                          __uuidof(ID3D12RootSignature),
+                                          reinterpret_cast<void **>(&g_gray_rs))))
+    { Log("[gray] RS create failed"); return false; }
+    sig->Release();
+    D3D12_COMPUTE_PIPELINE_STATE_DESC pd = {};
+    pd.pRootSignature = g_gray_rs;
+    pd.CS.pShaderBytecode = code->GetBufferPointer(); pd.CS.BytecodeLength = code->GetBufferSize();
+    if (FAILED(h.dev->CreateComputePipelineState(&pd, __uuidof(ID3D12PipelineState),
+                                                 reinterpret_cast<void **>(&g_gray_pso))))
+    { Log("[gray] PSO create failed"); return false; }
+    code->Release();
+    Log("[gray] AREA pipeline ready");
+    return true;
+}
+
+// Открыть обратный маппинг клиента (GRAY). w/h — размер luminance (320x180).
+static bool OpenGray(const VideoGrayCmd &gc)
+{
+    CloseGray();
+    char name[64] = {};
+    memcpy(name, gc.name, sizeof(name) - 1);
+    if (gc.width == 0 || gc.height == 0) { Log("[gray] off"); return true; }
+    const size_t need = static_cast<size_t>(gc.width) * gc.height;
+    g_gray_file = OpenFileMappingA(FILE_MAP_WRITE, FALSE, name);
+    if (g_gray_file == nullptr) { Log("[gray] OpenFileMapping('%s') failed %lu", name, GetLastError()); return false; }
+    g_gray_map = static_cast<BYTE *>(MapViewOfFile(g_gray_file, FILE_MAP_WRITE, 0, 0, need));
+    if (g_gray_map == nullptr) { Log("[gray] MapViewOfFile(%zu) failed %lu", need, GetLastError()); CloseHandle(g_gray_file); g_gray_file = nullptr; return false; }
+    g_gray_bytes = need; g_gray_w = gc.width; g_gray_h = gc.height;
+    if (!EnsureGrayPipeline()) return false;
+    // R8 UAV текстура
+    D3D12_HEAP_PROPERTIES def = { D3D12_HEAP_TYPE_DEFAULT };
+    D3D12_RESOURCE_DESC td = {};
+    td.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    td.Width = gc.width; td.Height = gc.height; td.DepthOrArraySize = 1; td.MipLevels = 1;
+    td.Format = DXGI_FORMAT_R8_UNORM; td.SampleDesc.Count = 1;
+    td.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+    td.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+    if (FAILED(h.dev->CreateCommittedResource(&def, D3D12_HEAP_FLAG_NONE, &td,
+                                              D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr,
+                                              __uuidof(ID3D12Resource),
+                                              reinterpret_cast<void **>(&g_gray_uav))))
+    { Log("[gray] UAV tex failed"); return false; }
+    // readback buffer ровно need байт
+    D3D12_HEAP_PROPERTIES rb = { D3D12_HEAP_TYPE_READBACK };
+    D3D12_RESOURCE_DESC bd = {};
+    bd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    bd.Width = need; bd.Height = 1; bd.DepthOrArraySize = 1; bd.MipLevels = 1;
+    bd.SampleDesc.Count = 1; bd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    if (FAILED(h.dev->CreateCommittedResource(&rb, D3D12_HEAP_FLAG_NONE, &bd,
+                                              D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                                              __uuidof(ID3D12Resource),
+                                              reinterpret_cast<void **>(&g_gray_readback))))
+    { Log("[gray] readback failed"); return false; }
+    g_gray_mapped = true;
+    Log("[gray] mapping '%s' %ux%u (%zu B) active", gc.name, gc.width, gc.height, need);
+    return true;
+}
+
+// Выполнить AREA-усреднение g_dda_dst -> gray и записать в маппинг клиента.
+// Вызывается в DdaGrab после swizzle (в том же Begin/End блоке нельзя —
+// нужен отдельный fence), поэтому здесь собственный Begin/End.
+static bool AreaToGray()
+{
+    if (!g_gray_mapped || !g_dda_dst) return false;
+    if (!BeginCommands()) return false;
+    // g_dda_dst в COPY_SOURCE после copy в v.color? Нет — после swizzle он
+    // возвращается в UNORDERED_ACCESS (см. DdaGrab). Читаем как SRV.
+    D3D12_RESOURCE_BARRIER to_srv = Transition(g_dda_dst, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                                               D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    h.list->ResourceBarrier(1, &to_srv);
+    // дескрипторы: 0 = SRV g_dda_dst, 1 = UAV g_gray_uav
+    const UINT stride = h.dev->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+    D3D12_CPU_DESCRIPTOR_HANDLE cpu = g_dda_heap->GetCPUDescriptorHandleForHeapStart();
+    D3D12_SHADER_RESOURCE_VIEW_DESC sd = {};
+    sd.Format = DXGI_FORMAT_R8G8B8A8_UNORM; sd.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+    sd.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    sd.Texture2D.MipLevels = 1;
+    h.dev->CreateShaderResourceView(g_dda_dst, &sd, cpu);
+    D3D12_UNORDERED_ACCESS_VIEW_DESC ud = {};
+    ud.Format = DXGI_FORMAT_R8_UNORM; ud.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
+    D3D12_CPU_DESCRIPTOR_HANDLE cpu2 = cpu; cpu2.ptr += stride;
+    h.dev->CreateUnorderedAccessView(g_gray_uav, nullptr, &ud, cpu2);
+    ID3D12DescriptorHeap *heaps[] = { g_dda_heap };
+    h.list->SetDescriptorHeaps(1, heaps);
+    h.list->SetComputeRootSignature(g_gray_rs);
+    h.list->SetPipelineState(g_gray_pso);
+    const UINT sizes[4] = { g_dda_w, g_dda_h, g_gray_w, g_gray_h };
+    h.list->SetComputeRoot32BitConstants(0, 4, sizes, 0);
+    D3D12_GPU_DESCRIPTOR_HANDLE g0 = g_dda_heap->GetGPUDescriptorHandleForHeapStart();
+    D3D12_GPU_DESCRIPTOR_HANDLE g1 = g0; g1.ptr += stride;
+    h.list->SetComputeRootDescriptorTable(1, g0);
+    h.list->SetComputeRootDescriptorTable(2, g1);
+    h.list->Dispatch((g_gray_w + 7) / 8, (g_gray_h + 7) / 8, 1);
+    // gray UAV -> COPY_SOURCE, копируем в readback
+    D3D12_RESOURCE_BARRIER to_copy = Transition(g_gray_uav, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                                                D3D12_RESOURCE_STATE_COPY_SOURCE);
+    h.list->ResourceBarrier(1, &to_copy);
+    D3D12_TEXTURE_COPY_LOCATION src = {}, dst = {};
+    src.pResource = g_gray_uav; src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX; src.SubresourceIndex = 0;
+    dst.pResource = g_gray_readback; dst.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+    dst.PlacedFootprint.Footprint.Width = g_gray_w;
+    dst.PlacedFootprint.Footprint.Height = g_gray_h;
+    dst.PlacedFootprint.Footprint.Depth = 1;
+    dst.PlacedFootprint.Footprint.RowPitch = g_gray_w;
+    dst.PlacedFootprint.Footprint.Format = DXGI_FORMAT_R8_UNORM;
+    h.list->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+    // вернуть g_dda_dst в COPY_SOURCE? нет — он остаётся NON_PIXEL_SHADER_RESOURCE
+    // для след. swizzle? В DdaGrab после copy его возвращают в UNORDERED_ACCESS.
+    // Здесь мы его взяли в NON_PIXEL из UNORDERED_ACCESS — вернём обратно.
+    D3D12_RESOURCE_BARRIER back_uav = Transition(g_dda_dst, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                                                 D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    D3D12_RESOURCE_BARRIER back_uav2 = Transition(g_gray_uav, D3D12_RESOURCE_STATE_COPY_SOURCE,
+                                                  D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    D3D12_RESOURCE_BARRIER backs[2] = { back_uav, back_uav2 };
+    h.list->ResourceBarrier(2, backs);
+    const UINT64 fence = EndCommands();
+    if (!WaitFenceValue(h.fence, fence, 10000)) { Log("[gray] fence timeout"); return false; }
+    // map readback -> memcpy в mapping клиента
+    BYTE *mapped = nullptr;
+    D3D12_RANGE rr = { 0, g_gray_bytes };
+    if (FAILED(g_gray_readback->Map(0, &rr, reinterpret_cast<void **>(&mapped)))) return false;
+    memcpy(g_gray_map, mapped, g_gray_bytes);
+    g_gray_readback->Unmap(0, nullptr);
+    return true;
+}
+
+// Open capture. w/h = capture size; the worker keeps its own pipe for motion.
+static bool OpenDda(UINT w, UINT hgt)
+{
+    CloseDda();
+    if (w == 0 || hgt == 0) { Log("[dda] capture off"); return true; }
+    if (!EnsureDdaSwizzle()) return false;
+    IDXGIFactory1 *factory = nullptr;
+    HRESULT hr = CreateDXGIFactory1(__uuidof(IDXGIFactory1), (void **)&factory);
+    if (FAILED(hr)) { Log("[dda] factory failed 0x%08X", hr); return false; }
+    IDXGIAdapter1 *adapter = nullptr;
+    if (FAILED(factory->EnumAdapters1(0, &adapter))) { Log("[dda] no adapter"); factory->Release(); return false; }
+    IDXGIOutput *output = nullptr;
+    if (FAILED(adapter->EnumOutputs(0, &output))) { Log("[dda] no output"); adapter->Release(); factory->Release(); return false; }
+    IDXGIOutput1 *output1 = nullptr;
+    if (FAILED(output->QueryInterface(__uuidof(IDXGIOutput1), (void **)&output1)))
+    { Log("[dda] no Output1"); output->Release(); adapter->Release(); factory->Release(); return false; }
+    D3D_FEATURE_LEVEL fl = D3D_FEATURE_LEVEL_11_0;
+    hr = D3D11CreateDevice(adapter, D3D_DRIVER_TYPE_UNKNOWN, nullptr,
+                           D3D11_CREATE_DEVICE_BGRA_SUPPORT, &fl, 1, D3D11_SDK_VERSION,
+                           &g_dda_d11, nullptr, &g_dda_ctx);
+    if (FAILED(hr)) { Log("[dda] D3D11 failed 0x%08X", hr); return false; }
+    hr = output1->DuplicateOutput(g_dda_d11, &g_dda_dup);
+    output1->Release(); output->Release(); adapter->Release(); factory->Release();
+    if (FAILED(hr)) { Log("[dda] DuplicateOutput failed 0x%08X", hr); return false; }
+    g_dda_w = w; g_dda_h = hgt; g_dda_active = true;
+    Log("[dda] capture %ux%u active", w, hgt);
+    return true;
+}
+
+// Grab the latest desktop frame into v.color.tex (RGBA, GPU-resident).
+static bool DdaGrab(VideoState &v)
+{
+    if (!g_dda_active) return false;
+    IDXGIResource *res = nullptr;
+    DXGI_OUTDUPL_FRAME_INFO fi = {};
+    HRESULT hr = g_dda_dup->AcquireNextFrame(100, &fi, &res);
+    if (hr == DXGI_ERROR_WAIT_TIMEOUT) return false;      // desktop unchanged
+    if (FAILED(hr))
+    {
+        Log("[dda] acquire failed 0x%08X — recreating", hr);
+        OpenDda(g_dda_w, g_dda_h);
+        return false;
+    }
+    ID3D11Texture2D *frame = nullptr;
+    if (FAILED(res->QueryInterface(__uuidof(ID3D11Texture2D), (void **)&frame)))
+    {
+        g_dda_dup->ReleaseFrame();
+        return false;
+    }
+    if (g_dda_shared == nullptr)
+    {
+        D3D11_TEXTURE2D_DESC fd{}; frame->GetDesc(&fd);
+        D3D11_TEXTURE2D_DESC sd = {};
+        sd.Width = fd.Width; sd.Height = fd.Height; sd.MipLevels = 1; sd.ArraySize = 1;
+        sd.Format = fd.Format; sd.SampleDesc.Count = 1; sd.Usage = D3D11_USAGE_DEFAULT;
+        sd.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
+        sd.MiscFlags = D3D11_RESOURCE_MISC_SHARED | D3D11_RESOURCE_MISC_SHARED_NTHANDLE;
+        if (FAILED(g_dda_d11->CreateTexture2D(&sd, nullptr, &g_dda_shared)))
+        { Log("[dda] shared tex failed"); g_dda_dup->ReleaseFrame(); frame->Release(); res->Release(); return false; }
+        IDXGIResource1 *r1 = nullptr;
+        g_dda_shared->QueryInterface(__uuidof(IDXGIResource1), (void **)&r1);
+        if (!r1 || FAILED(r1->CreateSharedHandle(nullptr, DXGI_SHARED_RESOURCE_READ, nullptr, &g_dda_nt)))
+        { Log("[dda] NT handle failed"); g_dda_dup->ReleaseFrame(); frame->Release(); res->Release(); return false; }
+        r1->Release();
+        if (FAILED(h.dev->OpenSharedHandle(g_dda_nt, __uuidof(ID3D12Resource),
+                                           (void **)&g_dda_d12)))
+        { Log("[dda] OpenSharedHandle failed"); g_dda_dup->ReleaseFrame(); frame->Release(); res->Release(); return false; }
+        // cross-device signal fence
+        g_dda_fence_value = 1;
+        if (FAILED(h.dev->CreateFence(0, D3D12_FENCE_FLAG_SHARED, __uuidof(ID3D12Fence),
+                                      reinterpret_cast<void **>(&g_dda_signal))))
+        { Log("[dda] signal fence failed"); g_dda_dup->ReleaseFrame(); frame->Release(); res->Release(); return false; }
+        HANDLE nt_f = nullptr;
+        h.dev->CreateSharedHandle(g_dda_signal, nullptr, GENERIC_ALL, nullptr, &nt_f);
+        ID3D11Device5 *d5 = nullptr;
+        if (g_dda_d11->QueryInterface(__uuidof(ID3D11Device5), (void **)&d5) == S_OK)
+        {
+            d5->OpenSharedFence(nt_f, __uuidof(ID3D11Fence), (void **)&g_dda_signal11);
+            d5->Release();
+        }
+        if (nt_f) CloseHandle(nt_f);
+        if (!g_dda_signal11) { Log("[dda] no D3D11 fence — capture invalid"); g_dda_dup->ReleaseFrame(); frame->Release(); res->Release(); return false; }
+        D3D12_HEAP_PROPERTIES def = { D3D12_HEAP_TYPE_DEFAULT };
+        D3D12_RESOURCE_DESC td = {};
+        td.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+        td.Width = fd.Width; td.Height = fd.Height; td.DepthOrArraySize = 1; td.MipLevels = 1;
+        td.Format = DXGI_FORMAT_R8G8B8A8_UNORM; td.SampleDesc.Count = 1;
+        td.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+        td.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+        if (FAILED(h.dev->CreateCommittedResource(&def, D3D12_HEAP_FLAG_NONE, &td,
+                                                  D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr,
+                                                  __uuidof(ID3D12Resource),
+                                                  reinterpret_cast<void **>(&g_dda_dst))))
+        { Log("[dda] dst UAV failed"); g_dda_dup->ReleaseFrame(); frame->Release(); res->Release(); return false; }
+        Log("[dda] shared texture %ux%u ready", (UINT)fd.Width, (UINT)fd.Height);
+    }
+    g_dda_ctx->CopyResource(g_dda_shared, frame);
+    ID3D11DeviceContext4 *ctx4 = nullptr;
+    if (g_dda_ctx->QueryInterface(__uuidof(ID3D11DeviceContext4), (void **)&ctx4) == S_OK)
+    {
+        ctx4->Signal(g_dda_signal11, g_dda_fence_value);
+        ctx4->Release();
+    }
+    g_dda_ctx->Flush();
+    frame->Release(); res->Release(); g_dda_dup->ReleaseFrame();
+
+    // Ждать копию D3D11 с таймаутом (не вечный спин)
+    const UINT64 want = g_dda_fence_value;
+    const DWORD wait_ms = 5000;
+    const DWORD start = GetTickCount();
+    while (g_dda_signal->GetCompletedValue() < want && GetTickCount() - start < wait_ms) Sleep(1);
+    if (g_dda_signal->GetCompletedValue() < want)
+    { Log("[dda] signal fence timeout"); return false; }
+    ++g_dda_fence_value;
+
+    // swizzle into g_dda_dst, then copy into v.color.tex
+    if (!BeginCommands()) return false;
+    D3D12_RESOURCE_BARRIER to_srv = Transition(g_dda_d12, D3D12_RESOURCE_STATE_COMMON,
+                                               D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    h.list->ResourceBarrier(1, &to_srv);
+    BindDdaDescriptors(g_dda_d12);
+    ID3D12DescriptorHeap *heaps[] = { g_dda_heap };
+    h.list->SetDescriptorHeaps(1, heaps);
+    h.list->SetComputeRootSignature(g_dda_rs);
+    h.list->SetPipelineState(g_dda_pso);
+    D3D12_GPU_DESCRIPTOR_HANDLE g0 = g_dda_heap->GetGPUDescriptorHandleForHeapStart();
+    D3D12_GPU_DESCRIPTOR_HANDLE g1 = g0;
+    g1.ptr += h.dev->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+    h.list->SetComputeRootDescriptorTable(0, g0);
+    h.list->SetComputeRootDescriptorTable(1, g1);
+    h.list->Dispatch((g_dda_w + 7) / 8, (g_dda_h + 7) / 8, 1);
+    // copy swizzled dst into v.color.tex
+    D3D12_RESOURCE_BARRIER pre_color = Transition(v.color.tex, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                                                  D3D12_RESOURCE_STATE_COPY_DEST);
+    D3D12_RESOURCE_BARRIER to_copy = Transition(g_dda_dst, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                                                D3D12_RESOURCE_STATE_COPY_SOURCE);
+    D3D12_RESOURCE_BARRIER pre_c[2] = { to_copy, pre_color };
+    h.list->ResourceBarrier(2, pre_c);
+    D3D12_TEXTURE_COPY_LOCATION src = {}, dst = {};
+    src.pResource = g_dda_dst; src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX; src.SubresourceIndex = 0;
+    dst.pResource = v.color.tex; dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX; dst.SubresourceIndex = 0;
+    h.list->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+    D3D12_RESOURCE_BARRIER to_uav = Transition(g_dda_dst, D3D12_RESOURCE_STATE_COPY_SOURCE,
+                                               D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    D3D12_RESOURCE_BARRIER to_nps = Transition(v.color.tex, D3D12_RESOURCE_STATE_COPY_DEST,
+                                               D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    D3D12_RESOURCE_BARRIER to_common = Transition(g_dda_d12, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                                                  D3D12_RESOURCE_STATE_COMMON);
+    D3D12_RESOURCE_BARRIER post_c[3] = { to_uav, to_nps, to_common };
+    h.list->ResourceBarrier(3, post_c);
+    const UINT64 fence = EndCommands();
+    if (!WaitFenceValue(h.fence, fence, 10000)) { Log("[dda] swizzle fence timeout"); return false; }
+    // Отдать клиенту luminance-кадр (320x180) для оптического потока
+    if (!AreaToGray()) { /* best effort: guides останутся без свежего кадра */ }
+    g_dda_ready = true;
+    return true;
+}
+
 static bool UploadVideoFrame(VideoState &v, const BYTE *color, const BYTE *mv, bool motion_small)
 {
     const UINT cw = v.upscale ? v.full_w : v.w;
@@ -1469,6 +2021,33 @@ static bool UploadVideoFrame(VideoState &v, const BYTE *color, const BYTE *mv, b
             Transition(v.mv.tex, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE),
         };
         h.list->ResourceBarrier(_countof(post), post);
+    }
+    const UINT64 fence = EndCommands();
+    v.inputs_ready = true;
+    return WaitFenceValue(h.fence, fence, 30000);
+}
+
+// DDA-режим: цвет уже лежит в v.color.tex (DdaGrab), загружаем только motion.
+static bool UploadMotionOnly(VideoState &v, const BYTE *mv, bool motion_small)
+{
+    if (!motion_small && !FillUpload(v.mv, mv, v.w * 4, v.hgt)) return false;
+    if (!BeginCommands()) return false;
+    if (v.inputs_ready)
+    {
+        D3D12_RESOURCE_BARRIER pre = Transition(v.mv.tex, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                                                D3D12_RESOURCE_STATE_COPY_DEST);
+        h.list->ResourceBarrier(1, &pre);
+    }
+    if (motion_small)
+    {
+        if (!ScaleMotionInto(v, mv, v.inputs_ready)) return false;
+    }
+    else
+    {
+        CopyUpload(h.list, v.mv);
+        D3D12_RESOURCE_BARRIER post = Transition(v.mv.tex, D3D12_RESOURCE_STATE_COPY_DEST,
+                                                 D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        h.list->ResourceBarrier(1, &post);
     }
     const UINT64 fence = EndCommands();
     v.inputs_ready = true;
@@ -1567,15 +2146,19 @@ static bool ReShadeHasFeature18()
 //   3 = shared-memory handover read into sc,
 //   4 = presentation-window command read into wc,
 //   5 = motion-size command read into mc,
+//   6 = desktop-capture command read into dc,
+//   7 = gray-downsample command read into gc (88 bytes: 24 hdr + 64 name),
 //   0 = EOF/error.
 static int ReadVideoMessage(VideoState &v, VideoFrameHeader &fh, std::vector<BYTE> &color,
                             std::vector<BYTE> &mv, VideoResizeCmd &rc, VideoShmCmd &sc,
-                            VideoWindowCmd &wc, VideoMotionCmd &mc,
+                            VideoWindowCmd &wc, VideoMotionCmd &mc, VideoDdaCmd &dc,
+                            VideoGrayCmd &gc,
                             const BYTE **color_ptr, const BYTE **mv_ptr)
 {
     if (!ReadExact(stdin, &fh, sizeof(fh))) return 0;
     if (fh.magic == FRAME_MAGIC)
     {
+        const bool no_color = (fh.reserved & FRAME_FLAG_NO_COLOR) != 0 && g_dda_active;
         const size_t cw = v.upscale ? v.full_w : v.w;
         const size_t ch = v.upscale ? v.full_h : v.hgt;
         const size_t color_bytes = cw * ch * 4;
@@ -1585,6 +2168,14 @@ static int ReadVideoMessage(VideoState &v, VideoFrameHeader &fh, std::vector<BYT
         const size_t mv_bytes = small_mv
             ? static_cast<size_t>(g_motion_w) * g_motion_h * 4
             : static_cast<size_t>(v.w) * v.hgt * 4;
+        if (no_color)
+        {
+            // DDA-режим: цвет воркер снимает сам; в пайпе только motion.
+            *color_ptr = nullptr;
+            mv.resize(mv_bytes);
+            *mv_ptr = mv.data();
+            return ReadExact(stdin, mv.data(), mv.size()) ? 1 : 0;
+        }
         if ((fh.reserved & FRAME_FLAG_SHM) != 0)
         {
             // Pixels are already in the mapping; the pipe carried only this header.
@@ -1621,6 +2212,20 @@ static int ReadVideoMessage(VideoState &v, VideoFrameHeader &fh, std::vector<BYT
     {
         memcpy(&mc, &fh, sizeof(mc));
         return 5;
+    }
+    if (fh.magic == DDA_MAGIC)
+    {
+        memcpy(&dc, &fh, sizeof(dc));
+        return 6;
+    }
+    if (fh.magic == GRAY_MAGIC)
+    {
+        // Первые 24 байта уже в fh (совпадает с VideoFrameHeader); дочитать
+        // 64 байта имени — итого 88, как SHMI.
+        BYTE *p = reinterpret_cast<BYTE *>(&gc);
+        memcpy(p, &fh, sizeof(fh));
+        if (!ReadExact(stdin, p + sizeof(fh), sizeof(gc) - sizeof(fh))) return 0;
+        return 7;
     }
     if (fh.magic == RESIZE_MAGIC)
     {
@@ -1699,9 +2304,11 @@ static int RunVideo()
         VideoShmCmd sc = {};
         VideoWindowCmd wc = {};
         VideoMotionCmd mc = {};
+        VideoDdaCmd dc = {};
+        VideoGrayCmd gc = {};
         const BYTE *color_ptr = nullptr;
         const BYTE *mv_ptr = nullptr;
-        const int msg = ReadVideoMessage(v, fh, color, mv, rc, sc, wc, mc, &color_ptr, &mv_ptr);
+        const int msg = ReadVideoMessage(v, fh, color, mv, rc, sc, wc, mc, dc, gc, &color_ptr, &mv_ptr);
         if (msg == 0)
         {
             if (live)
@@ -1715,6 +2322,8 @@ static int RunVideo()
                 CloseSharedInput();
                 ClosePresent();
                 CloseMotionScaler();
+                CloseDda();
+                CloseGray();
                 return 0;
             }
             Log("[video] truncated frame %u", frame); return 5;
@@ -1839,8 +2448,58 @@ static int RunVideo()
             if (!WriteExact(stdout, &ack, sizeof(ack))) return 10;
             continue;
         }
-        if (!UploadVideoFrame(v, color_ptr, mv_ptr,
-                              (fh.reserved & FRAME_FLAG_MOTION_SMALL) != 0 && g_motion_w != 0))
+        if (msg == 6)
+        {
+            // DDA1: взять захват на себя (width==0 — выключить, вернуться к pipe).
+            uint32_t ok = 0;
+            if (dc.width == 0 || dc.height == 0)
+            {
+                CloseDda();
+                ok = 1;
+            }
+            else
+                ok = OpenDda(dc.width, dc.height) ? 1u : 0u;
+            Log("[video] DDA1 %s (%ux%u)", ok ? "OK" : "FAIL", dc.width, dc.height);
+            VideoDdaAck ack = { DDA_ACK_MAGIC, ok, 0u, 0u, dc.pts };
+            if (!WriteExact(stdout, &ack, sizeof(ack))) return 10;
+            continue;
+        }
+        if (msg == 7)
+        {
+            // GRAY: клиент передал обратный маппинг для luminance-кадров.
+            uint32_t ok = 0;
+            if (gc.width == 0 || gc.height == 0)
+            {
+                CloseGray();
+                ok = 1;
+            }
+            else
+                ok = OpenGray(gc) ? 1u : 0u;
+            Log("[video] GRAY %s (%ux%u)", ok ? "OK" : "FAIL", gc.width, gc.height);
+            VideoGrayAck ack = { GRAY_ACK_MAGIC, ok, 0u, 0u, gc.pts };
+            if (!WriteExact(stdout, &ack, sizeof(ack))) return 10;
+            continue;
+        }
+        if (g_dda_active)
+        {
+            // DDA-режим: цвет берём из Desktop Duplication прямо на GPU,
+            // motion — из присланного кадра (клиент продолжает шлaть пары).
+            const bool got = DdaGrab(v);
+            if (!got && !g_dda_ready)
+            {
+                // Ещё ни одного реального кадра с рабочего стола: держать
+                // парность протокола пустым OUT1 и ждать изменений экрана,
+                // НЕ запуская NGX на пустом цвете (evaluate на нулe виснет).
+                VideoResultHeader empty = { OUT_MAGIC, fh.index, 1u, 0u, g_last_eval_result, fh.pts };
+                if (!WriteExact(stdout, &empty, sizeof(empty))) return 10;
+                continue;
+            }
+            if (!UploadMotionOnly(v, mv_ptr,
+                                  (fh.reserved & FRAME_FLAG_MOTION_SMALL) != 0 && g_motion_w != 0))
+                return 6;
+        }
+        else if (!UploadVideoFrame(v, color_ptr, mv_ptr,
+                                   (fh.reserved & FRAME_FLAG_MOTION_SMALL) != 0 && g_motion_w != 0))
             return 6;
         if (!warmup_done)
         {
@@ -1852,14 +2511,21 @@ static int RunVideo()
             warmup_done = true;
             Log("[pure] direct feature 18 confirmed after %u discarded warmup frames", warmup);
         }
-        if (!EvaluateVideo(v, (frame == 0 || fh.reset != 0) ? 1 : 0)) return 9;
+        const bool bypass = (fh.reserved & FRAME_FLAG_BYPASS) != 0;
+        if (!bypass && !EvaluateVideo(v, (frame == 0 || fh.reset != 0) ? 1 : 0)) return 9;
         if (PresentModeActive(v))
         {
             // The overlay shows the result; the client gets an empty OUT1 as
             // the "frame done" signal and never sees the pixels -- unless it
             // explicitly asked for this one frame (screenshot).
-            if (!PresentFrame(v)) return 9;
-            if ((fh.reserved & FRAME_FLAG_WANT_PIXELS) != 0)
+            if (bypass)
+            {
+                // NR OFF: показать сырой захват (v.color уже в full-res) —
+                // NGX evaluate пропущен, но конвейер жив (окно, HUD).
+                if (!PresentBypass(v)) return 9;
+            }
+            else if (!PresentFrame(v)) return 9;
+            if (!bypass && (fh.reserved & FRAME_FLAG_WANT_PIXELS) != 0)
             {
                 if (!DownloadVideoFrame(v, output)) return 9;
                 VideoResultHeader out = { OUT_MAGIC, fh.index, 1u,
@@ -1890,6 +2556,8 @@ static int RunVideo()
     CloseSharedInput();
     ClosePresent();
     CloseMotionScaler();
+    CloseDda();
+    CloseGray();
     return 0;
 }
 

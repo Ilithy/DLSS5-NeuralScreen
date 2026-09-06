@@ -157,10 +157,11 @@ class Display:
         self._hud_only = False
         self._last_overlay = 0.0
         self._last_alert_count = 0
-        # Водяной знак: название + канал — под HUD-панелью (см. _draw_watermark)
+        # Водяной знак: название + канал — под HUD-панелью (см. _draw_watermark).
+        # Фон запекается только в HUD-режиме (см. set_hud_only) — там края
+        # 18px-шрифта иначе блендятся с magenta-фоном и дают розовизну.
         self._watermark = self._load_font(size=18).render(
             "NeuralScreen · @perseval_BLR", True, (0xFF, 0xBF, 0x00))
-        self._watermark.set_alpha(200)
         self._hud_panel_h = HUD_PAD * 2 + 6 * HUD_LINE_H  # высота HUD-панели (обновляется в _draw_hud)
 
     def set_lang(self, lang: str) -> None:
@@ -306,6 +307,16 @@ class Display:
         if not ok:
             print(f"Display: WARNING SetLayeredWindowAttributes failed "
                   f"(HUD-режим {'вкл' if enabled else 'выкл'})")
+        # В HUD-режиме фоном текста обязан быть BG_COLOR (не magenta-фон):
+        # антиалиасинг-края смешиваются с ним, а не с CHROMA_KEY. В обычном
+        # режиме фон не нужен — поверхность кладётся на кадр.
+        try:
+            self._watermark = self._load_font(size=18).render(
+                "NeuralScreen · @perseval_BLR", True, (0xFF, 0xBF, 0x00),
+                BG_COLOR if enabled else None)
+        except Exception:
+            pass
+        self._hud_cache = None  # панель строится с разной прозрачностью в HUD-режиме
         self._last_overlay = 0.0  # ближайший draw_overlay перерисует немедленно
 
     def raise_topmost(self) -> None:
@@ -427,7 +438,10 @@ class Display:
         x = (self.width - w) // 2
         y = self.height // 3
         panel = pygame.Surface((w, h), pygame.SRCALPHA)
-        panel.fill((*BG_COLOR, 220))
+        # Непрозрачная панель в HUD-режиме — иначе бленд с CHROMA_KEY даёт
+        # розовый оттенок (colorkey не вырезает смешанный цвет).
+        alert_alpha = 255 if self._hud_only else 220
+        panel.fill((*BG_COLOR, alert_alpha))
         self.screen.blit(panel, (x, y))
         pygame.draw.rect(self.screen, ACCENT, (x, y, w, h), 2)
         self.screen.blit(surf, (x + pad_x, y + pad_y))
@@ -479,7 +493,10 @@ class Display:
         panel_w = HUD_PANEL_W
         panel_h = HUD_PAD * 2 + len(lines) * HUD_LINE_H
         panel = pygame.Surface((panel_w, panel_h), pygame.SRCALPHA)
-        panel.fill((*BG_COLOR, BG_ALPHA))
+        # В HUD-режиме панель обязана быть НЕпрозрачной: полупрозрачный
+        # бленд с CHROMA_KEY-фоном даёт цвет ≠ key — розовая плашка поверх.
+        panel_alpha = 255 if self._hud_only else BG_ALPHA
+        panel.fill((*BG_COLOR, panel_alpha))
 
         items = []
         y = HUD_PAD + HUD_PAD // 2
