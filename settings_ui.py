@@ -58,6 +58,7 @@ STRINGS = {
     "en": {
         "title": "NeuralScreen — Settings",
         "work_scale": "Work scale",
+        "work_scale_hint": "higher = sharper, FPS unaffected",
         "profile": "Profile",
         "intensity": "Intensity",
         "local_tone": "Local tone",
@@ -80,6 +81,7 @@ STRINGS = {
     "ru": {
         "title": "NeuralScreen — Настройки",
         "work_scale": "Масштаб обработки",
+        "work_scale_hint": "выше = чётче, на FPS не влияет",
         "profile": "Профиль",
         "intensity": "Интенсивность",
         "local_tone": "Локальный тон",
@@ -341,6 +343,14 @@ class SettingsWindow:
         label = tk.Label(frame, text=s[key], bg=BG, fg=TEXT, font=FONT, anchor="w")
         label.pack(fill="x")
         self._widgets[f"label_{key}"] = label
+        # Подпись к масштабу: замеры показали, что время NGX не зависит от
+        # work-разрешения (15.9-16.1 мс на всём диапазоне), и без пояснения
+        # слайдер читается как компромисс качества со скоростью.
+        if f"{key}_hint" in s:
+            hint = tk.Label(frame, text=s[f"{key}_hint"], bg=BG, fg=MUTED,
+                            font=FONT_SMALL, anchor="w")
+            hint.pack(fill="x")
+            self._widgets[f"hint_{key}"] = hint
 
         if key in ("profile", "language"):
             self._vars[key] = tk.StringVar()
@@ -510,6 +520,9 @@ class SettingsWindow:
         for key in ("work_scale", "profile", "intensity", "local_tone",
                     "local_structure", "skin_structure", "language"):
             self._widgets[f"label_{key}"].configure(text=s[key])
+            hint = self._widgets.get(f"hint_{key}")
+            if hint is not None and f"{key}_hint" in s:
+                hint.configure(text=s[f"{key}_hint"])
         self._widgets["nr_check"].configure(
             text=s["nr_on"] if self._vars["nr"].get() else s["nr_off"])
         self._widgets["close"].configure(text=s["close"])

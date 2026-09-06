@@ -90,7 +90,7 @@ work scale, NR parameters, language (ru/en), screenshot button, **Exit**.
 | `width`, `height` | output resolution (**actual monitor resolution is used automatically when config is stale**) |
 | `fullscreen` | borderless fullscreen window |
 | `warmup` | NGX warmup frames at start |
-| `work_scale` | 0.25–1.0, NGX processing resolution relative to output |
+| `work_scale` | 0.25–1.0, NGX processing resolution relative to output. **Higher is free** — see Performance |
 | `profile` | `Faithful`, `Natural`, `Strong / Cinematic`, `Extreme / Overdrive` |
 | `intensity`, `local_tone`, `local_structure`, `skin_structure` | `null` = take from profile |
 | `lang` | `ru` / `en` |
@@ -178,6 +178,29 @@ attributed to transport.
 
 The 1440p figures previously published here (64 FPS) predate the DDA fence
 fix and understate current performance; they have not been re-measured.
+
+### work_scale costs nothing
+
+NGX evaluation time does not depend on the work resolution at all. Measured
+across the whole slider range on a 4K desktop:
+
+```
+work          MPix   eval ms    FPS
+960x540       0.52    16.13    53.8
+1344x756      1.02    15.90    55.4
+1728x972      1.68    15.93    56.8
+2112x1188     2.51    15.96    55.7
+2496x1404     3.50    15.98    55.3
+```
+
+Fit: `eval = 15.97 ms + (-0.01) ms/MPix`, R² = 0.011 — i.e. noise, not a
+trend. Seven times more input pixels cost 0.2 ms, which is within the
+measurement spread.
+
+**So run the slider at its maximum.** Lowering `work_scale` buys no
+performance and only costs sharpness; the default ships at 0.65 (2496×1404,
+just under the 2560×1440 NGX cap). The slider is a quality control, not a
+quality-versus-speed tradeoff.
 
 ## Limitations (read before buying/recording)
 
