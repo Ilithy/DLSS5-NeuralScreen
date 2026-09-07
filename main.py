@@ -1016,7 +1016,7 @@ def main() -> int:
         hotkeys.start()
         if hotkeys.registered:
             print(f"[main] Хоткеи зарегистрированы: {', '.join(hotkeys.registered)} "
-                  f"({describe(hotkey_bindings)})")
+                  f"({describe_hotkeys(hotkey_bindings)})")
         if hotkeys.failed:
             print(f"[main] Хоткеи заняты другой программой: {', '.join(hotkeys.failed)}",
                   file=sys.stderr)
