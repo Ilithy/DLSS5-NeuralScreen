@@ -145,6 +145,20 @@ class OverlayMenu:
         self._title_bar = pygame.Rect(0, 0, 0, 0)
         self._move_from = None
         self._resize_from = None
+        # Высота панели: None — по содержимому. Задаётся протяжкой нижней
+        # кромки; содержимое выше высоты прокручивается.
+        self.user_height: int | None = None
+        self.scroll = 0
+        self.content_height = 0
+        self._max_scroll = 0
+        self._resize_h_from = None
+        # Последняя позиция мыши: колесо в pygame приходит без координат, а
+        # pygame.mouse.get_pos() в click-through окне доверия не вызывает.
+        self._mouse = (0, 0)
+        self._edge = pygame.Rect(0, 0, 0, 0)
+        self._viewport = pygame.Rect(0, 0, 0, 0)
+        self._scroll_track = pygame.Rect(0, 0, 0, 0)
+        self._scroll_thumb = pygame.Rect(0, 0, 0, 0)
         # Какой список сейчас раскрыт (профиль / язык / тема). Стрелками
         # перебирать неудобно, когда вариантов больше двух.
         self.open_choice: str | None = None
@@ -335,8 +349,19 @@ class OverlayMenu:
                           extra={"label": close_label, "color": c["text"]}))
         cy += btn_h + pad
 
-        # Высота известна — сдвигаем всё в экранные координаты
-        h = cy
+        # Высота содержимого известна. Панель может быть ниже — тогда
+        # содержимое прокручивается: на 1080p полная панель занимала почти
+        # весь экран, а деться от этого было некуда.
+        content_h = cy
+        title_h = self._u(TITLE_H)
+        min_h = title_h + self._u(140)
+        # Выше содержимого не растягиваем: пустое место внизу выглядит
+        # сломанным, а не просторным.
+        h = content_h if self.user_height is None else int(self.user_height)
+        h = max(min(h, content_h, max(0, screen_h - self._u(40))), min(min_h, content_h))
+        self.content_height = content_h
+        self._max_scroll = max(0, content_h - h)
+        self.scroll = min(max(self.scroll, 0), self._max_scroll)
         # Смещение от центра + зажим, чтобы панель нельзя было утащить
         # за край экрана целиком.
         x = (screen_w - w) // 2 + self.offset[0]
@@ -344,14 +369,35 @@ class OverlayMenu:
         x = min(max(x, -w + self._u(80)), screen_w - self._u(80))
         y = min(max(y, 0), max(0, screen_h - self._u(60)))
         self.panel_rect = pygame.Rect(x, y, w, h)
-        self._title_bar = pygame.Rect(x, y, w, self._u(TITLE_H))
+        self._title_bar = pygame.Rect(x, y, w, title_h)
         grip = self._u(26)
         self._grip = pygame.Rect(x + w - grip, y + h - grip, grip, grip)
-        self._stats_rect = self._stats_rel.move(x, y)
-        self._gpu_rect = self._gpu_rel.move(x, y)
-        self._hotkeys_rect = self._hotkeys_rel.move(x, y)
+        # Нижняя кромка тянет высоту, уголок остаётся за масштаб — поэтому
+        # зона кромки не доходит до уголка.
+        edge = self._u(7)
+        self._edge = pygame.Rect(x, y + h - edge, max(0, w - grip), edge)
+        self._viewport = pygame.Rect(x, y + title_h, w, max(0, h - title_h))
+        # Всё содержимое живёт со сдвигом на прокрутку; заголовок — нет.
+        sy = y - self.scroll
+        self._stats_rect = self._stats_rel.move(x, sy)
+        self._gpu_rect = self._gpu_rel.move(x, sy)
+        self._hotkeys_rect = self._hotkeys_rel.move(x, sy)
+        if self._max_scroll > 0:
+            bar_w = max(2, self._u(3))
+            view_h = self._viewport.h
+            track = pygame.Rect(x + w - self._u(7) - bar_w,
+                                y + title_h + self._u(4),
+                                bar_w, max(1, view_h - self._u(8)))
+            thumb_h = max(self._u(26), int(track.h * view_h / content_h))
+            travel = track.h - thumb_h
+            ty = track.y + int(travel * (self.scroll / self._max_scroll))
+            self._scroll_track = track
+            self._scroll_thumb = pygame.Rect(track.x, ty, bar_w, thumb_h)
+        else:
+            self._scroll_track = pygame.Rect(0, 0, 0, 0)
+            self._scroll_thumb = pygame.Rect(0, 0, 0, 0)
         for it in items:
-            it.rect = it.rect.move(x, y)
+            it.rect = it.rect.move(x, sy)
             if it.kind == "choice":
                 # Поле выбора считаем здесь, а не при отрисовке: раскладка
                 # раскрытого списка строится до первого draw.
@@ -391,15 +437,32 @@ class OverlayMenu:
             return []
         out: list[tuple] = []
         if event.type == pygame.MOUSEMOTION:
+            self._mouse = event.pos
             if self._grip.collidepoint(event.pos):
                 self.hover = "grip"
+            elif self._edge.collidepoint(event.pos):
+                self.hover = "edge"
             elif self._title_bar.collidepoint(event.pos):
                 self.hover = "title"
             else:
                 self.hover = None
+        if event.type == pygame.MOUSEWHEEL:
+            # Прокрутка только когда курсор над панелью: иначе колесо в игре
+            # уезжало бы в меню.
+            if self._max_scroll > 0 and self.panel_rect.collidepoint(self._mouse):
+                self.scroll = min(max(self.scroll - event.y * self._u(48), 0),
+                                  self._max_scroll)
+            return out
         if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
             if self._grip.collidepoint(event.pos):
                 self._resize_from = (event.pos, self.user_scale)
+                return out
+            if self._edge.collidepoint(event.pos):
+                # Тянем высоту. Если высота ещё не задавалась, берём текущую
+                # — иначе первый же пиксель протяжки схлопнул бы панель.
+                base = self.user_height if self.user_height is not None \
+                    else self.panel_rect.h
+                self._resize_h_from = (event.pos[1], int(base))
                 return out
             if self._title_bar.collidepoint(event.pos):
                 self._move_from = (event.pos, tuple(self.offset))
@@ -421,6 +484,9 @@ class OverlayMenu:
             elif item.kind == "slider":
                 self._drag_item = item
                 out.extend(self._slide(item, event.pos[0]))
+        elif event.type == pygame.MOUSEMOTION and self._resize_h_from is not None:
+            start_y, base = self._resize_h_from
+            self.user_height = max(1, base + event.pos[1] - start_y)
         elif event.type == pygame.MOUSEMOTION and self._move_from is not None:
             start, base = self._move_from
             self.offset = [base[0] + event.pos[0] - start[0],
@@ -440,6 +506,12 @@ class OverlayMenu:
             self._drag_item = None
             self._move_from = None
             self._resize_from = None
+            if self._resize_h_from is not None:
+                self._resize_h_from = None
+                # Раскладка зажимает высоту содержимым и экраном — забираем
+                # зажатое значение, чтобы в конфиг не уехало сырое.
+                self.user_height = (None if self._max_scroll == 0
+                                    else self.panel_rect.h)
         elif event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
             out.append(("button", "close"))
         return out
@@ -481,11 +553,18 @@ class OverlayMenu:
         """Курсор под текущей зоной. Ставит display — он владеет pygame."""
         if self.hover == "grip" or self._resize_from is not None:
             return pygame.SYSTEM_CURSOR_SIZENWSE
+        if self.hover == "edge" or self._resize_h_from is not None:
+            return pygame.SYSTEM_CURSOR_SIZENS
         if self.hover == "title" or self._move_from is not None:
             return pygame.SYSTEM_CURSOR_SIZEALL
         return pygame.SYSTEM_CURSOR_ARROW
 
     def hit(self, pos: tuple[int, int]) -> Item | None:
+        # Прокрученное содержимое рисуется с обрезкой по _viewport, поэтому
+        # и попадания за его пределами считать нельзя: строка, уехавшая под
+        # заголовок, невидима, но её прямоугольник ещё существует.
+        if self._viewport.h > 0 and not self._viewport.collidepoint(pos):
+            return None
         for opt in getattr(self, "options", []):
             if opt.rect.collidepoint(pos):
                 return opt
@@ -528,6 +607,10 @@ class OverlayMenu:
         surface.blit(brand, (r.right - pad - brand.get_width(),
                              r.y + self._u(22)))
 
+        # Содержимое рисуем с обрезкой по области прокрутки, иначе
+        # прокрученные строки вылезали бы за панель.
+        prev_clip = surface.get_clip()
+        surface.set_clip(self._viewport)
         self._draw_stats(surface)
         self._draw_gpu(surface, s)
         self._draw_hotkeys(surface, s)
@@ -561,6 +644,22 @@ class OverlayMenu:
              "choice": self._draw_choice, "button": self._draw_button}[item.kind](
                 surface, item, s)
         self._draw_options(surface)
+        surface.set_clip(prev_clip)
+        self._draw_scrollbar(surface)
+
+    def _draw_scrollbar(self, surface) -> None:
+        """Тонкая полоса у правого края. Появляется только когда есть куда
+        прокручивать — постоянная полоса была бы шумом."""
+        if self._max_scroll <= 0:
+            return
+        radius = self._scroll_thumb.w // 2
+        pygame.draw.rect(surface, _rgb(self.c["surface"]), self._scroll_track,
+                         border_radius=radius)
+        active = (self.hover in ("edge", "scroll")
+                  or self._resize_h_from is not None)
+        color = self.c["accent"] if active else self.c["muted"]
+        pygame.draw.rect(surface, _rgb(color), self._scroll_thumb,
+                         border_radius=radius)
 
     def _draw_stats(self, surface, *_):
         st = self.stats or {}

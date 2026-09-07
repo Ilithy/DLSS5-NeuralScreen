@@ -994,6 +994,9 @@ def main() -> int:
         saved_offset = cfg.get("menu_offset")
         if isinstance(saved_offset, (list, tuple)) and len(saved_offset) == 2:
             display.menu.offset = [int(saved_offset[0]), int(saved_offset[1])]
+        saved_height = cfg.get("menu_height")
+        if isinstance(saved_height, (int, float)) and saved_height > 0:
+            display.menu.user_height = int(saved_height)
         print(f"[main] Окно вывода {display.width}x{display.height}")
 
         # Трей-иконка: команды в очередь, main-цикл их читает
@@ -1336,6 +1339,9 @@ def main() -> int:
             saved_offset = cfg.get("menu_offset")
             if isinstance(saved_offset, (list, tuple)) and len(saved_offset) == 2:
                 display.menu.offset = [int(saved_offset[0]), int(saved_offset[1])]
+            saved_height = cfg.get("menu_height")
+            if isinstance(saved_height, (int, float)) and saved_height > 0:
+                display.menu.user_height = int(saved_height)
             if menu_was_open:
                 display.menu.set_state(_menu_payload())
                 display.menu.visible = True
@@ -1507,6 +1513,9 @@ def main() -> int:
             try:
                 data = json.loads(args.config.read_text(encoding="utf-8"))
                 data["menu_scale"] = round(display.menu.user_scale, 2)
+                # Высота: None — «по содержимому», так и пишем.
+                data["menu_height"] = (None if display.menu.user_height is None
+                                       else int(display.menu.user_height))
                 data["open_menu_on_start"] = startup_menu
                 data["split"] = round(split_pos, 2)
                 data["theme"] = display.menu.state.get("theme", "light")
