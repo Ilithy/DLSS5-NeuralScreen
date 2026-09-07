@@ -136,6 +136,21 @@ def main() -> int:
         if got is None:
             failures.append("иконка шапки не принимает клик")
 
+    # 5c. Иконки шапки не едут вместе с прокруткой
+    for pos in (0, menu._max_scroll // 2, menu._max_scroll):
+        menu.scroll = pos
+        menu.draw(surf)
+        for ic in [i for i in menu.items if i.kind == "icon"]:
+            if not menu._title_bar.contains(ic.rect):
+                failures.append(f"иконка {ic.key} уехала из шапки "
+                                f"при прокрутке {pos}: {tuple(ic.rect)} "
+                                f"вне {tuple(menu._title_bar)}")
+                break
+    print("иконки шапки при прокрутке: на месте"
+          if not any("уехала" in f for f in failures) else "иконки шапки: УЕХАЛИ")
+    menu.scroll = 0
+    menu.draw(surf)
+
     # 6. Высоту не растянуть выше содержимого
     menu.user_height = menu.content_height * 3
     menu.draw(surf)

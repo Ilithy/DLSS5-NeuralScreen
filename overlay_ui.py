@@ -509,7 +509,9 @@ class OverlayMenu:
             self._scroll_track = pygame.Rect(0, 0, 0, 0)
             self._scroll_thumb = pygame.Rect(0, 0, 0, 0)
         for it in items:
-            it.rect = it.rect.move(x, sy)
+            # Иконки шапки прибиты к панели, а не к содержимому: они лежат
+            # выше области прокрутки, и вместе с ней уезжали под заголовок.
+            it.rect = it.rect.move(x, y if it.kind == "icon" else sy)
             if it.kind == "choice":
                 # Поле выбора считаем здесь, а не при отрисовке: раскладка
                 # раскрытого списка строится до первого draw.
