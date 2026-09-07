@@ -1866,6 +1866,7 @@ static bool OpenDda(UINT w, UINT hgt)
 enum { PH_ACQ, PH_DDA, PH_UPLOAD, PH_EVAL, PH_PRESENT, PH_FRAME, PH_COUNT };
 static double PhaseNow();
 static void PhaseAdd(int idx, double t0);
+static bool PhaseEnabled();
 
 // Grab the latest desktop frame into v.color.tex (RGBA, GPU-resident).
 static bool DdaGrab(VideoState &v)
@@ -2080,9 +2081,75 @@ static bool UploadMotionOnly(VideoState &v, const BYTE *mv, bool motion_small)
     return WaitFenceValue(h.fence, fence, 30000);
 }
 
+// ---------------------------------------------------------------------------
+// Сколько из времени Evaluate GPU реально считает
+//
+// PH_EVAL меряет submit + ожидание забора на CPU: в него входит и постановка
+// задачи, и просыпание потока. Замер по разрешению показал, что eval не растёт
+// с числом пикселей (15.9-16.1 мс на 0.52-3.50 МПикс) — значит там не
+// тензорная математика. Таймстемпы на очереди отвечают на вопрос прямо:
+// GPU-время сильно меньше CPU-времени означает, что упираемся в синхронизацию,
+// а не в модель.
+// ---------------------------------------------------------------------------
+static ID3D12QueryHeap *g_ts_heap;
+static ID3D12Resource  *g_ts_readback;
+static UINT64           g_ts_freq;
+static int              g_ts_state;   // 0 — не пробовали, 1 — готово, -1 — не вышло
+static double           g_ts_sum;
+static double           g_ts_max;
+static unsigned         g_ts_n;
+
+static bool EnsureTimestamps()
+{
+    if (g_ts_state != 0) return g_ts_state == 1;
+    g_ts_state = -1;
+    if (h.dev == nullptr || h.queue == nullptr) return false;
+    D3D12_QUERY_HEAP_DESC qd = {};
+    qd.Type = D3D12_QUERY_HEAP_TYPE_TIMESTAMP;
+    qd.Count = 2;
+    if (FAILED(h.dev->CreateQueryHeap(&qd, __uuidof(ID3D12QueryHeap),
+                                      reinterpret_cast<void **>(&g_ts_heap))))
+    { Log("[phase] CreateQueryHeap не удался — GPU-время eval мерить нечем"); return false; }
+    D3D12_HEAP_PROPERTIES rb = {};
+    rb.Type = D3D12_HEAP_TYPE_READBACK;
+    D3D12_RESOURCE_DESC bd = {};
+    bd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    bd.Width = sizeof(UINT64) * 2; bd.Height = 1; bd.DepthOrArraySize = 1;
+    bd.MipLevels = 1; bd.SampleDesc.Count = 1;
+    bd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    if (FAILED(h.dev->CreateCommittedResource(&rb, D3D12_HEAP_FLAG_NONE, &bd,
+        D3D12_RESOURCE_STATE_COPY_DEST, nullptr, __uuidof(ID3D12Resource),
+        reinterpret_cast<void **>(&g_ts_readback)))) return false;
+    if (FAILED(h.queue->GetTimestampFrequency(&g_ts_freq)) || g_ts_freq == 0) return false;
+    g_ts_state = 1;
+    Log("[phase] GPU-таймстемпы вокруг Evaluate включены (частота %llu Гц)", g_ts_freq);
+    return true;
+}
+
+static void ReadEvalGpuTime()
+{
+    if (g_ts_state != 1) return;
+    D3D12_RANGE r = { 0, sizeof(UINT64) * 2 };
+    void *mapped = nullptr;
+    if (FAILED(g_ts_readback->Map(0, &r, &mapped)) || mapped == nullptr) return;
+    const UINT64 *ts = static_cast<const UINT64 *>(mapped);
+    if (ts[1] > ts[0])
+    {
+        const double ms = static_cast<double>(ts[1] - ts[0]) * 1000.0
+                          / static_cast<double>(g_ts_freq);
+        g_ts_sum += ms;
+        if (ms > g_ts_max) g_ts_max = ms;
+        ++g_ts_n;
+    }
+    D3D12_RANGE none = { 0, 0 };
+    g_ts_readback->Unmap(0, &none);
+}
+
 static bool EvaluateVideo(VideoState &v, int reset)
 {
     if (!BeginCommands()) return false;
+    const bool ts = PhaseEnabled() && EnsureTimestamps();
+    if (ts) h.list->EndQuery(g_ts_heap, D3D12_QUERY_TYPE_TIMESTAMP, 0);
     const UINT cw = v.upscale ? v.full_w : v.w;
     const UINT ch = v.upscale ? v.full_h : v.hgt;
     h.params->Reset();
@@ -2110,10 +2177,18 @@ static bool EvaluateVideo(VideoState &v, int reset)
     __except (EXCEPTION_EXECUTE_HANDLER) { code = GetExceptionCode(); }
     g_last_eval_result = static_cast<uint32_t>(result);
     if (code != 0) { AbortCommands(); Log("[pure] direct evaluate exception 0x%08X", code); return false; }
+    if (ts)
+    {
+        h.list->EndQuery(g_ts_heap, D3D12_QUERY_TYPE_TIMESTAMP, 1);
+        h.list->ResolveQueryData(g_ts_heap, D3D12_QUERY_TYPE_TIMESTAMP, 0, 2,
+                                 g_ts_readback, 0);
+    }
     const UINT64 fence = EndCommands();
     if (NVSDK_NGX_FAILED(result)) { Log("[pure] direct evaluate failed 0x%08X (%s)", result, NgxResultName(result)); return false; }
     ++g_eval_count;
-    return WaitFenceValue(h.fence, fence, 60000);
+    if (!WaitFenceValue(h.fence, fence, 60000)) return false;
+    if (ts) ReadEvalGpuTime();
+    return true;
 }
 
 static bool DownloadVideoFrame(VideoState &v, std::vector<BYTE> &packed,
@@ -2357,6 +2432,12 @@ static void PhaseReport(bool bypass)
         off += _snprintf_s(line + off, sizeof(line) - off, _TRUNCATE, " | %s %.1f/%.1f",
                            kPhaseNames[i], g_ph_sum[i] / g_ph_n[i], g_ph_max[i]);
         g_ph_sum[i] = 0.0; g_ph_max[i] = 0.0; g_ph_n[i] = 0;
+    }
+    if (g_ts_n > 0)
+    {
+        _snprintf_s(line + off, sizeof(line) - off, _TRUNCATE,
+                    " | eval на GPU %.1f/%.1f", g_ts_sum / g_ts_n, g_ts_max);
+        g_ts_sum = 0.0; g_ts_max = 0.0; g_ts_n = 0;
     }
     Log("%s (среднее/макс, мс)", line);
     Log("[phase] present по корзинам мс: <5=%u 5-12=%u 12-20=%u 20-28=%u 28-40=%u 40+=%u",

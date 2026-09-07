@@ -33,7 +33,7 @@ def loader(size):
 menu = overlay_ui.OverlayMenu(SCALE, loader)
 menu.set_state({
     "nr": True,
-    "work_scale": 0.65,
+    "work_scale": 1.0,
     "profile": "Strong / Cinematic",
     "profiles": ["Faithful", "Natural", "Strong / Cinematic", "Extreme / Overdrive"],
     "params": {"intensity": 1.65, "local_tone": 1.40,

@@ -4,7 +4,7 @@
   "height": 2160,
   "fullscreen": true,
   "warmup": 120,
-  "work_scale": 0.65,
+  "work_scale": 1.0,
   "lang": "en",
   "profile": "Strong / Cinematic",
   "intensity": null,

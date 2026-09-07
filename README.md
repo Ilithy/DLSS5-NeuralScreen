@@ -236,10 +236,19 @@ Fit: `eval = 15.97 ms + (-0.01) ms/MPix`, R² = 0.011 — i.e. noise, not a
 trend. Seven times more input pixels cost 0.2 ms, which is within the
 measurement spread.
 
-**So run the slider at its maximum.** Lowering `work_scale` buys no
-performance and only costs sharpness; the default ships at 0.65 (2496×1404,
-just under the 2560×1440 NGX cap). The slider is a quality control, not a
-quality-versus-speed tradeoff.
+**So run the slider at its maximum — the default is now `1.0`.** Lowering
+`work_scale` buys no performance and only costs sharpness. 1.0 is safe on any
+monitor because the work size is clamped to the 2560×1440 NGX cap anyway, so
+the slider always lands exactly at the cap: 2560×1440 from a 4K desktop,
+2304×1440 from 2560×1600. The previous default of 0.65 was picked to sit just
+under the cap **on a 4K screen** — on anything smaller it quietly threw
+resolution away.
+
+Re-confirmed with D3D12 timestamps on the queue, i.e. GPU time inside
+`Evaluate` rather than time around the submit: **7.9–8.6 ms flat from 0.37 to
+3.32 MPix** (2560×1600 desktop, RTX 5070 Ti). Nine times the input pixels,
+the same time — the model works at its own fixed internal resolution. End to
+end: 102 FPS at both `0.65` and `1.00`.
 
 ## Limitations (read before buying/recording)
 

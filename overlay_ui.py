@@ -108,7 +108,7 @@ class OverlayMenu:
         self.lang = "en"
         self.state: dict = {
             "nr": True,
-            "work_scale": 0.65,
+            "work_scale": 1.0,
             "profile": "",
             "profiles": [],
             "params": {},
