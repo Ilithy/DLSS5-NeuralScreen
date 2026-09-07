@@ -24,10 +24,11 @@ desktop capture -> motion guides -> NGX worker (D3D12) -> overlay on top of the 
 
 > **v1.1.** The whole pipeline lives on the GPU — capture, neural pass and
 > presentation all happen inside the worker; Python only computes
-> optical-flow guides (0.1 ms/frame). RTX 5070 Ti, 2560×1600 desktop, work at
-> the 2304×1440 cap: **102 FPS with NR on**. Of the 9.8 ms frame, 8.0 ms is
-> GPU time inside the NGX evaluate — measured with D3D12 timestamps on the
-> queue, so the rest of the pipeline costs 1.8 ms.
+> optical-flow guides (0.1 ms/frame). RTX 5070 Ti, work at the 2560×1440 cap:
+> **47 FPS with NR on a 4K desktop, 102 FPS on 2560×1600**. The NGX evaluate
+> is 15.7 ms and 8.0 ms respectively — it scales with the **screen**
+> resolution, and everything else in the pipeline costs about 2 ms either way
+> (D3D12 timestamps on the queue).
 
 ## Requirements
 
@@ -255,10 +256,33 @@ under the cap **on a 4K screen** — on anything smaller it quietly threw
 resolution away.
 
 Re-confirmed with D3D12 timestamps on the queue, i.e. GPU time inside
-`Evaluate` rather than time around the submit: **7.9–8.6 ms flat from 0.37 to
-3.32 MPix** (2560×1600 desktop, RTX 5070 Ti). Nine times the input pixels,
-the same time — the model works at its own fixed internal resolution. End to
-end: 102 FPS at both `0.65` and `1.00`.
+`Evaluate` rather than time around the submit, on two desktop resolutions:
+
+```
+desktop      work_scale range   work MPix      eval GPU
+2560x1600    0.30 .. 1.00       0.37 .. 3.32   7.9 - 8.6 ms
+3840x2160    0.30 .. 1.00       0.75 .. 3.69   15.70 - 15.73 ms
+```
+
+Five to nine times the work pixels for the same time, at either resolution.
+
+### ...but the screen resolution does
+
+The two rows above differ by 2.02× in screen pixels and by 1.96× in eval
+time. That is the whole story: in upscale mode NGX is handed the **full-res**
+frame and returns a full-res frame, downsampling to the work size internally.
+So the cost is set by the desktop, not by the slider.
+
+An earlier revision of this section concluded "the model works at its own
+fixed internal resolution". That was wrong, and wrong in an instructive way:
+it came from varying only `work_scale` at a single desktop resolution, which
+by construction cannot see a dependence on the frame size.
+
+Consequences: on a 4K desktop the floor is 15.7 ms of NGX per frame, i.e.
+about 57 FPS worker-side and 47 end to end, and no amount of plumbing work
+gets near a 144 Hz panel. On 2560×1600 the same floor is 8.0 ms. If you want
+more frames, lower the **desktop** resolution — the work slider will not do
+it.
 
 ## Before / after wipe
 
