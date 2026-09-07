@@ -151,6 +151,16 @@ FRAME_FLAG_BYPASS = 0x10  # NR OFF: пропустить NGX, показать �
 # GRAY: воркер пишет luminance (даунсэмпл экрана, ~320x180) в обратный
 # маппинг Python — для оптического потока guides. В DDA-режиме это
 # заменяет dxcam-захват: gray приходит прямо с GPU.
+# OUTS: обратный канал под ПИКСЕЛИ. Кадр записи на 4K весит 33 МБ, и через
+# пайп это ~7 мс на кадр (замерено: recv 17.4 -> 31.6 мс при включении
+# записи). Через общую память те же байты по трубе не идут.
+OUTS_MAGIC = 0x5354554F      # 'OUTS'
+OUTS_ACK_MAGIC = 0x324B414F  # 'OAK2'
+OUTS_FMT = "<4Iq64s"         # как GRAY_FMT: magic, w, h, flags, pts, name
+OUTS_ACK_FMT = "<4Iq"
+# VideoResultHeader.bytes: пиксели лежат в секции OUTS, а не в пайпе.
+OUT_BYTES_IN_SHM = 0xFFFFFFFF
+
 GRAY_MAGIC = 0x59415247  # 'GRAY'
 GRAY_ACK_MAGIC = 0x4B434147  # 'GAK'
 GRAY_FMT = "<4Iq64s"    # magic, width, height, flags, pts, name (88 байт)
@@ -241,6 +251,13 @@ class SharedFrameBuffer:
         self._gray_mm: mmap.mmap | None = None
         self._gray_buf: np.ndarray | None = None  # (gray_bytes,) uint8
 
+        # --- Обратный канал: пиксели результата (запись/скриншот) ---
+        self.out_w, self.out_h = 0, 0
+        self.out_bytes = 0
+        self.out_name = ""
+        self._out_mm: mmap.mmap | None = None
+        self._out_buf: np.ndarray | None = None  # (h, w, 4) uint8
+
     def open_gray(self, w: int, h: int) -> None:
         """Открыть gray-секцию размером w*h (создать, если не была).
 
@@ -257,6 +274,42 @@ class SharedFrameBuffer:
         self.gray_name = f"NeuralScreenGray_{os.getpid()}_{uuid.uuid4().hex[:6]}"
         self._gray_mm = mmap.mmap(-1, self.gray_bytes, tagname=self.gray_name)
         self._gray_buf = np.ndarray((self.gray_bytes,), dtype=np.uint8, buffer=self._gray_mm)
+
+    def open_out(self, w: int, h: int) -> None:
+        """Открыть секцию под возвращаемые пиксели (RGBA8 w*h).
+
+        Имя меняется при каждом открытии — как у gray: воркер держит старый
+        handle, и CreateFileMapping с тем же именем вернул бы старую секцию
+        прежнего размера.
+        """
+        if self._out_mm is not None and self.out_w == w and self.out_h == h:
+            return
+        self.close_out()
+        self.out_w, self.out_h = w, h
+        self.out_bytes = w * h * 4
+        self.out_name = f"NeuralScreenOut_{os.getpid()}_{uuid.uuid4().hex[:6]}"
+        self._out_mm = mmap.mmap(-1, self.out_bytes, tagname=self.out_name)
+        self._out_buf = np.ndarray((h, w, 4), dtype=np.uint8, buffer=self._out_mm)
+
+    def read_out(self) -> np.ndarray | None:
+        """Копия кадра из секции. Копия обязательна: слот один, и воркер
+        перепишет его следующим кадром, а кадр живёт дольше — он уходит в
+        очередь кодировщика."""
+        if self._out_buf is None:
+            return None
+        return self._out_buf.copy()
+
+    def close_out(self) -> None:
+        if self._out_buf is not None:
+            self._out_buf = None
+        if self._out_mm is not None:
+            try:
+                self._out_mm.close()
+            except Exception:
+                pass
+            self._out_mm = None
+        self.out_bytes = 0
+        self.out_w = self.out_h = 0
 
     def read_gray(self) -> np.ndarray | None:
         """Вернуть копию gray-кадра (320x180 uint8) или None, если не открыт.
@@ -415,7 +468,7 @@ def start_worker(params: dict, width: int, height: int, warmup: int,
     # reader должен ждать full-размеры, иначе byte_count не сойдётся.
     out_w = full_w if full_w else width
     out_h = full_h if full_h else height
-    reader = WorkerReader(worker, out_w, out_h)
+    reader = WorkerReader(worker, out_w, out_h, shm)
 
     header = struct.pack(
         HEADER_FMT,
@@ -572,6 +625,19 @@ def send_gray(worker: subprocess.Popen, width: int, height: int,
     worker.stdin.flush()
 
 
+def send_out(worker: subprocess.Popen, width: int, height: int,
+             name: str, flags: int = 0, pts: int = 0) -> None:
+    """OUTS: передать воркеру имя секции, куда класть пиксели результата.
+
+    width=height=0 — выключить канал, пиксели снова пойдут телом в пайп.
+    """
+    if len(name) >= 64:
+        raise ValueError("имя out-секции длиннее 63 символов")
+    worker.stdin.write(struct.pack(OUTS_FMT, OUTS_MAGIC, int(width), int(height),
+                                   int(flags), int(pts), name.encode("ascii")))
+    worker.stdin.flush()
+
+
 class WorkerReader:
     """Постоянный поток-читатель stdout воркера (один на воркера).
 
@@ -586,10 +652,13 @@ class WorkerReader:
     данные нового воркера (разные pipes) — гонки чтения нет.
     """
 
-    def __init__(self, worker: subprocess.Popen, width: int, height: int):
+    def __init__(self, worker: subprocess.Popen, width: int, height: int,
+                 shm: "SharedFrameBuffer | None" = None):
         self._worker = worker
         self._width = width
         self._height = height
+        # Через неё приходят пиксели, когда согласован канал OUTS.
+        self._shm = shm
         self._queue: queue.Queue = queue.Queue()
         self._thread = threading.Thread(target=self._run, daemon=True,
                                         name="worker-reader")
@@ -626,6 +695,12 @@ class WorkerReader:
                     rest = _read_exact(self._worker.stdout, struct.calcsize(DDA_ACK_FMT) - 4)
                     _magic, ok, _r0, _r1, _pts = struct.unpack(DDA_ACK_FMT, magic_raw + rest)
                     self._queue.put(("dack", ok))
+                elif magic == OUTS_ACK_MAGIC:
+                    rest = _read_exact(self._worker.stdout,
+                                       struct.calcsize(OUTS_ACK_FMT) - 4)
+                    _magic, ok, _r0, _r1, _pts = struct.unpack(
+                        OUTS_ACK_FMT, magic_raw + rest)
+                    self._queue.put(("outs", ok))
                 elif magic == GRAY_ACK_MAGIC:
                     # GAK: подтверждение GRAY — обратный канал luminance открыт
                     rest = _read_exact(self._worker.stdout, struct.calcsize(GRAY_ACK_FMT) - 4)
@@ -643,6 +718,17 @@ class WorkerReader:
                         # Режим WNDO: воркер показал кадр сам в своём окне,
                         # пиксели через пайп не идут
                         self._queue.put((out_index, None))
+                        continue
+                    if byte_count == OUT_BYTES_IN_SHM:
+                        # Пиксели в секции OUTS. Копию делаем здесь, в потоке
+                        # читателя: main всё равно ждёт кадр, зато копия не
+                        # ложится на его же поток вместе с остальной работой.
+                        frame = self._shm.read_out() if self._shm else None
+                        if frame is None:
+                            raise RuntimeError(
+                                "воркер сказал «пиксели в общей памяти», "
+                                "а секция не открыта")
+                        self._queue.put((out_index, frame))
                         continue
                     if byte_count != self._width * self._height * 4:
                         raise RuntimeError(
@@ -731,6 +817,24 @@ class WorkerReader:
             if got == "gak":
                 if not payload:
                     raise RuntimeError("воркер не смог открыть gray-канал")
+                return
+
+    def wait_oak(self, timeout: float) -> None:
+        """Дождаться OAK2 — подтверждение канала пикселей через общую память."""
+        deadline = time.monotonic() + timeout
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError(f"воркер не подтвердил OUTS за {timeout:.0f}с")
+            try:
+                got, payload = self._queue.get(timeout=remaining)
+            except queue.Empty:
+                continue
+            if got is None:
+                raise payload if isinstance(payload, Exception) else EOFError("воркер остановился")
+            if got == "outs":
+                if not payload:
+                    raise RuntimeError("воркер не смог открыть канал пикселей")
                 return
 
     def wait_sack(self, timeout: float) -> None:
@@ -1058,6 +1162,10 @@ def main() -> int:
         want_present = bool(cfg.get("worker_present", True))
         want_motion_small = bool(cfg.get("motion_on_gpu", True))
         want_dda = bool(cfg.get("capture_in_worker", True))  # DDA: цвет берёт воркер
+        # Пиксели результата обратно — через общую память, а не через пайп.
+        want_out_shm = bool(cfg.get("pixels_in_shm", True))
+        out_shm = False
+        out_attempted = False
         motion_small = False  # воркер растягивает поле движения сам
         motion_attempted = False  # пробовали для текущего воркера
         present_mode = False      # окно воркера сейчас поднято
@@ -1271,6 +1379,7 @@ def main() -> int:
                 # главный цикл заново послал DDA1/GRAY. Иначе кадры уходят с
                 # NO_COLOR в воркер без захвата — рассинхрон, цикл рестартов.
                 _forget_dda()
+                _forget_out()
 
             # Порядок важен: work_w/work_h и guides меняются ВМЕСТЕ, иначе
             # размер motion разойдётся с тем, что ждёт воркер (см. docstring).
@@ -1298,6 +1407,7 @@ def main() -> int:
             nonlocal output_rgba
             nonlocal present_mode, present_attempted, dda_mode, dda_attempted
             nonlocal gray_active, motion_small, motion_attempted, gpu_ok
+            nonlocal out_shm, out_attempted
             if new_monitor == monitor:
                 return
             # Меню открыто — из него и переключают. Новый Display создаётся с
@@ -1368,6 +1478,8 @@ def main() -> int:
             gray_active = False
             motion_small = False
             motion_attempted = False
+            out_shm = False
+            out_attempted = False
             gpu_ok = None  # новый воркер — новый вердикт feature 18
             frame_index = 0
             pts = 0
@@ -1379,6 +1491,29 @@ def main() -> int:
             print(f"[main] Монитор {monitor}: {width}x{height}, "
                   f"work {work_w}x{work_h}")
             display.alert(f"Monitor {monitor}: {width}x{height}")
+
+        def _enable_out_shm() -> None:
+            """OUTS: договориться, что пиксели результата пойдут в секцию.
+
+            Зовётся после каждого запуска воркера: команда живёт в его
+            процессе, новый про неё не знает. Отказ не смертелен — пиксели
+            пойдут телом в пайп, как раньше.
+            """
+            nonlocal out_shm, out_attempted
+            out_attempted = True
+            if not want_out_shm:
+                return
+            try:
+                shm.open_out(width, height)
+                send_out(worker, width, height, shm.out_name)
+                reader.wait_oak(timeout=15.0)
+                out_shm = True
+                print(f"[main] Пиксели результата — через общую память "
+                      f"({width}x{height}, {shm.out_bytes / 1024 / 1024:.0f} МБ)")
+            except Exception as exc:
+                out_shm = False
+                print(f"[main] Общая память под пиксели недоступна ({exc}) — "
+                      f"идут через пайп", file=sys.stderr)
 
         def _sync_motion_size() -> None:
             """MOTS: согласовать с воркером разрешение поля движения.
@@ -1513,6 +1648,12 @@ def main() -> int:
             dda_mode = False
             dda_attempted = False
             gray_active = False
+
+        def _forget_out() -> None:
+            """Воркер перезапущен — про секцию OUTS он не знает."""
+            nonlocal out_shm, out_attempted
+            out_shm = False
+            out_attempted = False
 
         def _save_menu_layout() -> None:
             """Запомнить размер и положение панели в config.json.
@@ -1868,6 +2009,8 @@ def main() -> int:
             if want_motion_small and not motion_small and not motion_attempted:
                 motion_attempted = True
                 _sync_motion_size()
+            if want_out_shm and not out_shm and not out_attempted:
+                _enable_out_shm()
 
             # --- Ввод в меню оверлея ---------------------------------
             # События читаем только когда меню открыто: в остальное время
@@ -1970,6 +2113,7 @@ def main() -> int:
                     worker_stop, shm)
                 _forget_present()
                 _forget_dda()
+                _forget_out()
                 _sync_motion_size()
                 frame_index = 0
                 pts = 0
@@ -2026,6 +2170,7 @@ def main() -> int:
                     worker_stop, shm)
                 _forget_present()
                 _forget_dda()
+                _forget_out()
                 _sync_motion_size()
                 frame_index = 0
                 pts = 0

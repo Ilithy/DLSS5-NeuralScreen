@@ -910,6 +910,13 @@ static constexpr uint32_t DDA_MAGIC        = 0x31414444u; // "DDA1" -- client ->
 static constexpr uint32_t DDA_ACK_MAGIC    = 0x4B434144u; // "DACK" -- worker -> client reply to DDA1
 static constexpr uint32_t GRAY_MAGIC       = 0x59415247u; // "GRAY" -- client -> worker: gray goes back into this mapping
 static constexpr uint32_t GRAY_ACK_MAGIC   = 0x4B434147u; // "GAK"  -- worker -> client reply to GRAY
+// OUTS: обратный канал для ПИКСЕЛЕЙ. Кадр записи весит 33 МБ на 4K, и через
+// пайп это ~7 мс на кадр (замерено: recv 17.4 -> 31.6 мс при включении
+// записи). Через общую память тех же байтов не надо гонять по трубе.
+static constexpr uint32_t OUTS_MAGIC       = 0x5354554Fu; // "OUTS" -- client -> worker: pixels go into this mapping
+static constexpr uint32_t OUTS_ACK_MAGIC   = 0x324B414Fu; // "OAK2" -- worker -> client reply to OUTS
+// VideoResultHeader.bytes: пиксели лежат в секции OUTS, а не в пайпе.
+static constexpr uint32_t OUT_BYTES_IN_SHM = 0xFFFFFFFFu;
 // WNDO flags
 static constexpr uint32_t WINDOW_FLAG_CAPTURABLE = 0x1u; // debug: do NOT hide the window from screen capture
 static constexpr uint32_t WINDOW_FLAG_DISABLE    = 0x2u; // tear the window down, go back to sending pixels
@@ -1047,6 +1054,17 @@ struct VideoGrayCmd
     uint32_t magic, width, height, flags;
     int64_t pts;
     char name[64];
+};
+struct VideoOutCmd
+{
+    uint32_t magic, width, height, flags;
+    int64_t pts;
+    char name[64];
+};
+struct VideoOutAck
+{
+    uint32_t magic, ok, reserved0, reserved1;
+    int64_t pts;
 };
 struct VideoGrayAck
 {
@@ -1926,6 +1944,59 @@ static bool EnsureGrayPipeline()
 }
 
 // Открыть обратный маппинг клиента (GRAY). w/h — размер luminance (320x180).
+// --- OUTS: секция под возвращаемые пиксели -------------------------------
+static HANDLE g_out_file;
+static BYTE  *g_out_map;
+static size_t g_out_bytes;
+
+static void CloseOut()
+{
+    if (g_out_map != nullptr) { UnmapViewOfFile(g_out_map); g_out_map = nullptr; }
+    if (g_out_file != nullptr) { CloseHandle(g_out_file); g_out_file = nullptr; }
+    g_out_bytes = 0;
+}
+
+static bool OpenOut(const VideoOutCmd &oc)
+{
+    CloseOut();
+    if (oc.width == 0 || oc.height == 0) { Log("[outs] off"); return true; }
+    char name[64] = {};
+    memcpy(name, oc.name, sizeof(name) - 1);
+    const size_t need = static_cast<size_t>(oc.width) * oc.height * 4;
+    g_out_file = OpenFileMappingA(FILE_MAP_WRITE, FALSE, name);
+    if (g_out_file == nullptr)
+    { Log("[outs] OpenFileMapping('%s') failed %lu", name, GetLastError()); return false; }
+    g_out_map = static_cast<BYTE *>(MapViewOfFile(g_out_file, FILE_MAP_WRITE, 0, 0, need));
+    if (g_out_map == nullptr)
+    {
+        Log("[outs] MapViewOfFile(%zu) failed %lu", need, GetLastError());
+        CloseHandle(g_out_file); g_out_file = nullptr;
+        return false;
+    }
+    g_out_bytes = need;
+    Log("[outs] пиксели пойдут в '%s', %zu байт", name, need);
+    return true;
+}
+
+// Отдать пиксели: в секцию, если она согласована и кадр в неё влезает,
+// иначе прежним путём — телом в пайп.
+static bool DeliverPixels(const std::vector<BYTE> &output, uint32_t index,
+                          int64_t pts)
+{
+    if (g_out_map != nullptr && !output.empty() && output.size() <= g_out_bytes)
+    {
+        memcpy(g_out_map, output.data(), output.size());
+        VideoResultHeader out = { OUT_MAGIC, index, 1u, OUT_BYTES_IN_SHM,
+                                  g_last_eval_result, pts };
+        return WriteExact(stdout, &out, sizeof(out));
+    }
+    VideoResultHeader out = { OUT_MAGIC, index, 1u,
+                              static_cast<uint32_t>(output.size()),
+                              g_last_eval_result, pts };
+    return WriteExact(stdout, &out, sizeof(out))
+        && WriteExact(stdout, output.data(), output.size());
+}
+
 static bool OpenGray(const VideoGrayCmd &gc)
 {
     CloseGray();
@@ -2598,7 +2669,7 @@ static bool ReShadeHasFeature18()
 static int ReadVideoMessage(VideoState &v, VideoFrameHeader &fh, std::vector<BYTE> &color,
                             std::vector<BYTE> &mv, VideoResizeCmd &rc, VideoShmCmd &sc,
                             VideoWindowCmd &wc, VideoMotionCmd &mc, VideoDdaCmd &dc,
-                            VideoGrayCmd &gc,
+                            VideoGrayCmd &gc, VideoOutCmd &oc,
                             const BYTE **color_ptr, const BYTE **mv_ptr)
 {
     if (!ReadExact(stdin, &fh, sizeof(fh))) return 0;
@@ -2683,6 +2754,14 @@ static int ReadVideoMessage(VideoState &v, VideoFrameHeader &fh, std::vector<BYT
         memcpy(p, &fh, sizeof(fh));
         if (!ReadExact(stdin, p + sizeof(fh), sizeof(gc) - sizeof(fh))) return 0;
         return 7;
+    }
+    if (fh.magic == OUTS_MAGIC)
+    {
+        // Раскладка как у GRAY: 24 байта заголовка уже прочитаны, дальше имя.
+        BYTE *p = reinterpret_cast<BYTE *>(&oc);
+        memcpy(p, &fh, sizeof(fh));
+        if (!ReadExact(stdin, p + sizeof(fh), sizeof(oc) - sizeof(fh))) return 0;
+        return 8;
     }
     if (fh.magic == RESIZE_MAGIC)
     {
@@ -2848,9 +2927,11 @@ static int RunVideo()
         VideoMotionCmd mc = {};
         VideoDdaCmd dc = {};
         VideoGrayCmd gc = {};
+        VideoOutCmd oc = {};
         const BYTE *color_ptr = nullptr;
         const BYTE *mv_ptr = nullptr;
-        const int msg = ReadVideoMessage(v, fh, color, mv, rc, sc, wc, mc, dc, gc, &color_ptr, &mv_ptr);
+        const int msg = ReadVideoMessage(v, fh, color, mv, rc, sc, wc, mc, dc, gc,
+                                         oc, &color_ptr, &mv_ptr);
         if (msg == 0)
         {
             if (live)
@@ -3022,6 +3103,15 @@ static int RunVideo()
             if (!WriteExact(stdout, &ack, sizeof(ack))) return 10;
             continue;
         }
+        if (msg == 8)
+        {
+            // OUTS: куда класть пиксели вместо пайпа.
+            const uint32_t ok = OpenOut(oc) ? 1u : 0u;
+            Log("[video] OUTS %s (%ux%u)", ok ? "OK" : "FAIL", oc.width, oc.height);
+            VideoOutAck ack = { OUTS_ACK_MAGIC, ok, 0u, 0u, oc.pts };
+            if (!WriteExact(stdout, &ack, sizeof(ack))) return 10;
+            continue;
+        }
         const double t_frame = PhaseNow();
         if (g_dda_active)
         {
@@ -3101,11 +3191,7 @@ static int RunVideo()
                 else
                     dl_ok = DownloadVideoFrame(v, output);
                 if (!dl_ok) return 9;
-                VideoResultHeader out = { OUT_MAGIC, fh.index, 1u,
-                                          static_cast<uint32_t>(output.size()),
-                                          g_last_eval_result, fh.pts };
-                if (!WriteExact(stdout, &out, sizeof(out)) ||
-                    !WriteExact(stdout, output.data(), output.size())) return 10;
+                if (!DeliverPixels(output, fh.index, fh.pts)) return 10;
             }
             else
             {
@@ -3116,8 +3202,7 @@ static int RunVideo()
         else
         {
             if (!DownloadVideoFrame(v, output)) return 9;
-            VideoResultHeader out = { OUT_MAGIC, fh.index, 1u, static_cast<uint32_t>(output.size()), g_last_eval_result, fh.pts };
-            if (!WriteExact(stdout, &out, sizeof(out)) || !WriteExact(stdout, output.data(), output.size())) return 10;
+            if (!DeliverPixels(output, fh.index, fh.pts)) return 10;
         }
         PhaseAdd(PH_FRAME, t_frame);
         PhaseReport(bypass);
@@ -3128,6 +3213,7 @@ static int RunVideo()
     }
     Log("[pure] complete: %u frames delivered, %u direct evaluations", frame, g_eval_count);
     CleanupVideoNgx();
+    CloseOut();
     CloseSharedInput();
     ClosePresent();
     CloseMotionScaler();
