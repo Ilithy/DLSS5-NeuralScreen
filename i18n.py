@@ -24,6 +24,11 @@ DEFAULT_LANG = "en"
 STRINGS = {
     "en": {
         "theme": "Theme",
+        "monitor": "Monitor",
+        "autostart": "Autostart with Windows",
+        "autostart_on": "Autostart ON",
+        "autostart_off": "Autostart OFF",
+        "autostart_err": "Autostart failed",
         "open_on_start": "Open menu on launch",
         "github": "Help",
         "split": "Before / after wipe",
@@ -60,6 +65,11 @@ STRINGS = {
     },
     "ru": {
         "theme": "Тема",
+        "monitor": "Монитор",
+        "autostart": "Автозапуск с Windows",
+        "autostart_on": "Автозапуск включён",
+        "autostart_off": "Автозапуск выключен",
+        "autostart_err": "Автозапуск не настроен",
         "open_on_start": "Открывать меню при запуске",
         "github": "Справка",
         "split": "Шторка до / после",

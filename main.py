@@ -73,10 +73,10 @@ import cv2
 import numpy as np
 import pygame  # HUD-наложение на записываемый кадр (image.frombuffer)
 
-from capture import ScreenCapture
+from capture import ScreenCapture, list_monitors
 from display import Display
 from guides import TemporalGuideGenerator
-from hotkeys import HotkeyController, describe as describe_hotkeys
+from hotkeys import HotkeyController, build_bindings, describe as describe_hotkeys
 from recorder import VideoRecorder
 from gpuinfo import describe as gpu_describe, probe as gpu_probe
 from i18n import STRINGS as UI_STRINGS
@@ -867,6 +867,51 @@ def restart_worker(worker: subprocess.Popen, params: dict, width: int, height: i
     return start_worker(params, width, height, warmup, full_w, full_h, shm)
 
 
+def _autostart_enabled() -> bool:
+    """Автозапуск сейчас включён? (HKCU Run, значение NeuralScreen)."""
+    import winreg
+    try:
+        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+                             r"Software\Microsoft\Windows\CurrentVersion\Run",
+                             0, winreg.KEY_READ)
+        try:
+            winreg.QueryValueEx(key, "NeuralScreen")
+            return True
+        except FileNotFoundError:
+            return False
+        finally:
+            winreg.CloseKey(key)
+    except Exception:
+        return False
+
+
+def _set_autostart(enabled: bool) -> bool:
+    """Включить/выключить автозапуск с Windows (HKCU Run).
+
+    Запускаем NeuralScreen.vbs через wscript — скрытый лаунчер без консоли.
+    Возвращает True при успехе.
+    """
+    import winreg
+    try:
+        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+                             r"Software\Microsoft\Windows\CurrentVersion\Run",
+                             0, winreg.KEY_SET_VALUE)
+        if enabled:
+            vbs = str(BASE_DIR / "NeuralScreen.vbs")
+            winreg.SetValueEx(key, "NeuralScreen", 0, winreg.REG_SZ,
+                              f'wscript.exe "{vbs}"')
+        else:
+            try:
+                winreg.DeleteValue(key, "NeuralScreen")
+            except FileNotFoundError:
+                pass
+        winreg.CloseKey(key)
+        return True
+    except Exception as exc:
+        print(f"[main] Автозапуск не настроен: {exc}", file=sys.stderr)
+        return False
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="DLSS 5 Desktop NR prototype")
     parser.add_argument("--config", type=Path, default=BASE_DIR / "config.json",
@@ -961,12 +1006,17 @@ def main() -> int:
         # Глобальные хоткеи: RegisterHotKey, а не опрос состояния клавиш.
         # Система отдаёт нажатие только нам и не передаёт его активному
         # приложению — F9 в игре переключает NR, и игра клавиши не видит.
-        # Команды идут в ту же очередь, что и у трея.
-        hotkeys = HotkeyController(tray_commands)
+        # Команды идут в ту же очередь, что и у трея. Пользовательские
+        # биндинги — из config.json ("hotkeys": {"toggle": "F9", ...}).
+        hotkey_overrides = cfg.get("hotkeys")
+        if not isinstance(hotkey_overrides, dict):
+            hotkey_overrides = {}
+        hotkey_bindings = build_bindings(hotkey_overrides)
+        hotkeys = HotkeyController(tray_commands, hotkey_bindings)
         hotkeys.start()
         if hotkeys.registered:
             print(f"[main] Хоткеи зарегистрированы: {', '.join(hotkeys.registered)} "
-                  f"({describe_hotkeys()})")
+                  f"({describe(hotkey_bindings)})")
         if hotkeys.failed:
             print(f"[main] Хоткеи заняты другой программой: {', '.join(hotkeys.failed)}",
                   file=sys.stderr)
@@ -1008,6 +1058,70 @@ def main() -> int:
         # Тайминги этапов: средние мс за PERF_LOG_INTERVAL (лог [perf])
         perf: dict[str, list[float]] = {k: [] for k in PERF_KEYS}
         last_perf_log = time.monotonic()
+
+        def _ask_save_path(parent_hwnd: int, default_name: str) -> Path | None:
+            """Нативный диалог «Сохранить как» (GetSaveFileNameW).
+
+            Возвращает выбранный путь или None при отмене. JPEG-фильтр по
+            умолчанию; расширение добавляется, если пользователь его не
+            указал.
+            """
+            try:
+                import ctypes
+                from ctypes import wintypes
+
+                class OPENFILENAME(ctypes.Structure):
+                    _fields_ = [
+                        ("lStructSize", wintypes.DWORD),
+                        ("hwndOwner", wintypes.HWND),
+                        ("hInstance", wintypes.HINSTANCE),
+                        ("lpstrFilter", wintypes.LPCWSTR),
+                        ("lpstrCustomFilter", wintypes.LPWSTR),
+                        ("nMaxCustFilter", wintypes.DWORD),
+                        ("nFilterIndex", wintypes.DWORD),
+                        ("lpstrFile", wintypes.LPWSTR),
+                        ("nMaxFile", wintypes.DWORD),
+                        ("lpstrFileTitle", wintypes.LPWSTR),
+                        ("nMaxFileTitle", wintypes.DWORD),
+                        ("lpstrInitialDir", wintypes.LPCWSTR),
+                        ("lpstrTitle", wintypes.LPCWSTR),
+                        ("Flags", wintypes.DWORD),
+                        ("nFileOffset", wintypes.WORD),
+                        ("nFileExtension", wintypes.WORD),
+                        ("lpstrDefExt", wintypes.LPCWSTR),
+                        ("lCustData", wintypes.LPARAM),
+                        ("lpfnHook", wintypes.LPVOID),
+                        ("lpTemplateName", wintypes.LPCWSTR),
+                        ("pvReserved", wintypes.LPVOID),
+                        ("dwReserved", wintypes.DWORD),
+                        ("FlagsEx", wintypes.DWORD),
+                    ]
+
+                buf = ctypes.create_unicode_buffer(1024)
+                buf.value = default_name
+                ofn = OPENFILENAME()
+                ofn.lStructSize = ctypes.sizeof(OPENFILENAME)
+                ofn.hwndOwner = parent_hwnd or None
+                ofn.lpstrFilter = "JPEG image (*.jpg)\0*.jpg\0PNG image (*.png)\0*.png\0All files (*.*)\0*.*\0"
+                ofn.lpstrFile = buf
+                ofn.nMaxFile = 1024
+                ofn.lpstrDefExt = "jpg"
+                ofn.Flags = 0x00000002 | 0x00000008  # OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST
+                ok = ctypes.windll.comdlg32.GetSaveFileNameW(ctypes.byref(ofn))
+                if not ok:
+                    return None
+                path = Path(buf.value.strip())
+                if not path.suffix:
+                    path = path.with_suffix(".jpg")
+                return path
+            except Exception as exc:
+                print(f"[main] Диалог сохранения недоступен ({exc}) — "
+                      f"скриншот в screenshots/", file=sys.stderr)
+                shot_dir = BASE_DIR / "screenshots"
+                shot_dir.mkdir(exist_ok=True)
+                stamp = time.strftime("%Y%m%d-%H%M%S")
+                stamp = f"{stamp}-{time.time() % 1 * 1000:03.0f}"
+                return shot_dir / f"neuralscreen-{stamp}.jpg"
 
         def _save_screenshot(path: Path, rgba) -> None:
             """Сохранить кадр в JPEG максимального качества.
@@ -1153,6 +1267,86 @@ def main() -> int:
             work_frame = None  # индексы сброшены — нужен свежий захват
             tray._set_state(scale=work_scale)
             last_restart = time.monotonic()
+
+        def _switch_monitor(new_monitor: int) -> None:
+            """Сменить монитор захвата/вывода — полный перезапуск конвейера.
+
+            Разрешение, захват, окно, воркер и shm завязаны на монитор —
+            на лету не переключить. Запись останавливается (размер кадра
+            меняется). Меню пересоздаётся с сохранением темы/языка/раскладки.
+            """
+            nonlocal monitor, width, height, work_w, work_h
+            nonlocal shm, worker, worker_logs, reader, worker_stop
+            nonlocal capture, display, guides, buf_full
+            nonlocal frame_index, pts, work_frame, recorder, pending_shot
+            nonlocal present_mode, present_attempted, dda_mode, dda_attempted
+            nonlocal gray_active, motion_small, motion_attempted, gpu_ok
+            if new_monitor == monitor:
+                return
+            print(f"[main] Смена монитора: {monitor} -> {new_monitor}")
+            # Запись: размер кадра изменится — закрываем честно (moov).
+            if recorder is not None:
+                try:
+                    recorder.close()
+                except Exception as exc:
+                    print(f"[main] Ошибка закрытия записи: {exc}", file=sys.stderr)
+                recorder = None
+            pending_shot = None
+            # Воркер и shm — старые размеры.
+            shutdown_worker(worker, worker_stop)
+            try:
+                shm.close()
+            except Exception:
+                pass
+            try:
+                capture.close()
+            except Exception:
+                pass
+            # Новый монитор: реальное разрешение.
+            monitor = new_monitor
+            cfg["monitor"] = monitor
+            capture = ScreenCapture(monitor_idx=monitor)
+            width, height = capture.resolution
+            work_w, work_h = _work_size(width, height, work_scale)
+            full_w = width if (work_w != width or work_h != height) else 0
+            full_h = height if (work_w != width or work_h != height) else 0
+            shm = SharedFrameBuffer(width, height)
+            worker, worker_logs, reader, worker_stop = start_worker(
+                params, work_w, work_h, warmup, full_w, full_h, shm)
+            # Окно и меню — заново, с сохранением пользовательских настроек.
+            try:
+                display.close()
+            except Exception:
+                pass
+            display = Display(width, height, fullscreen=bool(cfg["fullscreen"]))
+            display.set_lang(lang)
+            display.menu.set_user_scale(float(cfg.get("menu_scale", 1.0)))
+            saved_theme = cfg.get("theme")
+            if isinstance(saved_theme, str) and saved_theme in ("light", "dark"):
+                display.menu.set_state({"theme": saved_theme})
+            display.menu.set_state({"lang": lang})
+            saved_offset = cfg.get("menu_offset")
+            if isinstance(saved_offset, (list, tuple)) and len(saved_offset) == 2:
+                display.menu.offset = [int(saved_offset[0]), int(saved_offset[1])]
+            # guides и буферы — под новое разрешение.
+            guides = TemporalGuideGenerator(work_w, work_h, emit_small=motion_small)
+            buf_full = np.empty((height, width, 4), dtype=np.uint8)
+            # Флаги конвейера — новый воркер ничего не знает.
+            present_mode = False
+            present_attempted = False
+            dda_mode = False
+            dda_attempted = False
+            gray_active = False
+            motion_small = False
+            motion_attempted = False
+            gpu_ok = None  # новый воркер — новый вердикт feature 18
+            frame_index = 0
+            pts = 0
+            work_frame = None
+            _save_menu_layout()
+            print(f"[main] Монитор {monitor}: {width}x{height}, "
+                  f"work {work_w}x{work_h}")
+            display.alert(f"Monitor {monitor}: {width}x{height}")
 
         def _sync_motion_size() -> None:
             """MOTS: согласовать с воркером разрешение поля движения.
@@ -1347,9 +1541,12 @@ def main() -> int:
                 "work_size": f"{work_w}x{work_h}",
                 "rec_seconds": (recorder.duration_ms / 1000.0) if recorder else 0.0,
                 "open_on_start": startup_menu,
+                "autostart": _autostart_enabled(),
                 "split": split_pos,
                 "gpu_text": gpu_text,
                 "gpu_ok": gpu_ok,
+                "monitor": str(monitor),
+                "monitors": [f"{i}: {w}x{h}" for i, w, h in list_monitors()],
             }
 
         def _apply_menu_action(action: tuple) -> None:
@@ -1370,6 +1567,17 @@ def main() -> int:
                 startup_menu = not startup_menu
                 _save_menu_layout()
                 print(f"[main] Меню при запуске: {'да' if startup_menu else 'нет'}")
+            elif kind == "toggle" and action[1] == "autostart":
+                # Автозапуск с Windows (HKCU Run). Состояние хранится в
+                # реестре, не в config — читаем и инвертируем.
+                new_state = not _autostart_enabled()
+                if _set_autostart(new_state):
+                    print(f"[main] Автозапуск с Windows: {'вкл' if new_state else 'выкл'}")
+                    display.alert(UI_STRINGS[lang].get(
+                        "autostart_on" if new_state else "autostart_off",
+                        "Autostart ON" if new_state else "Autostart OFF"))
+                else:
+                    display.alert(UI_STRINGS[lang].get("autostart_err", "Autostart failed"))
             elif kind == "param":
                 new_params = dict(params)
                 new_params[action[1]] = float(action[2])
@@ -1387,6 +1595,15 @@ def main() -> int:
                 # запоминаем для config.json — _save_menu_layout() вызывается
                 # при закрытии меню и на выходе.
                 print(f"[main] Тема меню -> {action[1]}")
+            elif kind == "monitor":
+                # Значение приходит как "N: WxH" — берём индекс до двоеточия.
+                try:
+                    new_monitor = int(str(action[1]).split(":")[0])
+                except (ValueError, IndexError):
+                    print(f"[main] Неверный монитор: {action[1]!r}", file=sys.stderr)
+                    return
+                if new_monitor != monitor:
+                    _switch_monitor(new_monitor)
             elif kind == "button":
                 name = action[1]
                 if name == "close":
@@ -1458,15 +1675,15 @@ def main() -> int:
                         display.alert(UI_STRINGS[lang]["nr_off" if paused else "nr_on"])
                         tray._set_state(nr=not paused)
                     elif cmd == "screenshot_menu":
-                        # Диалог «Сохранить как» увёл бы фокус с оверлея,
-                        # поэтому кладём в screenshots/ с меткой времени.
-                        shot_dir = BASE_DIR / "screenshots"
-                        shot_dir.mkdir(exist_ok=True)
-                        stamp = time.strftime("%Y%m%d-%H%M%S")
-                        # Два скриншота в одну секунду не должны перезаписывать
-                        # друг друга — добавляем миллисекунды.
-                        stamp = f"{stamp}-{time.time() % 1 * 1000:03.0f}"
-                        shot_path = shot_dir / f"neuralscreen-{stamp}.jpg"
+                        # Нативный диалог «Сохранить как» (родитель — окно
+                        # оверлея). Блокирует main-цикл на время выбора —
+                        # приемлемо: пользователь сам решает, куда класть.
+                        shot_path = _ask_save_path(
+                            display.get_hwnd(),
+                            default_name=f"neuralscreen-{time.strftime('%Y%m%d-%H%M%S')}.jpg")
+                        if shot_path is None:
+                            print("[main] Скриншот отменён пользователем")
+                            continue
                         if present_mode:
                             pending_shot = shot_path
                             print(f"[main] Скриншот со следующего кадра: {shot_path}")

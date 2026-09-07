@@ -194,6 +194,13 @@ class Display:
         """Палитра темы меню — алерты держим в том же виде."""
         return ui_palette(self.menu.state.get("theme", "light"))
 
+    def get_hwnd(self) -> int:
+        """HWND окна оверлея — родитель для нативных диалогов."""
+        try:
+            return int(pygame.display.get_wm_info()["window"])
+        except Exception:
+            return 0
+
     @staticmethod
     def _rgb(color: str) -> tuple[int, int, int]:
         c = color.lstrip("#")

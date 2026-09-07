@@ -124,6 +124,9 @@ class OverlayMenu:
             # (None — воркер ещё не ответил).
             "gpu_text": "",
             "gpu_ok": None,
+            "monitor": "0",
+            "monitors": [],
+            "autostart": False,
         }
         # Показания конвейера: то же, что в HUD. Меню задумано как одно
         # место, где видно и настройки, и что происходит.
@@ -276,11 +279,22 @@ class OverlayMenu:
         choice("lang", s["language"], self.lang, ["en", "ru"])
         choice("theme", s["theme"], self.state.get("theme", "light"),
                ["light", "dark"])
+        # Монитор: список из main (payload["monitors"]), текущий — payload["monitor"]
+        monitors = self.state.get("monitors") or []
+        if monitors:
+            cur_mon = str(self.state.get("monitor", "0"))
+            choice("monitor", s.get("monitor", "Monitor"), cur_mon, monitors)
 
         items.append(Item("toggle", "open_on_start",
                           pygame.Rect(pad, cy, inner_w, ctrl_h),
                           value=1.0 if self.state.get("open_on_start") else 0.0,
                           extra={"label": s["open_on_start"]}))
+        cy += ctrl_h + gap
+
+        items.append(Item("toggle", "autostart",
+                          pygame.Rect(pad, cy, inner_w, ctrl_h),
+                          value=1.0 if self.state.get("autostart") else 0.0,
+                          extra={"label": s.get("autostart", "Autostart with Windows")}))
         cy += ctrl_h + gap
 
         # Хоткеи: узнать про них больше неоткуда, кроме README
@@ -439,6 +453,8 @@ class OverlayMenu:
         if key == "theme":
             self.state["theme"] = value
             return [("theme", value)]
+        if key == "monitor":
+            return [("monitor", value)]
         return []
 
     def _slide(self, item: Item, mouse_x: int) -> list[tuple]:

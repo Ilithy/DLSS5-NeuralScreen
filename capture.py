@@ -12,7 +12,31 @@
 
 from __future__ import annotations
 
+import ctypes
+from ctypes import wintypes
+
 import numpy as np
+
+
+def list_monitors() -> list[tuple[int, int, int]]:
+    """Список мониторов: [(idx, w, h), ...] через EnumDisplayMonitors.
+
+    Индекс совпадает с output_idx dxcam (порядок вывода). DPI-awareness
+    должна быть активна в вызывающем процессе (иначе размеры в
+    масштабированных пикселях).
+    """
+    monitors: list[tuple[int, int, int, int]] = []
+
+    def _cb(_hmon, _hdc, lprect, _lparam) -> bool:
+        r = lprect.contents
+        monitors.append((r.left, r.top, r.right - r.left, r.bottom - r.top))
+        return True
+
+    MONITORENUMPROC = ctypes.WINFUNCTYPE(
+        wintypes.BOOL, wintypes.HMONITOR, wintypes.HDC,
+        ctypes.POINTER(wintypes.RECT), wintypes.LPARAM)
+    ctypes.windll.user32.EnumDisplayMonitors(0, 0, MONITORENUMPROC(_cb), 0)
+    return [(i, w, h) for i, (_x, _y, w, h) in enumerate(monitors)]
 
 
 class ScreenCapture:

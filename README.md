@@ -65,6 +65,8 @@ desktop capture -> motion guides -> NGX worker (D3D12) -> overlay on top of the 
 | `Ctrl+Alt+↑` / `Ctrl+Alt+↓` | processing scale ±0.05 |
 | `Ctrl+Alt+Q` | quit |
 
+Hotkeys are configurable: put `"hotkeys": {"toggle": "F9", "record": "Insert", ...}` into `config.json` (commands: `toggle`, `settings`, `record`, `scale_up`, `scale_down`, `quit`; keys: F1–F12, letters, digits, Insert/Delete/Home/End/PgUp/PgDn/arrows, modifiers Ctrl/Alt/Shift).
+
 Hotkeys are registered via `RegisterHotKey`, not polled: the system delivers
 the keypress **only to us and not to the active app** — F9 inside a game
 toggles NR and the game never sees the key. The flip side: while
@@ -79,9 +81,10 @@ values, it stole focus from games, and it dragged the whole tcl/tk runtime
 along). It holds: live counters (FPS, resolution, work size, frames,
 recording time), NR on/off, profile (Faithful / Natural / Strong / Extreme),
 the four NR parameters, the before/after wipe, language (ru/en), light/dark
-theme, "open menu on launch", and the buttons Screenshot / Help / Record /
-Exit / Close. A status line shows the GPU, its architecture and whether
-Neural Rendering works on it.
+theme, "open menu on launch", monitor selection, autostart with Windows,
+and the buttons Screenshot / Help / Record / Exit / Close. A status line
+shows the GPU, its architecture and whether Neural Rendering works on it.
+Screenshot opens a native "Save As" dialog (JPEG 100%).
 
 Drag it by the title bar, resize it by the bottom-right corner — both are
 highlighted when you point at them, and both are remembered in
