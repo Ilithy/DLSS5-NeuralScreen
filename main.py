@@ -998,6 +998,10 @@ def main() -> int:
 
         # Трей-иконка: команды в очередь, main-цикл их читает
         tray_commands: queue.Queue = queue.Queue()
+        # Ответы диалога «Сохранить как». Диалог модальный и живёт в своём
+        # потоке (см. _open_save_dialog), путь приходит сюда.
+        shot_paths: queue.Queue = queue.Queue()
+        shot_dialog_open = False
         tray = TrayController(tray_commands)
         tray._set_state(nr=True, scale=work_scale)
         tray.start()
@@ -1279,10 +1283,14 @@ def main() -> int:
             nonlocal shm, worker, worker_logs, reader, worker_stop
             nonlocal capture, display, guides, buf_full
             nonlocal frame_index, pts, work_frame, recorder, pending_shot
+            nonlocal output_rgba
             nonlocal present_mode, present_attempted, dda_mode, dda_attempted
             nonlocal gray_active, motion_small, motion_attempted, gpu_ok
             if new_monitor == monitor:
                 return
+            # Меню открыто — из него и переключают. Новый Display создаётся с
+            # закрытым меню, поэтому запоминаем состояние и возвращаем его.
+            menu_was_open = display.menu.visible
             print(f"[main] Смена монитора: {monitor} -> {new_monitor}")
             # Запись: размер кадра изменится — закрываем честно (moov).
             if recorder is not None:
@@ -1328,6 +1336,11 @@ def main() -> int:
             saved_offset = cfg.get("menu_offset")
             if isinstance(saved_offset, (list, tuple)) and len(saved_offset) == 2:
                 display.menu.offset = [int(saved_offset[0]), int(saved_offset[1])]
+            if menu_was_open:
+                display.menu.set_state(_menu_payload())
+                display.menu.visible = True
+                display.set_menu_opaque(True)
+                display.set_menu_input(True)
             # guides и буферы — под новое разрешение.
             guides = TemporalGuideGenerator(work_w, work_h, emit_small=motion_small)
             buf_full = np.empty((height, width, 4), dtype=np.uint8)
@@ -1343,6 +1356,9 @@ def main() -> int:
             frame_index = 0
             pts = 0
             work_frame = None
+            # Последний NR-кадр — от прежнего монитора и прежнего размера.
+            # Без сброса скриншот сразу после переключения сохранил бы его.
+            output_rgba = None
             _save_menu_layout()
             print(f"[main] Монитор {monitor}: {width}x{height}, "
                   f"work {work_w}x{work_h}")
@@ -1525,6 +1541,51 @@ def main() -> int:
                     gpu_ok = False
                     return
 
+        def _open_save_dialog() -> None:
+            """Показать «Сохранить как», не останавливая конвейер.
+
+            GetSaveFileNameW модальный: в главном цикле он замораживал бы
+            оверлей на последнем кадре, а при активной записи пауза над
+            диалогом уезжала в MP4 стоп-кадром (PTS берётся от часов).
+            Поэтому диалог живёт в своём потоке, а путь возвращается через
+            очередь. Второй диалог не открываем — окно уже висит.
+            """
+            nonlocal shot_dialog_open
+            if shot_dialog_open:
+                return
+            shot_dialog_open = True
+            hwnd = display.get_hwnd()
+            default_name = f"neuralscreen-{time.strftime('%Y%m%d-%H%M%S')}.jpg"
+
+            def _run() -> None:
+                try:
+                    shot_paths.put(_ask_save_path(hwnd, default_name))
+                except Exception as exc:
+                    print(f"[main] Диалог сохранения упал: {exc}", file=sys.stderr)
+                    shot_paths.put(None)
+
+            threading.Thread(target=_run, name="save-dialog", daemon=True).start()
+
+        def _drain_save_dialog() -> None:
+            """Забрать путь из диалога, если пользователь уже ответил."""
+            nonlocal shot_dialog_open, pending_shot
+            try:
+                while True:
+                    shot_path = shot_paths.get_nowait()
+                    shot_dialog_open = False
+                    if shot_path is None:
+                        print("[main] Скриншот отменён пользователем")
+                        continue
+                    if present_mode:
+                        pending_shot = shot_path
+                        print(f"[main] Скриншот со следующего кадра: {shot_path}")
+                    elif output_rgba is not None:
+                        _save_screenshot(shot_path, output_rgba)
+                    else:
+                        display.alert("No frame yet")
+            except queue.Empty:
+                pass
+
         def _menu_payload() -> dict:
             """Текущее состояние для меню — один источник правды."""
             _refresh_gpu_ok()
@@ -1675,22 +1736,7 @@ def main() -> int:
                         display.alert(UI_STRINGS[lang]["nr_off" if paused else "nr_on"])
                         tray._set_state(nr=not paused)
                     elif cmd == "screenshot_menu":
-                        # Нативный диалог «Сохранить как» (родитель — окно
-                        # оверлея). Блокирует main-цикл на время выбора —
-                        # приемлемо: пользователь сам решает, куда класть.
-                        shot_path = _ask_save_path(
-                            display.get_hwnd(),
-                            default_name=f"neuralscreen-{time.strftime('%Y%m%d-%H%M%S')}.jpg")
-                        if shot_path is None:
-                            print("[main] Скриншот отменён пользователем")
-                            continue
-                        if present_mode:
-                            pending_shot = shot_path
-                            print(f"[main] Скриншот со следующего кадра: {shot_path}")
-                        elif output_rgba is not None:
-                            _save_screenshot(shot_path, output_rgba)
-                        else:
-                            display.alert("No frame yet")
+                        _open_save_dialog()
                     elif cmd == "record":
                         # Insert: запись NR-кадра в MP4. Кадры запрашиваем у
                         # воркера через FRAME_FLAG_WANT_PIXELS (механизм
@@ -1752,6 +1798,9 @@ def main() -> int:
             # в заголовке), чтобы парность send/recv не нарушалась.
             bypass = paused
             # (для читаемости: в send_frame передаём bypass=bypass)
+
+            # Ответ диалога «Сохранить как» (он в своём потоке).
+            _drain_save_dialog()
 
             if want_present and not present_mode and not present_attempted:
                 _enable_present()
