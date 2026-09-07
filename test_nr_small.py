@@ -26,7 +26,8 @@ sys.path.insert(0, str(BASE))
 
 from main import (FRAME_FLAG_WANT_PIXELS, FRAME_FMT, FRAME_MAGIC,  # noqa: E402
                   HEADER_FMT, NATIVE_DIR, OUT_FMT, OUT_MAGIC, PROFILES,
-                  VIDEO_MAGIC, WORKER_EXE)
+                  RACK_FMT, RESIZE_ACK_MAGIC, RESIZE_FLAG_NR_SMALL, RESIZE_FMT,
+                  RESIZE_MAGIC, VIDEO_MAGIC, WORKER_EXE)
 
 FULL_W, FULL_H = 1920, 1080
 WORK_W, WORK_H = 1280, 720
@@ -154,6 +155,14 @@ def check_worker(failures: list) -> None:
 
 
 def check_menu(failures: list) -> None:
+    """One control, and every position of it does something.
+
+    The menu used to carry a toggle and a slider for the same idea, and with
+    the toggle off the slider still moved while changing the picture by exactly
+    nothing. So what is checked here is that there is one slider, that its top
+    step means the whole screen, and that dragging it reports a resolution
+    rather than being mistaken for an NR parameter.
+    """
     os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
     import pygame
     import overlay_ui
@@ -167,47 +176,168 @@ def check_menu(failures: list) -> None:
             except Exception:
                 return pygame.font.Font(None, size)
 
+        CAP = 0.65
         menu = overlay_ui.OverlayMenu(1.0, font_loader)
         menu.set_state({"nr_small": False, "work_scale": 0.50,
-                        "work_scale_max": 0.67, "work_size": "2560x1440",
+                        "work_scale_cap": CAP, "work_size": "2560x1440",
+                        "screen_size": "3840x2160",
                         "profiles": ["Faithful"], "profile": "Faithful",
                         "params": {"intensity": 1.0, "local_tone": 1.0,
                                    "local_structure": 1.0, "skin_structure": 1.0}})
         menu.visible = True
-        menu.draw(pygame.Surface((1920, 1080)))
+        surf = pygame.Surface((1920, 1080))
+        menu.draw(surf)
 
         items = {i.key: i for i in menu.items}
-        if "nr_small" not in items:
-            failures.append("no reduced-resolution toggle in the menu")
-        if "work_scale" not in items:
-            failures.append("no processing-resolution slider in the menu")
-        if not failures:
-            ws = items["work_scale"]
-            print(f"slider range {ws.lo:.2f}..{ws.hi:.2f} at value {ws.value:.2f}")
-            if abs(ws.hi - 0.67) > 0.01:
-                failures.append(f"the slider runs to {ws.hi:.2f}, not to the "
-                                f"0.67 cap - its top end would be dead")
+        if "nr_small" in items:
+            failures.append("the old toggle is still in the menu")
+        if "work_scale" in items:
+            failures.append("the old work_scale slider is still in the menu")
+        if "nr_res" not in items:
+            failures.append("no resolution slider in the menu")
+            return
 
-            got = menu.handle_event(pygame.event.Event(
-                pygame.MOUSEBUTTONDOWN,
-                {"pos": items["nr_small"].rect.center, "button": 1}))
-            if ("toggle", "nr_small") not in got:
-                failures.append(f"the toggle emitted {got}, not ('toggle', 'nr_small')")
+        ws = items["nr_res"]
+        print(f"slider {ws.lo:.2f}..{ws.hi:.2f}, at {ws.value:.2f} "
+              f"showing {ws.extra.get('value_text')!r}")
+        if abs(ws.hi - (CAP + 0.05)) > 1e-6:
+            failures.append(f"the slider runs to {ws.hi:.2f}; it should stop one "
+                            f"step past the {CAP:.2f} cap")
+        # Mode off means the knob sits on that last step, showing the screen.
+        if ws.value <= CAP:
+            failures.append(f"with the mode off the knob is at {ws.value:.2f}, "
+                            f"not on the full-screen step")
+        if "3840x2160" not in str(ws.extra.get("value_text")):
+            failures.append(f"the full-screen step shows "
+                            f"{ws.extra.get('value_text')!r}, not the screen size")
 
-            # Drag the slider to its left end: the value must come back as a
-            # work_scale action rather than being taken for an NR parameter.
-            track = ws.extra.get("track")
-            got = menu.handle_event(pygame.event.Event(
-                pygame.MOUSEBUTTONDOWN, {"pos": (track.x + 1, track.centery),
-                                         "button": 1}))
-            kinds = [g[0] for g in got]
-            print(f"slider emitted {got}")
-            if "work_scale" not in kinds:
-                failures.append(f"the slider emitted {kinds}, not a work_scale action")
-            elif "param" in kinds:
-                failures.append("the slider was taken for an NR parameter")
+        # Drag to the left end: a resolution action, and not an NR parameter.
+        track = ws.extra.get("track")
+        got = menu.handle_event(pygame.event.Event(
+            pygame.MOUSEBUTTONDOWN, {"pos": (track.x + 1, track.centery),
+                                     "button": 1}))
+        kinds = [g[0] for g in got]
+        print(f"dragged to the left end: {got}")
+        if "nr_res" not in kinds:
+            failures.append(f"the slider emitted {kinds}, not a resolution action")
+        if "param" in kinds:
+            failures.append("the slider was taken for an NR parameter")
+        if got and got[0][1] > CAP:
+            failures.append(f"the left end gave {got[0][1]:.2f}, above the cap")
+
+        # And back to the right end: that must read as the whole screen.
+        menu.handle_event(pygame.event.Event(pygame.MOUSEBUTTONUP, {"button": 1}))
+        menu.draw(surf)
+        ws = {i.key: i for i in menu.items}["nr_res"]
+        track = ws.extra.get("track")
+        got = menu.handle_event(pygame.event.Event(
+            pygame.MOUSEBUTTONDOWN, {"pos": (track.right - 1, track.centery),
+                                     "button": 1}))
+        print(f"dragged to the right end: {got}")
+        if not got or got[0][0] != "nr_res":
+            failures.append(f"the right end emitted {got}")
+        elif got[0][1] <= CAP:
+            failures.append(f"the right end gave {got[0][1]:.2f}, which is still "
+                            f"a reduced resolution rather than the whole screen")
     finally:
         pygame.quit()
+
+
+def check_live_switch(failures: list) -> None:
+    """The mode changes in a running worker, without restarting it.
+
+    This is the point of carrying the flag in the resize. It used to live in an
+    environment variable read once at startup, which is why the menu had a
+    separate toggle at all - and why that toggle could not simply be folded
+    into the slider.
+    """
+    params = dict(PROFILES["Strong / Cinematic"])
+    header = struct.pack(
+        HEADER_FMT, VIDEO_MAGIC, WORK_W, WORK_H, WARMUP, 0,
+        0, 0, int(params["style"]), int(params["auto_mask"]),
+        int(params["ui_correction"]),
+        float(params["intensity"]), float(params["local_tone"]),
+        float(params["local_structure"]), float(params["skin_structure"]),
+        FULL_W, FULL_H)
+    frame = make_frame(FULL_W, FULL_H)
+    motion = np.zeros((WORK_H, WORK_W, 2), dtype=np.float16)
+    body = frame.tobytes() + motion.tobytes()
+    env = dict(os.environ, NS_NR_SMALL="0")     # start in full-screen mode
+
+    proc = subprocess.Popen([str(WORKER_EXE), "--live"], cwd=str(NATIVE_DIR),
+                            env=env, stdin=subprocess.PIPE,
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+    def pump(index):
+        proc.stdin.write(struct.pack(FRAME_FMT, FRAME_MAGIC, index,
+                                     1 if index == 0 else 0,
+                                     FRAME_FLAG_WANT_PIXELS, index))
+        proc.stdin.write(body)
+        proc.stdin.flush()
+        head = read_exact(proc.stdout, struct.calcsize(OUT_FMT))
+        magic, _i, ok, nbytes, _n, _p = struct.unpack(OUT_FMT, head)
+        if magic != OUT_MAGIC or not ok:
+            raise RuntimeError("bad reply")
+        if not nbytes:
+            return None
+        data = read_exact(proc.stdout, nbytes)
+        return np.frombuffer(data, dtype=np.uint8).reshape(FULL_H, FULL_W, 4).copy()
+
+    before = after = None
+    acked = False
+    try:
+        proc.stdin.write(header)
+        proc.stdin.flush()
+        for i in range(FRAMES):
+            before = pump(i)
+
+        # The same sizes, only the flag changes.
+        proc.stdin.write(struct.pack(
+            RESIZE_FMT, RESIZE_MAGIC, WORK_W, WORK_H, WARMUP,
+            RESIZE_FLAG_NR_SMALL,
+            0, 0, int(params["style"]), int(params["auto_mask"]),
+            int(params["ui_correction"]),
+            float(params["intensity"]), float(params["local_tone"]),
+            float(params["local_structure"]), float(params["skin_structure"]),
+            FULL_W, FULL_H))
+        proc.stdin.flush()
+        ack = read_exact(proc.stdout, struct.calcsize(RACK_FMT))
+        magic, ok, ngx, _r, _p = struct.unpack(RACK_FMT, ack)
+        acked = magic == RESIZE_ACK_MAGIC and bool(ok)
+        print(f"resize with the flag: acked={acked} ngx=0x{ngx:08X}")
+
+        for i in range(FRAMES, FRAMES * 2):
+            after = pump(i)
+    finally:
+        try:
+            proc.stdin.close()
+        except OSError:
+            pass
+        try:
+            proc.wait(timeout=20)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+        err = proc.stderr.read().decode("utf-8", "replace")
+
+    if not acked:
+        failures.append("the worker did not accept the resize carrying the flag")
+    if "[nr] network runs at" not in err:
+        failures.append("the worker never switched to running the network smaller")
+    restarts = err.count("standalone D3D12 device ready")
+    print(f"worker device inits: {restarts} (1 = it was never restarted)")
+    if restarts != 1:
+        failures.append(f"the worker started {restarts} times - the mode change "
+                        f"should not need a restart")
+    if before is None or after is None:
+        failures.append("no pixels around the switch")
+        return
+    if np.array_equal(before, after):
+        failures.append("the picture is identical before and after the switch - "
+                        "the flag did nothing")
+    else:
+        d = float(np.abs(before[..., :3].astype(np.int16)
+                         - after[..., :3].astype(np.int16)).mean())
+        print(f"picture changed on the switch: mean |diff| {d:.1f} of 255")
 
 
 def main() -> int:
@@ -216,12 +346,13 @@ def main() -> int:
         return 1
     failures: list = []
     check_worker(failures)
+    check_live_switch(failures)
     check_menu(failures)
     if failures:
         for f in failures:
             print("FAIL:", f)
         return 1
-    print("OK: the reduced-resolution frame is a real picture and the menu drives it")
+    print("OK: real picture, mode switches in a live worker, one control drives it")
     return 0
 
 

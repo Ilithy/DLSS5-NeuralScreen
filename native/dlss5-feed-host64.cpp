@@ -1037,10 +1037,20 @@ struct VideoResultHeader
 // new ones at the new work size and replies with a fixed-size RACK.
 struct VideoResizeCmd
 {
-    uint32_t magic, width, height, warmup, frame_count, profile, preset, style, auto_mask, ui_correction;
+    uint32_t magic, width, height, warmup;
+    // The slot VideoHeader keeps frame_count in. A resize has no frame count,
+    // so it carries flags instead - see RESIZE_FLAG_*. The layout stays
+    // identical to the header, which is the whole point of reusing it.
+    uint32_t flags;
+    uint32_t profile, preset, style, auto_mask, ui_correction;
     float intensity, local_tone, local_structure, skin_structure;
     uint32_t full_w, full_h;
 };
+// Run the network at the work size and scale the result back up, instead of
+// handing it the whole screen. Travels with the resize because in the menu it
+// is one control: the resolution the network sees, with "full screen" at the
+// top of the slider.
+static constexpr uint32_t RESIZE_FLAG_NR_SMALL = 0x1u;
 struct VideoResizeAck
 {
     uint32_t magic, ok, ngx_result, reserved;
@@ -1529,7 +1539,10 @@ static bool NrSmallRequested()
     return cached == 1;
 }
 
-static bool CreateVideoResources(VideoState &v, UINT w, UINT hgt, UINT full_w = 0, UINT full_h = 0)
+// want_small < 0 means "whatever NS_NR_SMALL says" - used for the very first
+// creation, before the client has had a chance to ask for anything.
+static bool CreateVideoResources(VideoState &v, UINT w, UINT hgt, UINT full_w = 0, UINT full_h = 0,
+                                 int want_small = -1)
 {
     v.w = w; v.hgt = hgt;
     v.full_w = full_w; v.full_h = full_h;
@@ -1537,7 +1550,8 @@ static bool CreateVideoResources(VideoState &v, UINT w, UINT hgt, UINT full_w = 
     // Only worth doing when the work resolution is actually smaller: at
     // work == full there is nothing to scale and the two extra passes would
     // be pure loss.
-    v.nr_small = v.upscale && NrSmallRequested();
+    const bool asked = (want_small < 0) ? NrSmallRequested() : (want_small != 0);
+    v.nr_small = v.upscale && asked;
     v.nr_w = v.nr_small ? w : 0;
     v.nr_h = v.nr_small ? hgt : 0;
     const UINT cw = v.upscale ? full_w : w;   // color texture: full-res in upscale mode
@@ -3300,7 +3314,9 @@ static int RunVideo()
             // VideoResizeCmd has the same packed layout as VideoHeader.
             memcpy(&g_video_options, &rc, sizeof(g_video_options));
             // 4. Recreate textures + feature at the new sizes.
-            if (!CreateVideoResources(v, rc.width, rc.height, rup ? rc.full_w : 0, rup ? rc.full_h : 0))
+            const int want_small = (rc.flags & RESIZE_FLAG_NR_SMALL) != 0 ? 1 : 0;
+            if (!CreateVideoResources(v, rc.width, rc.height, rup ? rc.full_w : 0,
+                                      rup ? rc.full_h : 0, want_small))
             {
                 Log("[video] RNSZ: resource creation failed at %ux%u", rc.width, rc.height);
                 VideoResizeAck bad = { RESIZE_ACK_MAGIC, 0u, 0x7FFFFFFFu, 0u, fh.pts };

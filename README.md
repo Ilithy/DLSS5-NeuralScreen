@@ -81,9 +81,11 @@ The settings worth touching:
 - **Before / after wipe** — leaves the left part of the screen untouched so you
   can see what the effect is actually doing. Set it back to 0 when you are done
   looking.
-- **Process at reduced resolution** — roughly **50% more frames**, at the cost
-  of a slightly softer picture. Off by default. Turn it on, look at your own
-  screen and decide; the slider under it controls how far it goes.
+- **Resolution the network runs at** — one slider. At the top it is your whole
+  screen, which is the default and the best picture. Every step down hands the
+  network a smaller frame and scales the result back up: **roughly 50% more
+  frames** at 2560×1440 on a 4K screen, and a softer picture. Look at your own
+  screen and pick a step.
 
 Everything else — which monitor, whether the menu opens on launch, starting
 with Windows, key assignments — is behind the gear.
@@ -110,7 +112,8 @@ have anything drawn over them — that is a Windows rule, not a bug here. Switch
 the game to *borderless* or *windowed fullscreen*, which almost all modern
 games have.
 
-**The picture is soft.** Turn off *Process at reduced resolution* in the menu.
+**The picture is soft.** Put *Resolution the network runs at* back to the top
+of its slider.
 
 **A key does nothing.** Something else on the machine has claimed it. Reassign
 it in the menu under the gear.

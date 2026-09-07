@@ -157,12 +157,12 @@ class OverlayMenu:
         self.state: dict = {
             "nr": True,
             "work_scale": 1.0,
-            # The scale at which the work size hits the 2560x1440 cap. Sent by
-            # main because only it knows the screen size; without it the top of
-            # the slider would be dead on a 4K desktop, where anything above
-            # 0.67 lands on the same capped resolution.
-            "work_scale_max": 1.0,
+            # Where the work size hits the NGX cap. Sent by main because only it
+            # knows the screen size. The slider runs one step past it, and that
+            # last step means "the whole screen" - the reduced mode off.
+            "work_scale_cap": 1.0,
             "nr_small": False,
+            "screen_size": "",
             "profile": "",
             "profiles": [],
             "params": {},
@@ -425,12 +425,25 @@ class OverlayMenu:
                 slider(key, lo, PARAM_MAX, val, s[key], value_text=f"{val:.2f}")
 
             section(s["sec_speed"])
-            toggle("nr_small", s["nr_small"], bool(self.state.get("nr_small")))
-            ws = float(self.state.get("work_scale", 1.0))
-            ws_max = float(self.state.get("work_scale_max", 1.0))
-            slider("work_scale", 0.30, max(0.35, ws_max), ws, s["work_scale"],
-                   hint=s["work_scale_hint"],
-                   value_text=str(self.state.get("work_size") or f"{ws:.2f}"))
+            # One slider, not a toggle plus a slider. The two used to be
+            # separate, and with the toggle off the slider still moved, still
+            # showed a changing resolution and changed the picture by exactly
+            # nothing - measured, bit for bit. A control that answers and does
+            # nothing is worse than no control.
+            cap = float(self.state.get("work_scale_cap", 1.0))
+            full = not bool(self.state.get("nr_small"))
+            # The extra step past the cap is "the whole screen". Below the cap
+            # every position is a different resolution; above it they would all
+            # be the same one, so there is exactly one position up there.
+            pos = cap + 0.05 if full else float(self.state.get("work_scale", cap))
+            if full:
+                shown = str(self.state.get("screen_size")
+                            or self.stats.get("resolution") or "")
+                value_text = f"{shown} · {s['nr_res_full']}" if shown else s["nr_res_full"]
+            else:
+                value_text = str(self.state.get("work_size") or f"{pos:.2f}")
+            slider("nr_res", 0.30, cap + 0.05, pos, s["nr_res"],
+                   hint=s["nr_res_hint"], value_text=value_text)
 
             section(s["sec_compare"])
             split_val = float(self.state.get("split", 0.0))
@@ -757,9 +770,14 @@ class OverlayMenu:
         if item.key == "split":
             self.state["split"] = value
             return [("split", value)]
-        if item.key == "work_scale":
-            self.state["work_scale"] = value
-            return [("work_scale", value)]
+        if item.key == "nr_res":
+            cap = float(self.state.get("work_scale_cap", 1.0))
+            # Reflect the choice straight away so the label does not lag a
+            # frame behind the knob; main confirms it on the way back.
+            self.state["nr_small"] = value <= cap + 1e-6
+            if self.state["nr_small"]:
+                self.state["work_scale"] = value
+            return [("nr_res", value)]
         params = dict(self.state.get("params") or {})
         params[item.key] = value
         self.state["params"] = params

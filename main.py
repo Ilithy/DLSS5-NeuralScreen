@@ -141,6 +141,8 @@ WINDOW_FLAG_DISABLE = 0x2      # close the window, go back to sending pixels
 RESIZE_MAGIC = 0x5A534E52  # 'RNSZ'
 RESIZE_ACK_MAGIC = 0x4B434152  # 'RACK'
 RESIZE_FMT = "<10I4f2I"   # the same layout as HEADER_FMT (magic instead of VIDEO_MAGIC)
+# The slot the header keeps frame_count in carries flags in a resize.
+RESIZE_FLAG_NR_SMALL = 0x1   # run the network at the work size, scale the result back
 RACK_FMT = "<4Iq"         # magic, ok, ngx_result, reserved, pts (24 bytes)
 
 # DDA1: the worker captures the screen itself (Desktop Duplication) - the
@@ -568,7 +570,8 @@ def send_frame(worker: subprocess.Popen, index: int, rgba: np.ndarray,
 
 
 def send_resize(worker: subprocess.Popen, params: dict, width: int, height: int,
-                warmup: int, full_w: int = 0, full_h: int = 0) -> None:
+                warmup: int, full_w: int = 0, full_h: int = 0,
+                nr_small: bool = False) -> None:
     """Send RNSZ - change the work resolution/parameters on the fly.
 
     The worker recreates the NGX feature at the new sizes (ReleaseFeature ->
@@ -578,7 +581,8 @@ def send_resize(worker: subprocess.Popen, params: dict, width: int, height: int,
     """
     worker.stdin.write(struct.pack(
         RESIZE_FMT,
-        RESIZE_MAGIC, width, height, int(warmup), 0,
+        RESIZE_MAGIC, width, height, int(warmup),
+        RESIZE_FLAG_NR_SMALL if nr_small else 0,
         params["profile"], params["preset"], params["style"],
         params["auto_mask"], params["ui_correction"],
         params["intensity"], params["local_tone"],
@@ -1360,7 +1364,7 @@ def main() -> int:
                 return None
 
         def _do_restart(new_scale: float, new_profile: str, new_params: dict,
-                        full: bool = False) -> None:
+                        full: bool = False, new_small: bool | None = None) -> None:
             """Change work_scale/profile/parameters WITHOUT recreating pygame or the capture.
 
             The main path is RNSZ: the worker recreates the NGX feature inside
@@ -1384,11 +1388,19 @@ def main() -> int:
             pygame/D3D11 had nothing to do with the crashes.
             """
             nonlocal work_scale, work_w, work_h, params, frame_index, pts, work_frame
+            nonlocal nr_small
             nonlocal worker, worker_logs, reader, worker_stop, last_restart
             nonlocal guides  # without this main sends motion of the old size
             work_scale = new_scale
             cfg["profile"] = new_profile
             params = new_params
+            if new_small is not None and new_small != nr_small:
+                nr_small = new_small
+                cfg["nr_small"] = nr_small
+                # The environment is what a freshly started worker reads; the
+                # live one is told through the resize below.
+                os.environ["NS_NR_SMALL"] = "1" if nr_small else "0"
+                _save_menu_layout()
             new_w, new_h = _work_size(width, height, work_scale)
             new_full_w = width if (new_w != width or new_h != height) else 0
             new_full_h = height if (new_w != width or new_h != height) else 0
@@ -1401,7 +1413,7 @@ def main() -> int:
                 try:
                     t_rnsz = time.perf_counter()
                     send_resize(worker, params, new_w, new_h, RESTART_WARMUP,
-                                new_full_w, new_full_h)
+                                new_full_w, new_full_h, nr_small)
                     reader.wait_rack(timeout=RACK_TIMEOUT)
                     reader.set_output_size(new_full_w or new_w, new_full_h or new_h)
                     applied = True
@@ -1813,17 +1825,28 @@ def main() -> int:
                 print(f"[main] could not save the hotkeys: {exc}",
                       file=sys.stderr)
 
+        def _work_scale_cap() -> float:
+            """The scale above which the work size just hits the NGX cap.
+
+            Rounded down to the slider's own step so the value is reachable:
+            a cap the slider cannot land on exactly would leave the top of the
+            range doing nothing, which is the whole thing being fixed here.
+            """
+            raw = min(1.0, WORK_MAX_W / max(1, width), WORK_MAX_H / max(1, height))
+            return max(0.35, int(raw / 0.05) * 0.05)
+
         def _menu_payload() -> dict:
             """The current state for the menu - a single source of truth."""
             _refresh_gpu_ok()
             return {
                 "nr": not paused,
                 "work_scale": work_scale,
-                # Above this the work size just hits the 2560x1440 cap, so the
-                # slider would have a dead top end.
-                "work_scale_max": min(1.0, WORK_MAX_W / max(1, width),
-                                      WORK_MAX_H / max(1, height)),
+                # Where the work size hits the 2560x1440 cap. Everything above
+                # it lands on the same resolution, so the slider puts "the whole
+                # screen" there instead of a dead stretch.
+                "work_scale_cap": _work_scale_cap(),
                 "nr_small": nr_small,
+                "screen_size": f"{width}x{height}",
                 "profile": cfg["profile"],
                 "profiles": list(PROFILES),
                 "params": {k: params[k] for k in
@@ -1853,18 +1876,17 @@ def main() -> int:
             kind = action[0]
             if kind == "nr":
                 tray_commands.put("toggle")
-            elif kind == "work_scale":
-                request_apply(float(action[1]), cfg["profile"], params)
-            elif kind == "toggle" and action[1] == "nr_small":
-                # The worker picks the mode up at startup, so this one cannot go
-                # through RNSZ - it needs a fresh process.
-                nr_small = not nr_small
-                os.environ["NS_NR_SMALL"] = "1" if nr_small else "0"
-                cfg["nr_small"] = nr_small
-                _save_menu_layout()
-                print(f"[main] reduced-resolution processing: "
-                      f"{'on' if nr_small else 'off'} - restarting the worker")
-                _do_restart(work_scale, cfg["profile"], params, full=True)
+            elif kind == "nr_res":
+                # One control, one meaning: how much resolution the network
+                # sees. Above the cap there is nothing left to reduce, so that
+                # end of the slider is "the whole screen" - which is the same
+                # thing as the reduced mode being off.
+                want = float(action[1])
+                cap = _work_scale_cap()
+                if want > cap + 1e-6:
+                    request_apply(1.0, cfg["profile"], params, new_small=False)
+                else:
+                    request_apply(want, cfg["profile"], params, new_small=True)
             elif kind == "split":
                 # No need to recreate the worker: the wipe position rides in
                 # every frame's header.
@@ -1962,7 +1984,8 @@ def main() -> int:
                         print(f"[main] could not open {REPO_URL}: {exc}",
                               file=sys.stderr)
 
-        def request_apply(new_scale: float, new_profile: str, new_params: dict) -> None:
+        def request_apply(new_scale: float, new_profile: str, new_params: dict,
+                          new_small: bool | None = None) -> None:
             """Apply the settings with coalescing over RESTART_COOLDOWN.
 
             The single entry point for the settings window, the tray and the
@@ -1972,11 +1995,11 @@ def main() -> int:
             """
             nonlocal pending_apply
             if time.monotonic() - last_restart < RESTART_COOLDOWN:
-                pending_apply = (new_scale, new_profile, new_params)
+                pending_apply = (new_scale, new_profile, new_params, new_small)
                 print(f"[main] apply deferred (cooldown {RESTART_COOLDOWN:.1f} s), "
                       f"the last value will be applied")
             else:
-                _do_restart(new_scale, new_profile, new_params)
+                _do_restart(new_scale, new_profile, new_params, new_small=new_small)
 
         while running:
             loop_start = time.perf_counter()
@@ -2057,10 +2080,10 @@ def main() -> int:
             # Deferred apply (coalescing): if a restart happened recently, we
             # apply the last value once the pause is over
             if pending_apply is not None and time.monotonic() - last_restart >= RESTART_COOLDOWN:
-                p_scale, p_profile, p_params = pending_apply
+                p_scale, p_profile, p_params, p_small = pending_apply
                 pending_apply = None
                 print("[main] applying the deferred settings")
-                _do_restart(p_scale, p_profile, p_params)
+                _do_restart(p_scale, p_profile, p_params, new_small=p_small)
 
             if not running:
                 break
