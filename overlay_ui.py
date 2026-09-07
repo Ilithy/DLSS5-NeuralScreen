@@ -220,7 +220,7 @@ class OverlayMenu:
         self.page = "main"
         # The command we are currently waiting for a keypress for (or None).
         self.capturing: str | None = None
-        # Hotkey captions: command -> "F9". They come from main together with
+        # Hotkey captions: command -> "F10". They come from main together with
         # the bindings, so a remap shows up on the buttons immediately.
         self.hotkeys: dict = {}
         self._sections: list = []
@@ -267,7 +267,7 @@ class OverlayMenu:
         return getattr(self, "_drag_item", None) is not None
 
     def set_hotkeys(self, mapping: dict) -> None:
-        """Hotkey captions: command -> "F9". Sourced from the real bindings."""
+        """Hotkey captions: command -> "F10". Sourced from the real bindings."""
         self.hotkeys = dict(mapping or {})
 
     def set_stats(self, hud: dict) -> None:
@@ -1011,7 +1011,7 @@ class OverlayMenu:
 
     def _draw_hotkeys(self, surface, s: dict) -> None:
         """The hotkey line. Otherwise there is nowhere to learn about
-        F9/Insert/Ctrl+Alt+Q."""
+        F10/Insert/Ctrl+Alt+Q."""
         rect = getattr(self, "_hotkeys_rect", None)
         if rect is None:
             return

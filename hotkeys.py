@@ -1,13 +1,13 @@
-"""HotkeyController - global hotkeys through RegisterHotKey.
+"""HotkeyController - global hotkeys through RegisterHotKey + a polling fallback.
 
 The difference from polling GetAsyncKeyState is fundamental: the system
 delivers WM_HOTKEY only to us and does NOT pass the keypress to the active
-application. F9 inside a game toggles NR and the game never sees the key.
+application. F10 inside a game toggles NR and the game never sees the key.
 Polling cannot do that — it only peeks at the key state while the press still
 reaches the game.
 
-The flip side of the same property: while NeuralScreen runs, F8 and F9 belong
-to it and other programs (debuggers, games) will not get them.
+The flip side of the same property: while NeuralScreen runs, F10 and F11
+belong to it and other programs (debuggers, games) will not get them.
 
 The arrow and quit combinations are on Ctrl+Alt deliberately: bare arrows
 must not be registered — they would stop working system-wide — and quitting
@@ -96,7 +96,7 @@ _KEY_NAMES = {
 
 
 def parse_binding(text: str) -> tuple[int, int] | None:
-    """Parse a string like 'F9', 'Ctrl+Alt+Q', 'Insert' -> (mods, vk).
+    """Parse a string like 'F10', 'Ctrl+Alt+Q', 'Insert' -> (mods, vk).
 
     Returns None when the string is not recognised, in which case the binding
     is left alone.
@@ -125,7 +125,7 @@ def parse_binding(text: str) -> tuple[int, int] | None:
 def build_bindings(overrides: dict | None = None) -> dict:
     """Bindings with the user's overrides from the config applied.
 
-    overrides: {"toggle": "F9", "record": "Insert", ...} — command -> string.
+    overrides: {"toggle": "F10", "record": "Insert", ...} — command -> string.
     Unknown or malformed strings are ignored and the default stays.
     """
     bindings = {hk_id: tuple(entry) for hk_id, entry in DEFAULT_BINDINGS.items()}
@@ -144,7 +144,7 @@ def build_bindings(overrides: dict | None = None) -> dict:
 
 
 def describe(bindings: dict | None = None) -> str:
-    """A line like 'F9=toggle, F8=settings, ...' for the startup log."""
+    """A line like 'F10=toggle, F11=settings, ...' for the startup log."""
     src = bindings or DEFAULT_BINDINGS
     return ", ".join(f"{name}={cmd}" for _, (_, _, cmd, name) in sorted(src.items()))
 

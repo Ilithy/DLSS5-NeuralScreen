@@ -4,10 +4,12 @@ The loop: desktop capture (capture.ScreenCapture) -> motion guides
 (guides.TemporalGuideGenerator) -> the NGX worker (native/nvngx.dll in
 --live mode) -> fullscreen output (display.Display).
 
-Controls (global hotkeys, RegisterHotKey - the keypress never reaches the
-active application, see hotkeys.py):
-    F9            - NR on/off
-    F8            - the settings menu
+Controls (global hotkeys, RegisterHotKey + a polling fallback - see
+hotkeys.py):
+    F10           - NR on/off
+    F11           - the settings menu
+    Home          - screenshot
+    Insert        - recording
     Ctrl+Alt+Up/Down - processing scale
     Ctrl+Alt+Q    - quit (the same as "Exit" in the tray)
 
@@ -1017,7 +1019,7 @@ def restart_worker(worker: subprocess.Popen, params: dict, width: int, height: i
 
 
 def hotkey_labels(bindings: dict) -> dict:
-    """Bindings -> {command: "F9"} for the captions on the menu buttons."""
+    """Bindings -> {command: "F10"} for the captions on the menu buttons."""
     return {cmd: name for _mods, _vk, cmd, name in bindings.values()}
 
 
@@ -1179,9 +1181,10 @@ def main() -> int:
 
         # Global hotkeys: RegisterHotKey rather than polling the key state.
         # The system gives the keypress to us alone and does not pass it to the
-        # active application - F9 inside a game toggles NR and the game never
-        # sees the key. The commands go into the same queue the tray uses. The
-        # user's bindings come from config.json ("hotkeys": {"toggle": "F9", ...}).
+        # active application - F10 inside a game toggles NR and the game never
+        # sees the key (the polling fallback does not swallow it, but F10 is
+        # free in games). The commands go into the same queue the tray uses. The
+        # user's bindings come from config.json ("hotkeys": {"toggle": "F10", ...}).
         hotkey_overrides = cfg.get("hotkeys")
         if not isinstance(hotkey_overrides, dict):
             hotkey_overrides = {}
@@ -1198,7 +1201,7 @@ def main() -> int:
         # registered. Strictly after build_bindings: before that they do not exist.
         display.menu.set_hotkeys(hotkey_labels(hotkey_bindings))
 
-        # The settings live in the overlay menu (F8). There is no separate
+        # The settings live in the overlay menu (F11). There is no separate
         # window any more: it was a second interface over the same fields, it
         # stole focus from the game and dragged the whole of tcl/tk into the
         # runtime.
@@ -1215,7 +1218,7 @@ def main() -> int:
         paused = False
         frame_index = 0
         pts = 0
-        guide = None  # initialised before the loop: F9 before the first NR frame must not raise NameError
+        guide = None  # initialised before the loop: F10 before the first NR frame must not raise NameError
         output_rgba = None  # the last NR frame (for a screenshot); None until the first one
         # WNDO mode: the worker shows the frame, no pixels come back to Python.
         want_present = bool(cfg.get("worker_present", True))
@@ -1942,7 +1945,7 @@ def main() -> int:
                     print(f"[main] interface language -> {lang}")
             elif kind == "capture":
                 # While the menu waits for a keypress the global hotkeys must
-                # be suspended: otherwise F8 toggles the menu instead of
+                # be suspended: otherwise F11 toggles the menu instead of
                 # landing in the field.
                 if action[1]:
                     hotkeys.suspend()
@@ -2036,7 +2039,7 @@ def main() -> int:
                               f"(frames processed {frame_index})")
                         running = False
                     elif cmd == "settings":
-                        # F8 and a left click on the tray open the overlay
+                        # F11 and a left click on the tray open the overlay
                         # menu - the only place the settings live.
                         display.menu.set_state(_menu_payload())
                         opened = display.menu.toggle()

@@ -99,7 +99,7 @@ not.
 | `split` | 0–1, share of the frame left unprocessed for the before/after wipe; 0 — off |
 | `theme` | `light` / `dark` |
 | `open_menu_on_start` | open the menu on launch; `false` — a short alert instead |
-| `hotkeys` | `{"toggle": "F9", ...}` — see Controls |
+| `hotkeys` | `{"toggle": "F10", ...}` — see Controls |
 | `menu_offset`, `menu_scale`, `menu_height` | where the menu sits, its scale and height. Written by the app, not meant to be edited by hand (`menu_height: null` — fit the content) |
 
 ## Architecture
