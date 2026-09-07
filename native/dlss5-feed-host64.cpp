@@ -753,6 +753,17 @@ static constexpr uint32_t FRAME_FLAG_NO_COLOR = 0x8u;
 // colour instead. Keeps the overlay alive (picture + HUD) while the
 // neural pass is disabled; the next non-bypass frame resumes NGX.
 static constexpr uint32_t FRAME_FLAG_BYPASS = 0x10u;
+// bit 5: показать кадр шторкой «до/после» — слева сырой захват, справа
+// результат NGX. Позиция шторки лежит в старших 16 битах reserved
+// (0..65535 -> 0..1 ширины кадра): отдельного поля в заголовке нет, а менять
+// его размер ради одного числа значит ломать протокол на обеих сторонах.
+static constexpr uint32_t FRAME_FLAG_SPLIT = 0x20u;
+
+static UINT SplitXFromFlags(uint32_t reserved, UINT width)
+{
+    const uint32_t frac = (reserved >> 16) & 0xFFFFu;
+    return static_cast<UINT>((static_cast<uint64_t>(width) * frac) / 0xFFFFu);
+}
 static constexpr size_t   VIDEO_HEADER_LEGACY_SIZE = 56; // magic..skin_structure (no full_w/full_h)
 
 #pragma pack(push, 1)
@@ -2102,11 +2113,14 @@ static bool UploadMotionOnly(VideoState &v, const BYTE *mv, bool motion_small)
 // Сколько из времени Evaluate GPU реально считает
 //
 // PH_EVAL меряет submit + ожидание забора на CPU: в него входит и постановка
-// задачи, и просыпание потока. Замер по разрешению показал, что eval не растёт
-// с числом пикселей (15.9-16.1 мс на 0.52-3.50 МПикс) — значит там не
-// тензорная математика. Таймстемпы на очереди отвечают на вопрос прямо:
-// GPU-время сильно меньше CPU-времени означает, что упираемся в синхронизацию,
-// а не в модель.
+// задачи, и просыпание потока. Таймстемпы на очереди отвечают, сколько из этого
+// GPU реально считает.
+//
+// Замерено (RTX 5070 Ti, рабочий стол 2560x1600): CPU 8.9 мс, GPU 8.0 мс —
+// накладные расходы 0.9 мс, остальное настоящая работа. И GPU-время не зависит
+// от разрешения входа: 7.9-8.6 мс на 0.37-3.32 МПикс, пикселей в девять раз
+// больше при том же времени. Модель считает на своём внутреннем разрешении,
+// поэтому work_scale ничего и не стоил.
 // ---------------------------------------------------------------------------
 static ID3D12QueryHeap *g_ts_heap;
 static ID3D12Resource  *g_ts_readback;
@@ -2206,6 +2220,103 @@ static bool EvaluateVideo(VideoState &v, int reset)
     if (!WaitFenceValue(h.fence, fence, 60000)) return false;
     if (ts) ReadEvalGpuTime();
     return true;
+}
+
+// Разделитель шторки: узкая полоса поверх выходной текстуры.
+//
+// Рисуется через ClearUnorderedAccessViewFloat с прямоугольником — шейдер для
+// сплошной полосы не нужен, а v.output и так лежит в UNORDERED_ACCESS, поэтому
+// обходимся без барьеров. Ему требуются два дескриптора одного UAV: видимый
+// шейдеру и обычный CPU-шный, отсюда две крошечные кучи.
+static ID3D12DescriptorHeap *g_split_heap_gpu;
+static ID3D12DescriptorHeap *g_split_heap_cpu;
+static ID3D12Resource       *g_split_uav_for;   // для какого ресурса сделан UAV
+
+static bool EnsureSplitUav(ID3D12Resource *res)
+{
+    if (res == nullptr) return false;
+    if (g_split_uav_for == res && g_split_heap_gpu != nullptr) return true;
+    if (g_split_heap_gpu != nullptr) { g_split_heap_gpu->Release(); g_split_heap_gpu = nullptr; }
+    if (g_split_heap_cpu != nullptr) { g_split_heap_cpu->Release(); g_split_heap_cpu = nullptr; }
+    g_split_uav_for = nullptr;
+
+    D3D12_DESCRIPTOR_HEAP_DESC hd = {};
+    hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+    hd.NumDescriptors = 1;
+    hd.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+    if (FAILED(h.dev->CreateDescriptorHeap(&hd, __uuidof(ID3D12DescriptorHeap),
+            reinterpret_cast<void **>(&g_split_heap_gpu)))) return false;
+    hd.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
+    if (FAILED(h.dev->CreateDescriptorHeap(&hd, __uuidof(ID3D12DescriptorHeap),
+            reinterpret_cast<void **>(&g_split_heap_cpu)))) return false;
+
+    D3D12_UNORDERED_ACCESS_VIEW_DESC ud = {};
+    ud.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    ud.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
+    h.dev->CreateUnorderedAccessView(res, nullptr, &ud,
+        g_split_heap_gpu->GetCPUDescriptorHandleForHeapStart());
+    h.dev->CreateUnorderedAccessView(res, nullptr, &ud,
+        g_split_heap_cpu->GetCPUDescriptorHandleForHeapStart());
+    g_split_uav_for = res;
+    return true;
+}
+
+// Шторка «до/после»: левую часть кадра заменяем сырым захватом.
+//
+// Обе текстуры полноразмерные и одного формата (NGX ужимает вход внутри себя),
+// поэтому это одно копирование области, целиком на GPU. Делается ДО показа и
+// до отдачи пикселей, так что в запись и скриншот шторка попадает сама.
+static bool SplitCompose(VideoState &v, UINT split_x)
+{
+    const UINT cw = v.upscale ? v.full_w : v.w;
+    const UINT ch = v.upscale ? v.full_h : v.hgt;
+    if (split_x == 0 || cw == 0 || ch == 0) return true;
+    if (split_x > cw) split_x = cw;
+    if (!BeginCommands()) return false;
+    D3D12_RESOURCE_BARRIER pre[] = {
+        Transition(v.color.tex, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                   D3D12_RESOURCE_STATE_COPY_SOURCE),
+        Transition(v.output, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                   D3D12_RESOURCE_STATE_COPY_DEST),
+    };
+    h.list->ResourceBarrier(_countof(pre), pre);
+    D3D12_TEXTURE_COPY_LOCATION src = {}, dst = {};
+    src.pResource = v.color.tex;
+    src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX; src.SubresourceIndex = 0;
+    dst.pResource = v.output;
+    dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX; dst.SubresourceIndex = 0;
+    D3D12_BOX box = { 0, 0, 0, split_x, ch, 1 };
+    h.list->CopyTextureRegion(&dst, 0, 0, 0, &src, &box);
+    D3D12_RESOURCE_BARRIER post[] = {
+        Transition(v.color.tex, D3D12_RESOURCE_STATE_COPY_SOURCE,
+                   D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE),
+        Transition(v.output, D3D12_RESOURCE_STATE_COPY_DEST,
+                   D3D12_RESOURCE_STATE_UNORDERED_ACCESS),
+    };
+    h.list->ResourceBarrier(_countof(post), post);
+
+    // Разделитель — только когда шторка действительно делит кадр: на краях
+    // полоса висела бы вплотную к рамке без всякого смысла.
+    if (split_x < cw && EnsureSplitUav(v.output))
+    {
+        const UINT lw = (ch >= 1400u) ? 3u : 2u;
+        LONG left = static_cast<LONG>(split_x) - static_cast<LONG>(lw / 2);
+        if (left < 0) left = 0;
+        LONG right = left + static_cast<LONG>(lw);
+        if (right > static_cast<LONG>(cw)) { right = static_cast<LONG>(cw); left = right - static_cast<LONG>(lw); }
+        // #D97757 — тот же глиняный акцент, что в меню. Текстура обычная UNORM
+        // (не _SRGB), поэтому байты кладём как есть, без гамма-пересчёта.
+        const FLOAT accent[4] = { 217.0f / 255.0f, 119.0f / 255.0f, 87.0f / 255.0f, 1.0f };
+        const D3D12_RECT rect = { left, 0, right, static_cast<LONG>(ch) };
+        ID3D12DescriptorHeap *heaps[] = { g_split_heap_gpu };
+        h.list->SetDescriptorHeaps(1, heaps);
+        h.list->ClearUnorderedAccessViewFloat(
+            g_split_heap_gpu->GetGPUDescriptorHandleForHeapStart(),
+            g_split_heap_cpu->GetCPUDescriptorHandleForHeapStart(),
+            v.output, accent, 1, &rect);
+    }
+    const UINT64 fence = EndCommands();
+    return WaitFenceValue(h.fence, fence, 30000);
 }
 
 static bool DownloadVideoFrame(VideoState &v, std::vector<BYTE> &packed,
@@ -2735,6 +2846,13 @@ static int RunVideo()
             const bool ev_ok = EvaluateVideo(v, (frame == 0 || fh.reset != 0) ? 1 : 0);
             PhaseAdd(PH_EVAL, t_eval);
             if (!ev_ok) return 9;
+            if ((fh.reserved & FRAME_FLAG_SPLIT) != 0)
+            {
+                // В bypass шторка бессмысленна: там обе половины — сырой
+                // захват, поэтому только на обработанном кадре.
+                const UINT cw = v.upscale ? v.full_w : v.w;
+                if (!SplitCompose(v, SplitXFromFlags(fh.reserved, cw))) return 9;
+            }
         }
         if (PresentModeActive(v))
         {

@@ -44,6 +44,7 @@ menu.set_state({
     "rec_seconds": 95.0,
     "theme": __import__('os').environ.get('MENU_THEME', 'light'),
     "open_on_start": True,
+    "split": 0.35,
 })
 menu.set_stats({"fps": 54.3, "status": "NR ВКЛ",
                 "resolution": "3840x2160", "frames": 12345})

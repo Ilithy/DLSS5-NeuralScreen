@@ -108,6 +108,7 @@ SHM_ACK_FMT = "<4Iq"        # magic, ok, reserved0, reserved1, pts (24 байт�
 FRAME_FLAG_SHM = 0x1         # бит в поле reserved заголовка кадра
 FRAME_FLAG_WANT_PIXELS = 0x2  # вернуть пиксели даже в режиме окна (для скриншота)
 FRAME_FLAG_MOTION_SMALL = 0x4  # поле движения в разрешении потока, растянет воркер
+FRAME_FLAG_SPLIT = 0x20        # шторка до/после; позиция — в старших 16 битах reserved
 
 # MOTS: поле движения приходит в разрешении оптического потока (~320x180), а
 # растягивает его до work-разрешения воркер на GPU. С CPU снимается resize и
@@ -439,7 +440,8 @@ def send_frame(worker: subprocess.Popen, index: int, rgba: np.ndarray,
                motion: np.ndarray, reset: bool, pts: int,
                shm: "SharedFrameBuffer | None" = None,
                want_pixels: bool = False, motion_small: bool = False,
-               no_color: bool = False, bypass: bool = False) -> None:
+               no_color: bool = False, bypass: bool = False,
+               split: float = 0.0) -> None:
     """Отправить кадр воркеру.
 
     С согласованной общей памятью в пайп уходит только 24-байтовый заголовок
@@ -450,11 +452,19 @@ def send_frame(worker: subprocess.Popen, index: int, rgba: np.ndarray,
     в пайп уходит только motion, rgba игнорируется.
     bypass (NR OFF): воркер пропускает NGX и показывает сырой захват —
     оверлей (окно, HUD) остаётся живым, эффект выключен.
+    split (0..1): доля кадра слева, которую воркер оставит необработанной —
+    шторка «до/после». 0 — выключено.
     """
     flags = (FRAME_FLAG_WANT_PIXELS if want_pixels else 0) | \
             (FRAME_FLAG_MOTION_SMALL if motion_small else 0) | \
             (FRAME_FLAG_NO_COLOR if no_color else 0) | \
             (FRAME_FLAG_BYPASS if bypass else 0)
+    if split > 0.0:
+        # Позиция шторки едет в старших 16 битах того же поля флагов:
+        # отдельного поля в заголовке нет, а расширять его ради одного
+        # числа значит менять протокол на обеих сторонах.
+        frac = min(0xFFFF, max(0, int(round(min(1.0, split) * 0xFFFF))))
+        flags |= FRAME_FLAG_SPLIT | (frac << 16)
     if no_color:
         # DDA-режим: только motion, без цвета (SHM не используется для цвета)
         worker.stdin.write(struct.pack(FRAME_FMT, FRAME_MAGIC, index, int(reset), flags, pts))
@@ -899,6 +909,8 @@ def main() -> int:
         # Программа рисует поверх рабочего стола и сама по себе никак себя не
         # проявляет — без этого после запуска непонятно, работает она или нет.
         startup_menu = bool(cfg.get("open_menu_on_start", True))
+        # Шторка «до/после»: доля кадра слева, которую воркер оставляет сырой.
+        split_pos = min(1.0, max(0.0, float(cfg.get("split", 0.0))))
         startup_pending = True
         # Размер и положение меню — как их оставил пользователь.
         display.menu.set_user_scale(float(cfg.get("menu_scale", 1.0)))
@@ -1249,6 +1261,7 @@ def main() -> int:
                 data = json.loads(args.config.read_text(encoding="utf-8"))
                 data["menu_scale"] = round(display.menu.user_scale, 2)
                 data["open_menu_on_start"] = startup_menu
+                data["split"] = round(split_pos, 2)
                 data["menu_offset"] = [int(display.menu.offset[0]),
                                        int(display.menu.offset[1])]
                 args.config.write_text(
@@ -1272,6 +1285,7 @@ def main() -> int:
                 "work_size": f"{work_w}x{work_h}",
                 "rec_seconds": (recorder.duration_ms / 1000.0) if recorder else 0.0,
                 "open_on_start": startup_menu,
+                "split": split_pos,
             }
 
         def _apply_menu_action(action: tuple) -> None:
@@ -1280,10 +1294,14 @@ def main() -> int:
             Меню ничего не меняет само: оно сообщает, чего хочет пользователь,
             а решение принимается здесь, там же где живут params и cfg.
             """
-            nonlocal lang, running, startup_menu
+            nonlocal lang, running, startup_menu, split_pos
             kind = action[0]
             if kind == "nr":
                 tray_commands.put("toggle")
+            elif kind == "split":
+                # Воркер пересоздавать не нужно: позиция шторки едет в
+                # заголовке каждого кадра.
+                split_pos = min(1.0, max(0.0, float(action[1])))
             elif kind == "toggle" and action[1] == "open_on_start":
                 startup_menu = not startup_menu
                 _save_menu_layout()
@@ -1510,7 +1528,8 @@ def main() -> int:
                            pts, shm, want_pixels=(pending_shot is not None or recorder is not None),
                            motion_small=motion_small,
                            no_color=bool(dda_mode),
-                           bypass=bypass)
+                           bypass=bypass,
+                           split=split_pos)
                 _perf("send", t0)
             except (BrokenPipeError, OSError, EOFError, RuntimeError) as exc:
                 consecutive_restarts += 1

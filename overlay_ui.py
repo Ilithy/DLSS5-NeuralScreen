@@ -117,6 +117,7 @@ class OverlayMenu:
             "theme": "light",
             "rec_seconds": 0.0,
             "open_on_start": True,
+            "split": 0.0,
         }
         # Показания конвейера: то же, что в HUD. Меню задумано как одно
         # место, где видно и настройки, и что происходит.
@@ -251,6 +252,13 @@ class OverlayMenu:
             lo = SKIN_MIN if key == "skin_structure" else PARAM_MIN
             val = float(params.get(key, 0.0))
             slider(key, lo, PARAM_MAX, val, s[key], value_text=f"{val:.2f}")
+
+        # Шторка «до/после» — не параметр NR: воркер не пересоздаётся, и
+        # значение не входит в профиль.
+        split_val = float(self.state.get("split", 0.0))
+        slider("split", 0.0, 1.0, split_val, s["split"], hint=s["split_hint"],
+               value_text=("выкл" if split_val <= 0.0 and self.lang == "ru"
+                           else "off" if split_val <= 0.0 else f"{split_val:.2f}"))
 
         choice("lang", s["language"], self.lang, ["en", "ru"])
         choice("theme", s["theme"], self.state.get("theme", "light"),
@@ -430,6 +438,9 @@ class OverlayMenu:
         if abs(value - item.value) < 1e-9:
             return []
         item.value = value
+        if item.key == "split":
+            self.state["split"] = value
+            return [("split", value)]
         params = dict(self.state.get("params") or {})
         params[item.key] = value
         self.state["params"] = params
