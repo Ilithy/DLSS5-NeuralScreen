@@ -187,30 +187,30 @@ static uint32_t g_eval_count;
 
 
 // ---------------------------------------------------------------------------
-// Подмена архитектуры GPU для feature 18 (NS_ARCH_SPOOF=0 — выключить)
+// GPU architecture spoof for feature 18 (NS_ARCH_SPOOF=0 to disable)
 //
-// nvngx_dlssnr.dll отказывается создавать feature на всём, что старше
-// Blackwell: внутри лежит проверка с сообщением
+// nvngx_dlssnr.dll refuses to create the feature on anything older than
+// Blackwell: inside it there is a check with the message
 // "DLSSNR: Unsupported GPU architecture 0x%x, minimum required 0x%x".
-// При этом скомпилированные ядра в ней есть под Turing (sm_75), Ampere
-// (sm_86), Ada (sm_89) и Blackwell (sm_120) -- по всем пятнадцати fatbin'ам,
-// без пропусков. Значит отказ -- это политика, а не отсутствие кода.
+// Yet the compiled kernels in it cover Turing (sm_75), Ampere (sm_86), Ada
+// (sm_89) and Blackwell (sm_120) -- across all fifteen fatbins, with no gaps.
+// So the refusal is policy, not missing code.
 //
-// Архитектуру библиотека узнаёт через nvapi: грузит nvapi64.dll, берёт её
-// единственный экспорт nvapi_QueryInterface и запрашивает по id
-// NvAPI_GPU_GetArchInfo. Подменять nvapi64.dll своей копией рядом с воркером
-// бесполезно: драйвер D3D12 успевает загрузить настоящую из System32 раньше,
-// и имя оказывается занято (проверено по списку модулей процесса). Поэтому
-// патчим прямо в памяти своего процесса.
+// The library learns the architecture through nvapi: it loads nvapi64.dll,
+// takes its single export nvapi_QueryInterface and asks for the id
+// NvAPI_GPU_GetArchInfo. Replacing nvapi64.dll with our own copy next to the
+// worker is useless: the D3D12 driver loads the real one from System32 first
+// and the name is already taken (checked against the process module list).
+// So we patch in the memory of our own process instead.
 //
-// Патч ставится с сохранением байтов: перед вызовом настоящей функции пролог
-// восстанавливается, после -- возвращается на место. Так не нужен трамплин
-// (для него пришлось бы разбирать длины инструкций), и любой хендл GPU
-// обслуживается настоящим кодом, а не нашими догадками.
+// The patch is installed with the bytes preserved: before calling the real
+// function the prologue is restored and put back afterwards. That way no
+// trampoline is needed (it would require decoding instruction lengths) and
+// any GPU handle is served by the real code rather than by our guesses.
 //
-// Ничего из файлов NVIDIA не меняется: правка живёт только в памяти.
-// Включена по умолчанию (NS_ARCH_SPOOF=0 — выключить); на Blackwell не
-// делается вообще ничего.
+// Nothing in the NVIDIA files is modified: the edit lives only in memory.
+// Enabled by default (NS_ARCH_SPOOF=0 to disable); on Blackwell it does
+// nothing at all.
 // ---------------------------------------------------------------------------
 static constexpr unsigned NVAPI_ID_INITIALIZE = 0x0150E828u;
 static constexpr unsigned NVAPI_ID_ENUM_GPUS  = 0xE5AC921Fu;
@@ -229,15 +229,16 @@ struct NvArchInfo
 using PFN_NvQueryInterface = void *(__cdecl *)(unsigned);
 using PFN_NvGetArchInfo = int (__cdecl *)(void *, NvArchInfo *);
 
-// Ответы кэшируются на старте, до установки патча: архитектура GPU не
-// меняется за время работы процесса, а кэш убирает саму причину гонки —
-// хуку больше незачем снимать пролог, чтобы позвать настоящую функцию.
+// The answers are cached at startup, before the patch is installed: the GPU
+// architecture does not change while the process runs, and the cache removes
+// the very cause of the race - the hook no longer needs to lift the prologue
+// to call the real function.
 static const int         kArchMaxGpus = 64;
 static void             *g_arch_handles[kArchMaxGpus];
 static NvArchInfo        g_arch_cache[kArchMaxGpus];
 static int               g_arch_count;
 static bool              g_arch_patched;
-static unsigned          g_arch_real_group;   // что было на самом деле
+static unsigned          g_arch_real_group;   // what it actually was
 
 static int __cdecl ArchInfoHook(void *gpu, NvArchInfo *info);
 
@@ -273,8 +274,8 @@ static int __cdecl ArchInfoHook(void *gpu, NvArchInfo *info)
     for (int i = 0; i < g_arch_count; ++i)
     {
         if (g_arch_handles[i] != gpu) continue;
-        // Версию структуры оставляем ту, что запросил вызывающий: V1 и V2
-        // отличаются только этим полем, размер один и тот же.
+        // Keep the structure version the caller asked for: V1 and V2 differ
+        // only in that field, the size is the same.
         const unsigned want = info->version;
         *info = g_arch_cache[i];
         info->version = want;
@@ -282,58 +283,58 @@ static int __cdecl ArchInfoHook(void *gpu, NvArchInfo *info)
         if (group == NV_ARCH_TURING || group == NV_ARCH_AMPERE
             || group == NV_ARCH_ADA)
         {
-            // Врём согласованно: implementation/revision сняты с живой
-            // RTX 5070 Ti — проверка может смотреть не только на группу.
+            // Lie consistently: implementation/revision were taken from a
+            // live RTX 5070 Ti - the check may look at more than the group.
             info->architecture   = NV_ARCH_BLACKWELL;
             info->implementation = 0x3u;
             info->revision       = 0xA1u;
         }
         return 0;                                 // NVAPI_OK
     }
-    // Хендл, которого не было при перечислении. Позвать настоящую функцию
-    // нельзя — её пролог занят нами, а снимать его на лету значит вернуть
-    // ту самую гонку. Честная ошибка лучше выдуманного ответа.
+    // A handle that was not there during enumeration. We cannot call the real
+    // function - its prologue is ours, and lifting it on the fly would bring
+    // back that very race. An honest error beats a made-up answer.
     return -1;
 }
 
 static bool ArchSpoofRequested()
 {
-    // Включён по умолчанию: на Blackwell хук сам себя отключает, на старых
-    // картах — единственный способ получить feature 18. NS_ARCH_SPOOF=0
-    // отключает явно.
+    // On by default: on Blackwell the hook disables itself, and on older
+    // cards it is the only way to get feature 18. NS_ARCH_SPOOF=0 turns it
+    // off explicitly.
     char buf[8] = {};
     const DWORD got = GetEnvironmentVariableA("NS_ARCH_SPOOF", buf, sizeof(buf));
     if (got > 0 && got < sizeof(buf) && buf[0] == '0') return false;
     return true;
 }
 
-// Возвращает: 0 — не требовалось, 1 — поставлен, -1 — не удалось.
+// Returns: 0 - not needed, 1 - installed, -1 - failed.
 static int SetupArchSpoof()
 {
     if (!ArchSpoofRequested()) return 0;
     HMODULE nvapi = LoadLibraryW(L"nvapi64.dll");
     if (nvapi == nullptr)
-    { Log("[arch] nvapi64.dll не загрузилась, err=%lu", GetLastError()); return -1; }
+    { Log("[arch] nvapi64.dll did not load, err=%lu", GetLastError()); return -1; }
     auto qi = reinterpret_cast<PFN_NvQueryInterface>(
         GetProcAddress(nvapi, "nvapi_QueryInterface"));
-    if (qi == nullptr) { Log("[arch] нет nvapi_QueryInterface"); return -1; }
+    if (qi == nullptr) { Log("[arch] no nvapi_QueryInterface"); return -1; }
 
     auto init = reinterpret_cast<int (__cdecl *)()>(qi(NVAPI_ID_INITIALIZE));
     auto enum_gpus = reinterpret_cast<int (__cdecl *)(void **, unsigned *)>(
         qi(NVAPI_ID_ENUM_GPUS));
     auto get_arch = reinterpret_cast<PFN_NvGetArchInfo>(qi(NVAPI_ID_GET_ARCH));
     if (init == nullptr || enum_gpus == nullptr || get_arch == nullptr)
-    { Log("[arch] функции nvapi не разрешились по id"); return -1; }
-    if (init() != 0) { Log("[arch] NvAPI_Initialize не прошёл"); return -1; }
+    { Log("[arch] the nvapi functions did not resolve by id"); return -1; }
+    if (init() != 0) { Log("[arch] NvAPI_Initialize failed"); return -1; }
 
     void *handles[kArchMaxGpus] = {};
     unsigned count = 0;
     if (enum_gpus(handles, &count) != 0 || count == 0)
-    { Log("[arch] список GPU не получен"); return -1; }
+    { Log("[arch] could not get the GPU list"); return -1; }
     if (count > static_cast<unsigned>(kArchMaxGpus)) count = kArchMaxGpus;
 
-    // Снимаем ответы для ВСЕХ карт до патча: после него настоящую функцию
-    // уже не позвать, а отвечать хуку надо на любой хендл.
+    // Take the answers for ALL cards before the patch: afterwards the real
+    // function cannot be called, and the hook must answer for any handle.
     g_arch_count = 0;
     for (unsigned i = 0; i < count; ++i)
     {
@@ -349,14 +350,14 @@ static int SetupArchSpoof()
         ++g_arch_count;
     }
     if (g_arch_count == 0)
-    { Log("[arch] GetArchInfo не ответил ни по одной карте"); return -1; }
+    { Log("[arch] GetArchInfo answered for no card at all"); return -1; }
 
     const NvArchInfo info = g_arch_cache[0];
     g_arch_real_group = info.architecture & 0xFFFFFFF0u;
-    // NS_ARCH_FORCE=1 ставит патч даже там, где он не нужен. Нужен для
-    // проверки: на Blackwell хук иначе не исполняется ни разу, и убедиться,
-    // что он вообще отвечает, было бы негде. На такой карте подмены не
-    // происходит — хук отдаёт закэшированные настоящие значения.
+    // NS_ARCH_FORCE=1 installs the patch even where it is not needed. It is
+    // there for testing: on Blackwell the hook is otherwise never executed and
+    // there would be no way to confirm it answers at all. On such a card no
+    // spoofing happens - the hook returns the cached real values.
     char force[8] = {};
     const DWORD force_got = GetEnvironmentVariableA("NS_ARCH_FORCE", force,
                                                     sizeof(force));
@@ -364,24 +365,25 @@ static int SetupArchSpoof()
                         && force[0] == '1';
     if (g_arch_real_group >= NV_ARCH_BLACKWELL && !forced)
     {
-        Log("[arch] архитектура 0x%X и так поддерживается — подмена не нужна",
+        Log("[arch] architecture 0x%X is supported anyway - no spoof needed",
             info.architecture);
         return 0;
     }
 
     g_arch_target = reinterpret_cast<void *>(get_arch);
     if (!ArchApplyPatch())
-    { Log("[arch] не удалось поставить патч, err=%lu", GetLastError()); return -1; }
-    Log("[arch] патч установлен: %d карт в кэше, архитектура 0x%X%s",
+    { Log("[arch] could not install the patch, err=%lu", GetLastError()); return -1; }
+    Log("[arch] patch installed: %d cards cached, architecture 0x%X%s",
         g_arch_count, info.architecture,
-        forced ? " (NS_ARCH_FORCE=1, подмены не будет)" : " -> 0x1B0");
+        forced ? " (NS_ARCH_FORCE=1, no spoofing)" : " -> 0x1B0");
     return 1;
 }
 
 static bool InitDirectNr(const wchar_t *data_path)
 {
-    // До загрузки библиотеки NVIDIA: она спрашивает архитектуру при создании
-    // feature, но пролог правим заранее, пока в процессе нет её потоков.
+    // Before the NVIDIA library is loaded: it asks for the architecture when
+    // creating the feature, but we patch the prologue in advance, while none
+    // of its threads exist in the process yet.
     SetupArchSpoof();
     g_nr_module = LoadLibraryW(L"nvngx_dlssnr.dll");
     if (!g_nr_module) { Log("[pure] LoadLibrary(nvngx_dlssnr.dll) failed %lu", GetLastError()); return false; }
@@ -632,8 +634,8 @@ static void PumpPresent()
     if (h.swap == nullptr) return;
 
     // Paint the banner into the backbuffer (ReShade's overlay composites on top at Present).
-    // h.pump_queue не создаётся в этом билде (мёртвый путь от InitBanner) —
-    // проверка обязательна, иначе латентный NULL-краш.
+    // h.pump_queue is not created in this build (a dead path from InitBanner)
+    // - the check is mandatory, otherwise a latent NULL crash.
     if (g_banner != nullptr && g_pump_list != nullptr && g_swap3 != nullptr
         && h.pump_queue != nullptr)
     {
@@ -747,10 +749,10 @@ static bool InitNgx()
     return InitDirectNr(data_path);
 }
 
-// Модель NR выбирается подсказкой при создании feature. Стояла 0 (default) и
-// никогда не проверялась; у родственного Ray Reconstruction под номерами лежат
-// разные трансформерные модели с разной ценой. Значение берём из NS_NR_PRESET,
-// чтобы перебирать без пересборки.
+// The NR model is chosen by a hint when the feature is created. It was 0
+// (default) and never questioned; in the related Ray Reconstruction the
+// numbers hold different transformer models with different costs. The value
+// comes from NS_NR_PRESET so it can be swept without a rebuild.
 static UINT NrPresetHint()
 {
     static int cached = -1;
@@ -933,12 +935,13 @@ static constexpr uint32_t DDA_MAGIC        = 0x31414444u; // "DDA1" -- client ->
 static constexpr uint32_t DDA_ACK_MAGIC    = 0x4B434144u; // "DACK" -- worker -> client reply to DDA1
 static constexpr uint32_t GRAY_MAGIC       = 0x59415247u; // "GRAY" -- client -> worker: gray goes back into this mapping
 static constexpr uint32_t GRAY_ACK_MAGIC   = 0x4B434147u; // "GAK"  -- worker -> client reply to GRAY
-// OUTS: обратный канал для ПИКСЕЛЕЙ. Кадр записи весит 33 МБ на 4K, и через
-// пайп это ~7 мс на кадр (замерено: recv 17.4 -> 31.6 мс при включении
-// записи). Через общую память тех же байтов не надо гонять по трубе.
+// OUTS: the reverse channel for PIXELS. A recorded frame weighs 33 MB at 4K,
+// and through the pipe that is ~7 ms per frame (measured: recv 17.4 -> 31.6 ms
+// when recording is switched on). Through shared memory those bytes never
+// travel down the pipe.
 static constexpr uint32_t OUTS_MAGIC       = 0x5354554Fu; // "OUTS" -- client -> worker: pixels go into this mapping
 static constexpr uint32_t OUTS_ACK_MAGIC   = 0x324B414Fu; // "OAK2" -- worker -> client reply to OUTS
-// VideoResultHeader.bytes: пиксели лежат в секции OUTS, а не в пайпе.
+// VideoResultHeader.bytes: the pixels are in the OUTS section, not in the pipe.
 static constexpr uint32_t OUT_BYTES_IN_SHM = 0xFFFFFFFFu;
 // WNDO flags
 static constexpr uint32_t WINDOW_FLAG_CAPTURABLE = 0x1u; // debug: do NOT hide the window from screen capture
@@ -959,10 +962,11 @@ static constexpr uint32_t FRAME_FLAG_NO_COLOR = 0x8u;
 // colour instead. Keeps the overlay alive (picture + HUD) while the
 // neural pass is disabled; the next non-bypass frame resumes NGX.
 static constexpr uint32_t FRAME_FLAG_BYPASS = 0x10u;
-// bit 5: показать кадр шторкой «до/после» — слева сырой захват, справа
-// результат NGX. Позиция шторки лежит в старших 16 битах reserved
-// (0..65535 -> 0..1 ширины кадра): отдельного поля в заголовке нет, а менять
-// его размер ради одного числа значит ломать протокол на обеих сторонах.
+// bit 5: show the frame with a before/after wipe - raw capture on the left,
+// the NGX result on the right. The wipe position lives in the high 16 bits of
+// reserved (0..65535 -> 0..1 of the frame width): there is no dedicated field
+// in the header, and resizing it for a single number would break the protocol
+// on both sides.
 static constexpr uint32_t FRAME_FLAG_SPLIT = 0x20u;
 
 static UINT SplitXFromFlags(uint32_t reserved, UINT width)
@@ -1148,7 +1152,7 @@ static void CloseSharedInput()
 #define WDA_EXCLUDEFROMCAPTURE 0x00000011
 #endif
 
-// Определена ниже, рядом с UploadVideoFrame.
+// Defined below, next to UploadVideoFrame.
 static D3D12_RESOURCE_BARRIER Transition(ID3D12Resource *r, D3D12_RESOURCE_STATES before,
                                          D3D12_RESOURCE_STATES after);
 
@@ -1189,9 +1193,9 @@ static DWORD WINAPI PresentWindowThread(LPVOID)
     wc.lpszClassName = L"NeuralScreenPresent";
     RegisterClassExW(&wc);   // duplicate registration is harmless: it just fails
 
-    // WS_EX_TRANSPARENT в дополнение к HTTRANSPARENT: одного хит-теста
-    // системе не хватило — клик всё равно доставался оверлею (замерено
-    // инжекцией клика, _work/test_present_clickthrough.py).
+    // WS_EX_TRANSPARENT on top of HTTRANSPARENT: the hit test alone was not
+    // enough for the system - the click still went to the overlay (measured by
+    // injecting a click, _work/test_present_clickthrough.py).
     g_present_hwnd = CreateWindowExW(
         WS_EX_TOPMOST | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW | WS_EX_TRANSPARENT,
         wc.lpszClassName, L"NeuralScreen", WS_POPUP,
@@ -1254,7 +1258,7 @@ static bool OpenPresent(UINT width, UINT height, uint32_t flags)
     g_present_state = 0;
     g_present_thread = CreateThread(nullptr, 0, PresentWindowThread, nullptr, 0, &g_present_tid);
     if (g_present_thread == nullptr) { Log("[present] CreateThread failed"); return false; }
-    for (int i = 0; i < 500 && g_present_state == 0; ++i) Sleep(4);   // до 2 c на создание окна
+    for (int i = 0; i < 500 && g_present_state == 0; ++i) Sleep(4);   // up to 2 s for the window
     if (g_present_state != 1) { Log("[present] window did not come up"); ClosePresent(); return false; }
 
     HMODULE dxgi = LoadLibraryW(L"dxgi.dll");
@@ -1292,12 +1296,13 @@ static bool OpenPresent(UINT width, UINT height, uint32_t flags)
         Log("[present] IDXGISwapChain3 unavailable 0x%08X", hr);
         ClosePresent(); return false;
     }
-    // Click-through. Порядок повторяет рабочий рецепт из display.py:
-    // стиль -> SetLayeredWindowAttributes -> SWP_FRAMECHANGED. Ни HTTRANSPARENT,
-    // ни WS_EX_TRANSPARENT по отдельности не пропускают клик (замерено
-    // инжекцией, _work/test_present_clickthrough.py) — нужен WS_EX_LAYERED.
-    // Стили ставятся ПОСЛЕ создания swapchain: CreateSwapChainForHwnd отказывает
-    // на layered-окне, а уже созданная цепочка продолжает работать.
+    // Click-through. The order follows the working recipe from display.py:
+    // style -> SetLayeredWindowAttributes -> SWP_FRAMECHANGED. Neither
+    // HTTRANSPARENT nor WS_EX_TRANSPARENT alone lets the click through
+    // (measured by injection, _work/test_present_clickthrough.py) -
+    // WS_EX_LAYERED is required. The styles are set AFTER the swapchain is
+    // created: CreateSwapChainForHwnd refuses a layered window, while an
+    // already created chain keeps working.
     const LONG ex = GetWindowLongW(g_present_hwnd, GWL_EXSTYLE);
     SetWindowLongW(g_present_hwnd, GWL_EXSTYLE, ex | WS_EX_LAYERED | WS_EX_TRANSPARENT);
     if (!SetLayeredWindowAttributes(g_present_hwnd, 0, 255, LWA_ALPHA))
@@ -1362,9 +1367,9 @@ static bool PresentFrame(VideoState &v)
     return ok;
 }
 
-// NR OFF (FRAME_FLAG_BYPASS): показать сырой захват (v.color) вместо NGX-результата.
-// v.color — full-res в upscale-режиме и work-res в 1:1 — совпадает с окном,
-// которое PresentModeActive уже проверил по output-размеру.
+// NR OFF (FRAME_FLAG_BYPASS): show the raw capture (v.color) instead of the NGX result.
+// v.color is full-res in upscale mode and work-res in 1:1 - it matches the
+// window that PresentModeActive has already checked against the output size.
 static bool PresentBypass(VideoState &v)
 {
     ID3D12Resource *bb = nullptr;
@@ -1459,7 +1464,7 @@ static bool CreateVideoResources(VideoState &v, UINT w, UINT hgt, UINT full_w = 
     const UINT cw = v.upscale ? full_w : w;   // color texture: full-res in upscale mode
     const UINT ch = v.upscale ? full_h : hgt;
     if (!CreateVideoTex(v.color, cw, ch, DXGI_FORMAT_R8G8B8A8_UNORM, cw * 4) ||
-        // ALLOW_UNORDERED_ACCESS: в неё пишет шейдер растяжения поля движения
+        // ALLOW_UNORDERED_ACCESS: the motion field upscale shader writes into it
         !CreateVideoTex(v.mv, w, hgt, DXGI_FORMAT_R16G16_FLOAT, w * 4,
                         D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS))
         return false;
@@ -1524,13 +1529,13 @@ static D3D12_RESOURCE_BARRIER Transition(ID3D12Resource *r, D3D12_RESOURCE_STATE
 }
 
 // ---------------------------------------------------------------------------
-// Compute-шейдер масштабирования. Пока используется для растяжения поля
-// движения (клиент шлёт его в разрешении оптического потока, ~320x180, вместо
-// work-разрешения) — это снимало с CPU ~8 мс на кадр: 6 миллионов значений,
-// resize плюс конвертация во float16.
+// The scaling compute shader. For now it is used to upscale the motion field
+// (the client sends it at the optical-flow resolution, ~320x180, instead of
+// the work resolution) - that saved the CPU ~8 ms per frame: 6 million values,
+// a resize plus a conversion to float16.
 //
-// Билинейная выборка с зажатием по краям — та же интерполяция, что делал
-// cv2.resize(INTER_LINEAR): пиксельные центры считаются как (i + 0.5) / size.
+// Bilinear sampling with edge clamping - the same interpolation
+// cv2.resize(INTER_LINEAR) did: pixel centres are taken as (i + 0.5) / size.
 // ---------------------------------------------------------------------------
 // Bilinear is done by hand instead of through the hardware sampler: sampler
 // weights are quantised to 1/256 of a texel, and over a sevenfold upscale
@@ -1569,10 +1574,10 @@ typedef HRESULT(WINAPI *PFN_D3D12SerializeRootSignature_)(const D3D12_ROOT_SIGNA
 static ID3D12RootSignature  *g_scale_rs;
 static ID3D12PipelineState  *g_scale_pso;
 static ID3D12DescriptorHeap *g_scale_heap;
-static ID3D12Resource       *g_scale_src_bound;   // для каких ресурсов уже созданы дескрипторы
+static ID3D12Resource       *g_scale_src_bound;   // which resources already have descriptors
 static ID3D12Resource       *g_scale_dst_bound;
-static VideoTex              g_motion_small;      // поле движения в разрешении потока
-static UINT                  g_motion_w, g_motion_h;  // 0 = motion приходит в work-разрешении
+static VideoTex              g_motion_small;      // motion field at flow resolution
+static UINT                  g_motion_w, g_motion_h;  // 0 = motion arrives at work resolution
 
 static void ReleaseVideoTex(VideoTex &t)
 {
@@ -1588,7 +1593,7 @@ static void CloseMotionScaler()
     g_scale_dst_bound = nullptr;
 }
 
-// Компиляция шейдера и root signature — один раз за жизнь процесса.
+// Shader and root signature compilation - once per process lifetime.
 static bool EnsureScalePipeline()
 {
     if (g_scale_pso != nullptr) return true;
@@ -1685,7 +1690,7 @@ static bool EnsureScalePipeline()
     return true;
 }
 
-// Дескрипторы пересоздаются только при смене ресурсов (RNSZ, MOTS).
+// The descriptors are recreated only when the resources change (RNSZ, MOTS).
 static void BindScaleDescriptors(ID3D12Resource *src, ID3D12Resource *dst)
 {
     if (src == g_scale_src_bound && dst == g_scale_dst_bound) return;
@@ -1710,11 +1715,11 @@ static void BindScaleDescriptors(ID3D12Resource *src, ID3D12Resource *dst)
     g_scale_dst_bound = dst;
 }
 
-// Открыть путь «motion приходит уменьшенным». 0x0 — закрыть.
+// Open the "motion arrives downscaled" path. 0x0 closes it.
 static bool OpenMotionScaler(UINT w, UINT hgt)
 {
     CloseMotionScaler();
-    if (w == 0 || hgt == 0) return true;   // выключение — это успех
+    if (w == 0 || hgt == 0) return true;   // turning it off counts as success
     if (w < 8 || hgt < 8 || w > 7680 || hgt > 4320)
     { Log("[scale] MOTS rejected: implausible motion size %ux%u", w, hgt); return false; }
     if (!EnsureScalePipeline()) return false;
@@ -1726,15 +1731,15 @@ static bool OpenMotionScaler(UINT w, UINT hgt)
     return true;
 }
 
-// Загрузить уменьшенное поле движения и растянуть его в v.mv.tex.
-// Вызывается внутри уже открытого списка команд.
+// Load the downscaled motion field and upscale it into v.mv.tex.
+// Called inside an already open command list.
 static bool ScaleMotionInto(VideoState &v, const BYTE *mv, bool mv_was_ready)
 {
     if (!FillUpload(g_motion_small, mv, g_motion_w * 4, g_motion_h)) return false;
     D3D12_RESOURCE_BARRIER to_dst = Transition(
         g_motion_small.tex, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
         D3D12_RESOURCE_STATE_COPY_DEST);
-    if (g_scale_src_bound == g_motion_small.tex)  // не первый кадр: текстура была SRV
+    if (g_scale_src_bound == g_motion_small.tex)  // not the first frame: the texture was an SRV
         h.list->ResourceBarrier(1, &to_dst);
     CopyUpload(h.list, g_motion_small);
 
@@ -1781,7 +1786,7 @@ static HANDLE                  g_dda_nt = nullptr;
 static ID3D12Resource         *g_dda_d12 = nullptr;
 static ID3D12Fence            *g_dda_signal = nullptr;   // shared, D3D11 side signals
 static ID3D11Fence            *g_dda_signal11 = nullptr;
-static HANDLE                  g_dda_fence_ev = nullptr;  // событийное ожидание копии D3D11
+static HANDLE                  g_dda_fence_ev = nullptr;  // event wait for the D3D11 copy
 static UINT64                  g_dda_fence_value = 1;
 static bool                    g_dda_ready = false;      // current frame is in v.color
 // Gray downsample (GRAY): write luminance (flow size) into a client mapping.
@@ -1832,9 +1837,9 @@ static const char kDdaSwizzleHlsl[] =
     "    uint2 sz; gDst.GetDimensions(sz.x, sz.y);\n"
     "    if (id.x >= sz.x || id.y >= sz.y) return;\n"
     "    float4 c = gSrc.Load(int3(id.xy, 0));\n"
-    // B8G8R8A8 SRV уже декодируется HLSL в RGBA-семантику правильных
-    // компонентов: c.r = красный, c.b = синий. Никакого свопа делать
-    // НЕЛЬЗЯ — float4(c.b,...) давал перепутанные каналы (двойной своп).
+    // A B8G8R8A8 SRV is already decoded by HLSL into RGBA semantics with the
+    // right components: c.r = red, c.b = blue. No swap may be done here -
+    // float4(c.b,...) gave swapped channels (a double swap).
     "    gDst[id.xy] = c;\n"
     "}\n";
 
@@ -1897,10 +1902,10 @@ static void BindDdaDescriptors(ID3D12Resource *src)
 }
 
 // ---------------------------------------------------------------------------
-// Gray downsample (GRAY): честное блочное усреднение RGBA -> R8 luminance.
-// Блок ровно ceil(src/dst) (12x12 при 3840x2160 -> 320x180) — то, что делает
-// cv2.resize(INTER_AREA). Билинейная выборка НЕ годится: алиасинг на тексте
-// ломает оптический поток (проверено Клодом).
+// Gray downsample (GRAY): an honest block average RGBA -> R8 luminance.
+// The block is exactly ceil(src/dst) (12x12 at 3840x2160 -> 320x180) - what
+// cv2.resize(INTER_AREA) does. Bilinear sampling will NOT do: aliasing on text
+// breaks the optical flow (verified).
 // ---------------------------------------------------------------------------
 static ID3D12RootSignature  *g_gray_rs = nullptr;
 static ID3D12PipelineState  *g_gray_pso = nullptr;
@@ -1966,8 +1971,8 @@ static bool EnsureGrayPipeline()
     return true;
 }
 
-// Открыть обратный маппинг клиента (GRAY). w/h — размер luminance (320x180).
-// --- OUTS: секция под возвращаемые пиксели -------------------------------
+// Open the reverse client mapping (GRAY). w/h is the luminance size (320x180).
+// --- OUTS: the section for the returned pixels ---------------------------
 static HANDLE g_out_file;
 static BYTE  *g_out_map;
 static size_t g_out_bytes;
@@ -1997,12 +2002,12 @@ static bool OpenOut(const VideoOutCmd &oc)
         return false;
     }
     g_out_bytes = need;
-    Log("[outs] пиксели пойдут в '%s', %zu байт", name, need);
+    Log("[outs] pixels will go into '%s', %zu bytes", name, need);
     return true;
 }
 
-// Отдать пиксели: в секцию, если она согласована и кадр в неё влезает,
-// иначе прежним путём — телом в пайп.
+// Deliver the pixels: into the section when it is agreed and the frame fits,
+// otherwise the old way - inline through the pipe.
 static bool DeliverPixels(const std::vector<BYTE> &output, uint32_t index,
                           int64_t pts)
 {
@@ -2033,7 +2038,7 @@ static bool OpenGray(const VideoGrayCmd &gc)
     if (g_gray_map == nullptr) { Log("[gray] MapViewOfFile(%zu) failed %lu", need, GetLastError()); CloseHandle(g_gray_file); g_gray_file = nullptr; return false; }
     g_gray_bytes = need; g_gray_w = gc.width; g_gray_h = gc.height;
     if (!EnsureGrayPipeline()) return false;
-    // R8 UAV текстура
+    // R8 UAV texture
     D3D12_HEAP_PROPERTIES def = { D3D12_HEAP_TYPE_DEFAULT };
     D3D12_RESOURCE_DESC td = {};
     td.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
@@ -2046,7 +2051,7 @@ static bool OpenGray(const VideoGrayCmd &gc)
                                               __uuidof(ID3D12Resource),
                                               reinterpret_cast<void **>(&g_gray_uav))))
     { Log("[gray] UAV tex failed"); return false; }
-    // readback buffer ровно need байт
+    // a readback buffer of exactly need bytes
     D3D12_HEAP_PROPERTIES rb = { D3D12_HEAP_TYPE_READBACK };
     D3D12_RESOURCE_DESC bd = {};
     bd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
@@ -2062,19 +2067,19 @@ static bool OpenGray(const VideoGrayCmd &gc)
     return true;
 }
 
-// Выполнить AREA-усреднение g_dda_dst -> gray и записать в маппинг клиента.
-// Вызывается в DdaGrab после swizzle (в том же Begin/End блоке нельзя —
-// нужен отдельный fence), поэтому здесь собственный Begin/End.
+// Run the AREA average g_dda_dst -> gray and write it into the client mapping.
+// Called from DdaGrab after the swizzle (it cannot be in the same Begin/End
+// block - a separate fence is needed), hence its own Begin/End here.
 static bool AreaToGray()
 {
     if (!g_gray_mapped || !g_dda_dst) return false;
     if (!BeginCommands()) return false;
-    // g_dda_dst в COPY_SOURCE после copy в v.color? Нет — после swizzle он
-    // возвращается в UNORDERED_ACCESS (см. DdaGrab). Читаем как SRV.
+    // Is g_dda_dst in COPY_SOURCE after the copy into v.color? No - after the
+    // swizzle it goes back to UNORDERED_ACCESS (see DdaGrab). We read it as an SRV.
     D3D12_RESOURCE_BARRIER to_srv = Transition(g_dda_dst, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
                                                D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
     h.list->ResourceBarrier(1, &to_srv);
-    // дескрипторы: 0 = SRV g_dda_dst, 1 = UAV g_gray_uav
+    // descriptors: 0 = SRV g_dda_dst, 1 = UAV g_gray_uav
     const UINT stride = h.dev->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
     D3D12_CPU_DESCRIPTOR_HANDLE cpu = g_dda_heap->GetCPUDescriptorHandleForHeapStart();
     D3D12_SHADER_RESOURCE_VIEW_DESC sd = {};
@@ -2097,7 +2102,7 @@ static bool AreaToGray()
     h.list->SetComputeRootDescriptorTable(1, g0);
     h.list->SetComputeRootDescriptorTable(2, g1);
     h.list->Dispatch((g_gray_w + 7) / 8, (g_gray_h + 7) / 8, 1);
-    // gray UAV -> COPY_SOURCE, копируем в readback
+    // gray UAV -> COPY_SOURCE, copy into the readback buffer
     D3D12_RESOURCE_BARRIER to_copy = Transition(g_gray_uav, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
                                                 D3D12_RESOURCE_STATE_COPY_SOURCE);
     h.list->ResourceBarrier(1, &to_copy);
@@ -2110,9 +2115,10 @@ static bool AreaToGray()
     dst.PlacedFootprint.Footprint.RowPitch = g_gray_w;
     dst.PlacedFootprint.Footprint.Format = DXGI_FORMAT_R8_UNORM;
     h.list->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
-    // вернуть g_dda_dst в COPY_SOURCE? нет — он остаётся NON_PIXEL_SHADER_RESOURCE
-    // для след. swizzle? В DdaGrab после copy его возвращают в UNORDERED_ACCESS.
-    // Здесь мы его взяли в NON_PIXEL из UNORDERED_ACCESS — вернём обратно.
+    // Put g_dda_dst back into COPY_SOURCE? No - it stays
+    // NON_PIXEL_SHADER_RESOURCE for the next swizzle? In DdaGrab it is put
+    // back into UNORDERED_ACCESS after the copy. Here we took it into
+    // NON_PIXEL from UNORDERED_ACCESS - so we put it back.
     D3D12_RESOURCE_BARRIER back_uav = Transition(g_dda_dst, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
                                                  D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     D3D12_RESOURCE_BARRIER back_uav2 = Transition(g_gray_uav, D3D12_RESOURCE_STATE_COPY_SOURCE,
@@ -2121,7 +2127,7 @@ static bool AreaToGray()
     h.list->ResourceBarrier(2, backs);
     const UINT64 fence = EndCommands();
     if (!WaitFenceValue(h.fence, fence, 10000)) { Log("[gray] fence timeout"); return false; }
-    // map readback -> memcpy в mapping клиента
+    // map the readback -> memcpy into the client mapping
     BYTE *mapped = nullptr;
     D3D12_RANGE rr = { 0, g_gray_bytes };
     if (FAILED(g_gray_readback->Map(0, &rr, reinterpret_cast<void **>(&mapped)))) return false;
@@ -2159,8 +2165,8 @@ static bool OpenDda(UINT w, UINT hgt)
     return true;
 }
 
-// Профилировщик фаз объявлен ниже (перед RunVideo), но щуп нужен здесь —
-// поэтому список фаз и прототипы вынесены вперёд.
+// The phase profiler is declared below (before RunVideo), but the probe is
+// needed here - so the phase list and the prototypes are hoisted up.
 enum { PH_ACQ, PH_DDA, PH_UPLOAD, PH_EVAL, PH_PRESENT, PH_FRAME, PH_COUNT };
 static double PhaseNow();
 static void PhaseAdd(int idx, double t0);
@@ -2235,10 +2241,10 @@ static bool DdaGrab(VideoState &v)
         { Log("[dda] dst UAV failed"); g_dda_dup->ReleaseFrame(); frame->Release(); res->Release(); return false; }
         Log("[dda] shared texture %ux%u ready", (UINT)fd.Width, (UINT)fd.Height);
     }
-    // D3D11 копия с box по минимальному размеру: g_dda_shared создаётся под
-    // размер ПЕРВОГО кадра; при смене разрешения монитора CopyResource с
-    // несовпадающими размерами даёт device removed. Обрезанный кадр лучше
-    // падения (M4 аудита #2).
+    // A D3D11 copy with a box of the minimum size: g_dda_shared is created for
+    // the size of the FIRST frame; when the monitor resolution changes,
+    // CopyResource with mismatched sizes gives device removed. A cropped frame
+    // beats a crash (M4 of audit #2).
     {
         D3D11_TEXTURE2D_DESC sd{};
         g_dda_shared->GetDesc(&sd);
@@ -2260,10 +2266,11 @@ static bool DdaGrab(VideoState &v)
     g_dda_ctx->Flush();
     frame->Release(); res->Release();
 
-    // Ждать копию D3D11 событием, а НЕ опросом со Sleep(1). Sleep(1) при
-    // стандартном разрешении таймера Windows спит до 15.6 мс, и это давало
-    // 13 мс на фазу dda при работе на 1-2 мс (замерено профилировщиком фаз:
-    // acq=0.0, dda=13.0). SetEventOnCompletion будит поток точно.
+    // Wait for the D3D11 copy with an event, NOT by polling with Sleep(1).
+    // At the default Windows timer resolution Sleep(1) sleeps up to 15.6 ms,
+    // and that gave 13 ms for the dda phase where the work takes 1-2 ms
+    // (measured by the phase profiler: acq=0.0, dda=13.0).
+    // SetEventOnCompletion wakes the thread precisely.
     const UINT64 want = g_dda_fence_value;
     const DWORD wait_ms = 5000;
     if (g_dda_fence_ev == nullptr)
@@ -2275,7 +2282,7 @@ static bool DdaGrab(VideoState &v)
             WaitForSingleObject(g_dda_fence_ev, wait_ms);
         else
         {
-            // Событие недоступно — прежний опрос как страховка.
+            // The event is unavailable - fall back to the old polling.
             const DWORD start = GetTickCount();
             while (g_dda_signal->GetCompletedValue() < want &&
                    GetTickCount() - start < wait_ms) Sleep(1);
@@ -2284,10 +2291,10 @@ static bool DdaGrab(VideoState &v)
     if (g_dda_signal->GetCompletedValue() < want)
     { Log("[dda] signal fence timeout"); g_dda_dup->ReleaseFrame(); return false; }
     ++g_dda_fence_value;
-    // Desktop Duplication требует ReleaseFrame() ПОСЛЕ завершения всех
-    // операций чтения кадра. Копия D3D11 подтверждена фенсом выше — только
-    // теперь поверхность можно освобождать, иначе композитор может
-    // перезаписать её, пока копия ещё идёт (рваные кадры на движении).
+    // Desktop Duplication requires ReleaseFrame() AFTER every read of the
+    // frame has finished. The D3D11 copy is confirmed by the fence above -
+    // only now may the surface be released, otherwise the compositor can
+    // overwrite it while the copy is still running (torn frames on motion).
     g_dda_dup->ReleaseFrame();
 
     // swizzle into g_dda_dst, then copy into v.color.tex
@@ -2316,10 +2323,11 @@ static bool DdaGrab(VideoState &v)
     D3D12_TEXTURE_COPY_LOCATION src = {}, dst = {};
     src.pResource = g_dda_dst; src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX; src.SubresourceIndex = 0;
     dst.pResource = v.color.tex; dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX; dst.SubresourceIndex = 0;
-    // Копия строго по минимальному размеру: g_dda_dst фиксируется по первому
-    // кадру десктопа, v.color.tex — по work/full клиента; при смене
-    // разрешения монитора размеры разъезжаются, и копия целиком (nullptr
-    // box) даёт device removed. Обрезанный кадр на один тик лучше падения.
+    // The copy is strictly of the minimum size: g_dda_dst is fixed by the
+    // first desktop frame and v.color.tex by the client work/full size; when
+    // the monitor resolution changes the sizes diverge, and a whole-resource
+    // copy (a nullptr box) gives device removed. A cropped frame for one tick
+    // beats a crash.
     {
         const D3D12_RESOURCE_DESC sd = g_dda_dst->GetDesc();
         const D3D12_RESOURCE_DESC dd = v.color.tex->GetDesc();
@@ -2344,8 +2352,8 @@ static bool DdaGrab(VideoState &v)
     h.list->ResourceBarrier(3, post_c);
     const UINT64 fence = EndCommands();
     if (!WaitFenceValue(h.fence, fence, 10000)) { Log("[dda] swizzle fence timeout"); return false; }
-    // Отдать клиенту luminance-кадр (320x180) для оптического потока
-    if (!AreaToGray()) { /* best effort: guides останутся без свежего кадра */ }
+    // Hand the client the luminance frame (320x180) for the optical flow
+    if (!AreaToGray()) { /* best effort: guides go without a fresh frame */ }
     g_dda_ready = true;
     return true;
 }
@@ -2359,8 +2367,9 @@ static bool UploadVideoFrame(VideoState &v, const BYTE *color, const BYTE *mv, b
     if (!BeginCommands()) return false;
     if (v.inputs_ready)
     {
-        // Цвет всегда идёт копией; MV в режиме уменьшенного поля переводит
-        // в COPY_DEST не он, а ScaleMotionInto — там своя цепочка состояний.
+        // The colour always goes as a copy; in downscaled-field mode it is
+        // ScaleMotionInto, not this code, that moves MV into COPY_DEST - it
+        // has its own state chain there.
         D3D12_RESOURCE_BARRIER pre[] = {
             Transition(v.color.tex, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_DEST),
             Transition(v.mv.tex, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_DEST),
@@ -2389,7 +2398,7 @@ static bool UploadVideoFrame(VideoState &v, const BYTE *color, const BYTE *mv, b
     return WaitFenceValue(h.fence, fence, 30000);
 }
 
-// DDA-режим: цвет уже лежит в v.color.tex (DdaGrab), загружаем только motion.
+// DDA mode: the colour is already in v.color.tex (DdaGrab), we upload only motion.
 static bool UploadMotionOnly(VideoState &v, const BYTE *mv, bool motion_small)
 {
     if (!motion_small && !FillUpload(v.mv, mv, v.w * 4, v.hgt)) return false;
@@ -2417,22 +2426,22 @@ static bool UploadMotionOnly(VideoState &v, const BYTE *mv, bool motion_small)
 }
 
 // ---------------------------------------------------------------------------
-// Сколько из времени Evaluate GPU реально считает
+// How much of the Evaluate time the GPU actually spends computing
 //
-// PH_EVAL меряет submit + ожидание забора на CPU: в него входит и постановка
-// задачи, и просыпание потока. Таймстемпы на очереди отвечают, сколько из этого
-// GPU реально считает.
+// PH_EVAL measures submit plus the CPU wait on the fence: it includes both
+// queueing the work and waking the thread. Timestamps on the queue answer how
+// much of that the GPU really computes.
 //
-// Замерено (RTX 5070 Ti, рабочий стол 2560x1600): CPU 8.9 мс, GPU 8.0 мс —
-// накладные расходы 0.9 мс, остальное настоящая работа. И GPU-время не зависит
-// от разрешения входа: 7.9-8.6 мс на 0.37-3.32 МПикс, пикселей в девять раз
-// больше при том же времени. Модель считает на своём внутреннем разрешении,
-// поэтому work_scale ничего и не стоил.
+// Measured (RTX 5070 Ti, 2560x1600 desktop): CPU 8.9 ms, GPU 8.0 ms - 0.9 ms
+// of overhead, the rest is real work. And the GPU time does not depend on the
+// input resolution: 7.9-8.6 ms over 0.37-3.32 MPix, nine times the pixels for
+// the same time. The model computes at its own internal resolution, which is
+// why work_scale never cost anything.
 // ---------------------------------------------------------------------------
 static ID3D12QueryHeap *g_ts_heap;
 static ID3D12Resource  *g_ts_readback;
 static UINT64           g_ts_freq;
-static int              g_ts_state;   // 0 — не пробовали, 1 — готово, -1 — не вышло
+static int              g_ts_state;   // 0 - not tried, 1 - ready, -1 - failed
 static double           g_ts_sum;
 static double           g_ts_max;
 static unsigned         g_ts_n;
@@ -2447,7 +2456,7 @@ static bool EnsureTimestamps()
     qd.Count = 2;
     if (FAILED(h.dev->CreateQueryHeap(&qd, __uuidof(ID3D12QueryHeap),
                                       reinterpret_cast<void **>(&g_ts_heap))))
-    { Log("[phase] CreateQueryHeap не удался — GPU-время eval мерить нечем"); return false; }
+    { Log("[phase] CreateQueryHeap failed - nothing to measure eval GPU time with"); return false; }
     D3D12_HEAP_PROPERTIES rb = {};
     rb.Type = D3D12_HEAP_TYPE_READBACK;
     D3D12_RESOURCE_DESC bd = {};
@@ -2460,7 +2469,7 @@ static bool EnsureTimestamps()
         reinterpret_cast<void **>(&g_ts_readback)))) return false;
     if (FAILED(h.queue->GetTimestampFrequency(&g_ts_freq)) || g_ts_freq == 0) return false;
     g_ts_state = 1;
-    Log("[phase] GPU-таймстемпы вокруг Evaluate включены (частота %llu Гц)", g_ts_freq);
+    Log("[phase] GPU timestamps around Evaluate are on (frequency %llu Hz)", g_ts_freq);
     return true;
 }
 
@@ -2529,15 +2538,15 @@ static bool EvaluateVideo(VideoState &v, int reset)
     return true;
 }
 
-// Разделитель шторки: узкая полоса поверх выходной текстуры.
+// The wipe divider: a narrow strip over the output texture.
 //
-// Рисуется через ClearUnorderedAccessViewFloat с прямоугольником — шейдер для
-// сплошной полосы не нужен, а v.output и так лежит в UNORDERED_ACCESS, поэтому
-// обходимся без барьеров. Ему требуются два дескриптора одного UAV: видимый
-// шейдеру и обычный CPU-шный, отсюда две крошечные кучи.
+// Drawn through ClearUnorderedAccessViewFloat with a rectangle - a solid strip
+// needs no shader, and v.output already sits in UNORDERED_ACCESS, so we get by
+// without barriers. It needs two descriptors for the same UAV: one visible to
+// shaders and an ordinary CPU one, hence the two tiny heaps.
 static ID3D12DescriptorHeap *g_split_heap_gpu;
 static ID3D12DescriptorHeap *g_split_heap_cpu;
-static ID3D12Resource       *g_split_uav_for;   // для какого ресурса сделан UAV
+static ID3D12Resource       *g_split_uav_for;   // which resource the UAV was made for
 
 static bool EnsureSplitUav(ID3D12Resource *res)
 {
@@ -2568,11 +2577,12 @@ static bool EnsureSplitUav(ID3D12Resource *res)
     return true;
 }
 
-// Шторка «до/после»: левую часть кадра заменяем сырым захватом.
+// The before/after wipe: the left part of the frame is replaced by the raw capture.
 //
-// Обе текстуры полноразмерные и одного формата (NGX ужимает вход внутри себя),
-// поэтому это одно копирование области, целиком на GPU. Делается ДО показа и
-// до отдачи пикселей, так что в запись и скриншот шторка попадает сама.
+// Both textures are full size and of the same format (NGX shrinks its input
+// internally), so this is a single region copy, entirely on the GPU. It runs
+// BEFORE the present and before the pixels are handed over, so the wipe ends
+// up in the recording and the screenshot by itself.
 static bool SplitCompose(VideoState &v, UINT split_x)
 {
     const UINT cw = v.upscale ? v.full_w : v.w;
@@ -2602,8 +2612,8 @@ static bool SplitCompose(VideoState &v, UINT split_x)
     };
     h.list->ResourceBarrier(_countof(post), post);
 
-    // Разделитель — только когда шторка действительно делит кадр: на краях
-    // полоса висела бы вплотную к рамке без всякого смысла.
+    // The divider only when the wipe really splits the frame: at the edges the
+    // strip would hug the border for no reason at all.
     if (split_x < cw && EnsureSplitUav(v.output))
     {
         const UINT lw = (ch >= 1400u) ? 3u : 2u;
@@ -2611,8 +2621,9 @@ static bool SplitCompose(VideoState &v, UINT split_x)
         if (left < 0) left = 0;
         LONG right = left + static_cast<LONG>(lw);
         if (right > static_cast<LONG>(cw)) { right = static_cast<LONG>(cw); left = right - static_cast<LONG>(lw); }
-        // #D97757 — тот же глиняный акцент, что в меню. Текстура обычная UNORM
-        // (не _SRGB), поэтому байты кладём как есть, без гамма-пересчёта.
+        // #D97757 - the same clay accent as in the menu. The texture is plain
+        // UNORM (not _SRGB), so the bytes go in as they are, without a gamma
+        // conversion.
         const FLOAT accent[4] = { 217.0f / 255.0f, 119.0f / 255.0f, 87.0f / 255.0f, 1.0f };
         const D3D12_RECT rect = { left, 0, right, static_cast<LONG>(ch) };
         ID3D12DescriptorHeap *heaps[] = { g_split_heap_gpu };
@@ -2701,11 +2712,12 @@ static int ReadVideoMessage(VideoState &v, VideoFrameHeader &fh, std::vector<BYT
         bool no_color = (fh.reserved & FRAME_FLAG_NO_COLOR) != 0;
         if (no_color && !g_dda_active)
         {
-            // Клиент думает, что DDA активен, а захват умер (recreate не
-            // удался). Пробуем переоткрыть один раз; не вышло или размеры
-            // нулевые (DDA никогда не был активен — рассинхрон протокола) —
-            // выходим: клиент перезапустит воркера и пошлёт DDA1 заново.
-            // Иначе прочитаем из пайпа цвет, которого нет — «truncated frame».
+            // The client thinks DDA is active but the capture died (recreate
+            // failed). We try to reopen once; if that fails or the sizes are
+            // zero (DDA was never active - a protocol desync) we exit: the
+            // client will restart the worker and send DDA1 again. Otherwise we
+            // would read colour from the pipe that is not there - a
+            // "truncated frame".
             if (g_dda_w == 0 || g_dda_h == 0)
             { Log("[dda] NO_COLOR without DDA sizes — protocol desync"); return 0; }
             if (!OpenDda(g_dda_w, g_dda_h) || !g_dda_active) return 0;
@@ -2713,15 +2725,15 @@ static int ReadVideoMessage(VideoState &v, VideoFrameHeader &fh, std::vector<BYT
         const size_t cw = v.upscale ? v.full_w : v.w;
         const size_t ch = v.upscale ? v.full_h : v.hgt;
         const size_t color_bytes = cw * ch * 4;
-        // Уменьшенное поле движения (MOTS) занимает столько, сколько занимает,
-        // а не work-разрешение — иначе разъедется разбор потока.
+        // The downscaled motion field (MOTS) takes as much as it takes, not
+        // the work resolution - otherwise the stream parsing falls apart.
         const bool small_mv = (fh.reserved & FRAME_FLAG_MOTION_SMALL) != 0 && g_motion_w != 0;
         const size_t mv_bytes = small_mv
             ? static_cast<size_t>(g_motion_w) * g_motion_h * 4
             : static_cast<size_t>(v.w) * v.hgt * 4;
         if (no_color)
         {
-            // DDA-режим: цвет воркер снимает сам; в пайпе только motion.
+            // DDA mode: the worker grabs the colour itself; the pipe carries only motion.
             *color_ptr = nullptr;
             mv.resize(mv_bytes);
             *mv_ptr = mv.data();
@@ -2771,8 +2783,8 @@ static int ReadVideoMessage(VideoState &v, VideoFrameHeader &fh, std::vector<BYT
     }
     if (fh.magic == GRAY_MAGIC)
     {
-        // Первые 24 байта уже в fh (совпадает с VideoFrameHeader); дочитать
-        // 64 байта имени — итого 88, как SHMI.
+        // The first 24 bytes are already in fh (it matches VideoFrameHeader);
+        // read the remaining 64 bytes of the name - 88 in total, like SHMI.
         BYTE *p = reinterpret_cast<BYTE *>(&gc);
         memcpy(p, &fh, sizeof(fh));
         if (!ReadExact(stdin, p + sizeof(fh), sizeof(gc) - sizeof(fh))) return 0;
@@ -2780,7 +2792,7 @@ static int ReadVideoMessage(VideoState &v, VideoFrameHeader &fh, std::vector<BYT
     }
     if (fh.magic == OUTS_MAGIC)
     {
-        // Раскладка как у GRAY: 24 байта заголовка уже прочитаны, дальше имя.
+        // Same layout as GRAY: the 24-byte header is already read, the name follows.
         BYTE *p = reinterpret_cast<BYTE *>(&oc);
         memcpy(p, &fh, sizeof(fh));
         if (!ReadExact(stdin, p + sizeof(fh), sizeof(oc) - sizeof(fh))) return 0;
@@ -2799,8 +2811,8 @@ static int ReadVideoMessage(VideoState &v, VideoFrameHeader &fh, std::vector<BYT
 
 static void ReleaseVideoTextures(VideoState &v)
 {
-    // Дескрипторы шейдера ссылались на эти ресурсы — после освобождения
-    // их надо перевыпустить (см. BindScaleDescriptors).
+    // The shader descriptors referenced these resources - after they are
+    // released the descriptors must be reissued (see BindScaleDescriptors).
     if (v.mv.tex == g_scale_dst_bound) g_scale_dst_bound = nullptr;
     if (v.color.tex != nullptr) { v.color.tex->Release(); v.color.tex = nullptr; }
     if (v.color.upload != nullptr) { v.color.upload->Release(); v.color.upload = nullptr; }
@@ -2811,28 +2823,29 @@ static void ReleaseVideoTextures(VideoState &v)
     v.inputs_ready = false;
 }
 
-// Forward declaration: определена ниже, вызывается в RunVideo при завершении.
+// Forward declaration: defined below, called from RunVideo on shutdown.
 static void CleanupVideoNgx();
 
 // ---------------------------------------------------------------------------
-// Профилирование фаз кадра. Задача: понять, куда уходит время, и в частности
-// проверить гипотезу vblank — при 60 Гц бюджет 16.7 мс, и если Present пасует
-// конвейер по кратным ему значениям, это видно по гистограмме, а не по
-// среднему. Поэтому для Present считается ещё и распределение по корзинам.
+// Frame phase profiling. The goal is to see where the time goes and, in
+// particular, to test the vblank hypothesis - at 60 Hz the budget is 16.7 ms,
+// and if Present paces the pipeline in multiples of it, that shows in a
+// histogram rather than in an average. So Present also gets a bucket
+// distribution.
 // ---------------------------------------------------------------------------
 static const char *kPhaseNames[PH_COUNT] =
-    { "acq(ждём стол)", "dda(всего)", "upload", "eval", "present", "frame" };
+    { "acq(wait desktop)", "dda(total)", "upload", "eval", "present", "frame" };
 static double g_ph_sum[PH_COUNT];
 static double g_ph_max[PH_COUNT];
 static unsigned g_ph_n[PH_COUNT];
-// Корзины Present, мс: <5, 5-12, 12-20 (~1 vblank), 20-28, 28-40 (~2 vblank), 40+
+// Present buckets, ms: <5, 5-12, 12-20 (~1 vblank), 20-28, 28-40 (~2 vblank), 40+
 static const double kPresentBins[] = { 5.0, 12.0, 20.0, 28.0, 40.0 };
 static unsigned g_ph_bins[6];
 static LARGE_INTEGER g_qpf;
 static UINT64 g_ph_tick;
 
-// Профилировщик включается переменной окружения NS_PHASE=1. По умолчанию
-// выключен: иначе он сорит в лог строкой каждые 2 секунды всю сессию.
+// The profiler is turned on by the NS_PHASE=1 environment variable. Off by
+// default: otherwise it litters the log with a line every 2 seconds all session.
 static int g_phase_on = -1;
 
 static bool PhaseEnabled()
@@ -2842,7 +2855,7 @@ static bool PhaseEnabled()
         char buf[8] = {};
         const DWORD got = GetEnvironmentVariableA("NS_PHASE", buf, sizeof(buf));
         g_phase_on = (got > 0 && buf[0] == '1') ? 1 : 0;
-        if (g_phase_on) Log("[phase] профилировщик фаз включён (NS_PHASE=1)");
+        if (g_phase_on) Log("[phase] phase profiler enabled (NS_PHASE=1)");
     }
     return g_phase_on == 1;
 }
@@ -2890,11 +2903,11 @@ static void PhaseReport(bool bypass)
     if (g_ts_n > 0)
     {
         _snprintf_s(line + off, sizeof(line) - off, _TRUNCATE,
-                    " | eval на GPU %.1f/%.1f", g_ts_sum / g_ts_n, g_ts_max);
+                    " | eval on GPU %.1f/%.1f", g_ts_sum / g_ts_n, g_ts_max);
         g_ts_sum = 0.0; g_ts_max = 0.0; g_ts_n = 0;
     }
-    Log("%s (среднее/макс, мс)", line);
-    Log("[phase] present по корзинам мс: <5=%u 5-12=%u 12-20=%u 20-28=%u 28-40=%u 40+=%u",
+    Log("%s (mean/max, ms)", line);
+    Log("[phase] present by bucket, ms: <5=%u 5-12=%u 12-20=%u 20-28=%u 28-40=%u 40+=%u",
         g_ph_bins[0], g_ph_bins[1], g_ph_bins[2], g_ph_bins[3], g_ph_bins[4], g_ph_bins[5]);
     for (int b = 0; b < 6; ++b) g_ph_bins[b] = 0;
 }
@@ -2960,10 +2973,11 @@ static int RunVideo()
             if (live)
             {
                 Log("[live] input stream closed after %u frames; %u direct evaluations", frame, g_eval_count);
-                // Явная очистка NGX-ресурсов ПЕРЕД выходом: без ReleaseFeature/
-                // Shutdown1 GPU-ресурсы (D3D12 device, NGX) освобождаются только
-                // при смерти процесса, и быстрый рестарт нового воркера
-                // конфликтует с остатками старого (exit 127 / зависание).
+                // Explicit NGX resource cleanup BEFORE exiting: without
+                // ReleaseFeature/Shutdown1 the GPU resources (the D3D12 device,
+                // NGX) are freed only when the process dies, and a quick
+                // restart of a new worker conflicts with the leftovers of the
+                // old one (exit 127 / a hang).
                 CleanupVideoNgx();
                 CloseSharedInput();
                 ClosePresent();
@@ -3087,8 +3101,8 @@ static int RunVideo()
         }
         if (msg == 5)
         {
-            // MOTS: с этого момента поле движения приходит уменьшенным,
-            // растягиваем его на GPU.
+            // MOTS: from now on the motion field arrives downscaled and we
+            // upscale it on the GPU.
             const uint32_t ok = OpenMotionScaler(mc.width, mc.height) ? 1u : 0u;
             VideoMotionAck ack = { MOTION_ACK_MAGIC, ok, 0u, 0u, mc.pts };
             if (!WriteExact(stdout, &ack, sizeof(ack))) return 10;
@@ -3096,7 +3110,7 @@ static int RunVideo()
         }
         if (msg == 6)
         {
-            // DDA1: взять захват на себя (width==0 — выключить, вернуться к pipe).
+            // DDA1: take over the capture (width==0 turns it off, back to the pipe).
             uint32_t ok = 0;
             if (dc.width == 0 || dc.height == 0)
             {
@@ -3112,7 +3126,7 @@ static int RunVideo()
         }
         if (msg == 7)
         {
-            // GRAY: клиент передал обратный маппинг для luminance-кадров.
+            // GRAY: the client passed a reverse mapping for luminance frames.
             uint32_t ok = 0;
             if (gc.width == 0 || gc.height == 0)
             {
@@ -3128,7 +3142,7 @@ static int RunVideo()
         }
         if (msg == 8)
         {
-            // OUTS: куда класть пиксели вместо пайпа.
+            // OUTS: where to put the pixels instead of the pipe.
             const uint32_t ok = OpenOut(oc) ? 1u : 0u;
             Log("[video] OUTS %s (%ux%u)", ok ? "OK" : "FAIL", oc.width, oc.height);
             VideoOutAck ack = { OUTS_ACK_MAGIC, ok, 0u, 0u, oc.pts };
@@ -3138,16 +3152,16 @@ static int RunVideo()
         const double t_frame = PhaseNow();
         if (g_dda_active)
         {
-            // DDA-режим: цвет берём из Desktop Duplication прямо на GPU,
-            // motion — из присланного кадра (клиент продолжает шлaть пары).
+            // DDA mode: the colour comes from Desktop Duplication straight on
+            // the GPU, motion from the frame sent in (the client keeps sending pairs).
             const double t_dda = PhaseNow();
             const bool got = DdaGrab(v);
             PhaseAdd(PH_DDA, t_dda);
             if (!got && !g_dda_ready)
             {
-                // Ещё ни одного реального кадра с рабочего стола: держать
-                // парность протокола пустым OUT1 и ждать изменений экрана,
-                // НЕ запуская NGX на пустом цвете (evaluate на нулe виснет).
+                // Not a single real desktop frame yet: keep the protocol
+                // paired with an empty OUT1 and wait for the screen to change,
+                // WITHOUT running NGX on an empty colour (evaluate on zero hangs).
                 VideoResultHeader empty = { OUT_MAGIC, fh.index, 1u, 0u, g_last_eval_result, fh.pts };
                 if (!WriteExact(stdout, &empty, sizeof(empty))) return 10;
                 continue;
@@ -3185,8 +3199,8 @@ static int RunVideo()
             if (!ev_ok) return 9;
             if ((fh.reserved & FRAME_FLAG_SPLIT) != 0)
             {
-                // В bypass шторка бессмысленна: там обе половины — сырой
-                // захват, поэтому только на обработанном кадре.
+                // In bypass the wipe is meaningless: both halves would be the
+                // raw capture, so only on a processed frame.
                 const UINT cw = v.upscale ? v.full_w : v.w;
                 if (!SplitCompose(v, SplitXFromFlags(fh.reserved, cw))) return 9;
             }
@@ -3197,13 +3211,14 @@ static int RunVideo()
             // the "frame done" signal and never sees the pixels -- unless it
             // explicitly asked for this one frame (screenshot).
             const double t_pres = PhaseNow();
-            // NR OFF: показать сырой захват (v.color уже в full-res) —
-            // NGX evaluate пропущен, но конвейер жив (окно, HUD).
+            // NR OFF: show the raw capture (v.color is already full-res) - the
+            // NGX evaluate is skipped but the pipeline is alive (window, HUD).
             const bool pres_ok = bypass ? PresentBypass(v) : PresentFrame(v);
             PhaseAdd(PH_PRESENT, t_pres);
             if (!pres_ok) return 9;
-            // Пиксели клиенту (скриншот/запись) — и в bypass-режиме: для
-            // записи нужен ровно тот кадр, что виден (сырой захват).
+            // Pixels for the client (screenshot/recording) - in bypass mode
+            // too: the recording needs exactly the frame that is on screen
+            // (the raw capture).
             if ((fh.reserved & FRAME_FLAG_WANT_PIXELS) != 0)
             {
                 bool dl_ok = false;
@@ -3246,10 +3261,10 @@ static int RunVideo()
 }
 
 // ---------------------------------------------------------------------------
-// CleanupVideoNgx: освободить NGX-ресурсы video/live-режима перед выходом.
-// Без этого GPU-ресурсы (D3D12 device, NGX feature) освобождаются только
-// при смерти процесса — быстрый рестарт воркера конфликтует с остатками
-// (exit 127 / зависание на кадре 0). Вызывается при штатном завершении.
+// CleanupVideoNgx: release the NGX resources of video/live mode before exit.
+// Without this the GPU resources (the D3D12 device, the NGX feature) are freed
+// only when the process dies - a quick worker restart conflicts with the
+// leftovers (exit 127 / a hang on frame 0). Called on a normal shutdown.
 // ---------------------------------------------------------------------------
 static void CleanupVideoNgx()
 {
@@ -3484,8 +3499,8 @@ static int Serve(DWORD game_pid)
             break;
         }
     }
-    // Штатный выход: освободить NGX-ресурсы, иначе быстрый рестарт воркера
-    // конфликтует с остатками (exit 127 / зависание на кадре 0).
+    // Normal exit: release the NGX resources, otherwise a quick worker restart
+    // conflicts with the leftovers (exit 127 / a hang on frame 0).
     CleanupVideoNgx();
     return 0;
 }

@@ -1,12 +1,13 @@
-"""Пиксели результата через общую память (OUTS) совпадают с пайповыми.
+"""Result pixels through shared memory (OUTS) match the ones from the pipe.
 
-Кадр записи на 4K весит 33 МБ, и прогон его через пайп стоил ~7 мс. Канал
-OUTS кладёт те же байты в секцию. Тест гоняет воркера напрямую и требует,
-чтобы один и тот же входной кадр дал БАЙТ В БАЙТ одинаковый результат по
-обоим путям — иначе «оптимизация» тихо портила бы запись.
+A recorded frame at 4K weighs 33 MB and pushing it through the pipe cost ~7 ms.
+The OUTS channel puts the same bytes into a section. This test drives the worker
+directly and demands that one and the same input frame produce a BYTE FOR BYTE
+identical result over both paths - otherwise the "optimisation" would quietly
+corrupt the recording.
 
-Проверяется ещё и переключение обратно: после OUTS с нулевыми размерами
-пиксели снова должны идти телом в пайп.
+Switching back is checked too: after an OUTS with zero sizes the pixels must
+travel inline through the pipe again.
 """
 import mmap
 import os
@@ -46,17 +47,18 @@ def read_exact(pipe, n: int) -> bytes:
     while len(buf) < n:
         chunk = pipe.read(n - len(buf))
         if not chunk:
-            raise EOFError(f"воркер закрыл stdout ({len(buf)} из {n})")
+            raise EOFError(f"the worker closed stdout ({len(buf)} of {n})")
         buf += chunk
     return buf
 
 
 def send_frame(worker, index: int, frame: np.ndarray, motion: np.ndarray,
                reset: int = 0):
-    """reset=1 — сбросить временную историю модели.
+    """reset=1 clears the temporal history of the model.
 
-    Без сброса один и тот же вход даёт РАЗНЫЙ выход: feature 18 накапливает
-    историю между кадрами. Сравнивать два кадра можно только после сброса.
+    Without the reset the same input gives a DIFFERENT output: feature 18
+    accumulates history between frames. Two frames can only be compared after
+    a reset.
     """
     worker.stdin.write(struct.pack(FRAME_FMT, FRAME_MAGIC, index,
                                    1 if (index == 0 or reset) else 0,
@@ -67,10 +69,10 @@ def send_frame(worker, index: int, frame: np.ndarray, motion: np.ndarray,
 
 
 def recv_result(worker, view):
-    """Вернуть (пиксели, откуда) — 'shm' или 'pipe'."""
+    """Return (pixels, source) - 'shm' or 'pipe'."""
     head = read_exact(worker.stdout, struct.calcsize(OUT_FMT))
     magic, _idx, ok, nbytes, ngx, _pts = struct.unpack(OUT_FMT, head)
-    assert magic == OUT_MAGIC, f"чужой ответ 0x{magic:08X}"
+    assert magic == OUT_MAGIC, f"foreign reply 0x{magic:08X}"
     assert ok, f"ok=0, ngx=0x{ngx:08X}"
     if nbytes == OUT_BYTES_IN_SHM:
         return np.array(view, copy=True), "shm"
@@ -80,7 +82,7 @@ def recv_result(worker, view):
 
 def main() -> int:
     if not WORKER_EXE.is_file():
-        print(f"ПРОВАЛ: воркер не найден: {WORKER_EXE}")
+        print(f"FAIL: worker not found: {WORKER_EXE}")
         return 1
     params = dict(PROFILES["Strong / Cinematic"])
     header = struct.pack(HEADER_FMT, VIDEO_MAGIC, W, H, WARMUP, 0, 0, 0,
@@ -106,19 +108,20 @@ def main() -> int:
         motion = np.zeros((H, W, 2), dtype=np.float16)
         frame = make_frame(7)
 
-        # 1. Пайповый путь — эталон
+        # 1. The pipe path - the reference
         pipe_px, src = None, None
         for i in range(2):
             send_frame(worker, i, frame, motion)
             pipe_px, src = recv_result(worker, view)
-        # Эталон — со сбросом истории, иначе сравнивать не с чем
+        # The reference is taken with the history reset, otherwise there is
+        # nothing to compare against
         send_frame(worker, 2, frame, motion, reset=1)
         pipe_px, src = recv_result(worker, view)
-        print(f"без OUTS: пиксели пришли через {src}")
+        print(f"without OUTS: the pixels arrived through {src}")
         if src != "pipe":
-            failures.append(f"до согласования пиксели пошли через {src}")
+            failures.append(f"before the handshake the pixels went through {src}")
 
-        # 2. Согласовать OUTS
+        # 2. Agree on OUTS
         worker.stdin.write(struct.pack(OUTS_FMT, OUTS_MAGIC, W, H, 0, 0,
                                        name.encode("ascii")))
         worker.stdin.flush()
@@ -126,24 +129,24 @@ def main() -> int:
         magic, ok, _r0, _r1, _pts = struct.unpack(OUTS_ACK_FMT, ack)
         print(f"OUTS: magic 0x{magic:08X}, ok={ok}")
         if magic != OUTS_ACK_MAGIC or not ok:
-            print("ПРОВАЛ: воркер не принял OUTS")
+            print("FAIL: the worker did not accept OUTS")
             return 1
 
-        # 3. Тот же кадр — теперь через секцию, и он обязан совпасть
+        # 3. The same frame - now through the section, and it must match
         send_frame(worker, 3, frame, motion, reset=1)
         shm_px, src = recv_result(worker, view)
-        print(f"с OUTS: пиксели пришли через {src}")
+        print(f"with OUTS: the pixels arrived through {src}")
         if src != "shm":
-            failures.append("после согласования пиксели всё ещё идут по пайпу")
+            failures.append("after the handshake the pixels still go down the pipe")
         elif pipe_px is not None:
             same = bool(np.array_equal(shm_px, pipe_px))
             diff = int((shm_px != pipe_px).sum())
-            print(f"совпадение с пайповым кадром: "
-                  f"{'бит в бит' if same else f'РАСХОЖДЕНИЕ, {diff} байт'}")
+            print(f"match with the pipe frame: "
+                  f"{'bit for bit' if same else f'MISMATCH, {diff} bytes'}")
             if not same:
-                failures.append(f"кадр через секцию отличается ({diff} байт)")
+                failures.append(f"the frame through the section differs ({diff} bytes)")
 
-        # 4. Выключение канала — снова пайп
+        # 4. Turning the channel off - back to the pipe
         worker.stdin.write(struct.pack(OUTS_FMT, OUTS_MAGIC, 0, 0, 0, 0,
                                        name.encode("ascii")))
         worker.stdin.flush()
@@ -151,11 +154,11 @@ def main() -> int:
         _m, ok, _r0, _r1, _p = struct.unpack(OUTS_ACK_FMT, ack)
         send_frame(worker, 4, frame, motion, reset=1)
         back_px, src = recv_result(worker, view)
-        print(f"после выключения: пиксели через {src}")
+        print(f"after switching off: the pixels came through {src}")
         if src != "pipe":
-            failures.append("канал не выключился, пиксели всё ещё в секции")
+            failures.append("the channel did not switch off, the pixels are still in the section")
         elif not np.array_equal(back_px, shm_px):
-            failures.append("кадр после выключения не совпал с предыдущим")
+            failures.append("the frame after switching off did not match the previous one")
     finally:
         try:
             worker.stdin.close()
@@ -168,15 +171,15 @@ def main() -> int:
         err = worker.stderr.read().decode("utf-8", "replace")
         for line in err.splitlines():
             if "outs" in line.lower():
-                print("лог воркера:", line.strip())
+                print("worker log:", line.strip())
         view = None
         mm.close()
 
     if failures:
         for f in failures:
-            print("ПРОВАЛ:", f)
+            print("FAIL:", f)
         return 1
-    print("OK: канал OUTS отдаёт те же байты и корректно выключается")
+    print("OK: the OUTS channel hands back the same bytes and switches off correctly")
     return 0
 
 

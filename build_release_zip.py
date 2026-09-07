@@ -1,10 +1,10 @@
-"""Сборка релизного архива NeuralScreen v1.1.0: git-файлы + артефакты + runtime."""
+"""Build the NeuralScreen v1.1.0 release archive: git files + artifacts + runtime."""
 import os
 import subprocess
 import zipfile
 from pathlib import Path
 
-# Скрипт обязан работать из любого каталога: все пути относительны git.
+# The script must work from any directory: every path is relative to git.
 BASE = Path(__file__).resolve().parent
 os.chdir(BASE)
 
@@ -15,18 +15,19 @@ extra = [
     "native/nvngx.dll",
     "native/nvngx_dlssnr.dll",
 ]
-# tcl/tk в архив не кладём: окно настроек на tkinter убрано, интерфейс
-# целиком живёт в оверлейном меню. Ничего из проекта tkinter не импортирует
-# (PIL/_tkinter_finder тянет его лениво и только для ImageTk).
+# tcl/tk stays out of the archive: the tkinter settings window is gone and the
+# whole interface lives in the overlay menu. Nothing in the project imports
+# tkinter (PIL/_tkinter_finder pulls it lazily and only for ImageTk).
 TK_SKIP = ("runtime/tcl/", "runtime/tcl86t.dll", "runtime/tk86t.dll",
            "runtime/_tkinter.pyd", "runtime/Lib/tkinter/")
 
-# Рантайм собирался под другие задачи и тащит пакеты, которых программа не
-# касается: веб-морду, таблицы, упаковщик. Проверено через sys.modules после
-# импорта всех модулей проекта — нужны только av, cv2, numpy, PIL, pygame,
-# pystray, dxcam, comtypes. Остальное вырезаем, это ~130 МБ до сжатия.
+# The runtime was assembled for other work and drags in packages the program
+# never touches: a web frontend, dataframes, a bundler. Checked through
+# sys.modules after importing every project module — only av, cv2, numpy, PIL,
+# pygame, pystray, dxcam and comtypes are needed. The rest is cut, ~130 MB
+# before compression.
 DROP_PACKAGES = {
-    # gradio и его окружение
+    # gradio and its surroundings
     "gradio", "gradio_client", "hf_gradio", "huggingface_hub", "hf_xet",
     "fastapi", "starlette", "uvicorn", "pydantic", "pydantic_core",
     "annotated_types", "annotated_doc", "typing_inspection",
@@ -36,13 +37,13 @@ DROP_PACKAGES = {
     "audioop_lts", "brotli", "_brotli", "yaml", "_yaml", "pyyaml",
     "semantic_version", "tomlkit", "typer", "click", "shellingham",
     "rich", "markdown_it", "markdown_it_py", "mdurl", "pygments",
-    # таблицы и время
+    # dataframes and time zones
     "pandas", "pytz", "tzdata", "dateutil", "python_dateutil",
-    # упаковщик
+    # bundler
     "PyInstaller", "pyinstaller", "_pyinstaller_hooks_contrib",
     "pyinstaller_hooks_contrib", "altgraph", "pefile", "peutils", "ordlookup",
     "psutil",
-    # менеджер пакетов конечному пользователю не нужен
+    # the end user has no use for a package manager
     "pip",
 }
 SP = "runtime/Lib/site-packages/"
@@ -53,7 +54,7 @@ def _drop_sitepackage(norm: str) -> bool:
         return False
     entry = norm[len(SP):].split("/", 1)[0]
     for name in DROP_PACKAGES:
-        # сам пакет, его .py-модуль, папка .libs и dist-info рядом
+        # the package itself, its .py module, its .libs folder and dist-info
         if (entry == name or entry == name + ".py" or entry == name + ".libs"
                 or entry.startswith(name + "-")):
             return True
@@ -64,8 +65,8 @@ def _skip(path: str) -> bool:
     norm = path.replace("\\", "/")
     if any(norm == p or norm.startswith(p) for p in TK_SKIP):
         return True
-    # .pyc/__pycache__ — мёртвый груз (~13 МБ в zip): pythonw собирает их
-    # на лету, дистрибутиву они не нужны.
+    # .pyc/__pycache__ is dead weight (~13 MB in the zip): pythonw regenerates
+    # them on the fly, a distribution does not need them.
     if norm.endswith(".pyc") or "/__pycache__/" in norm:
         return True
     return _drop_sitepackage(norm)
@@ -93,17 +94,17 @@ with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as z:
         if not os.path.isfile(f):
             print("MISSING:", f)
             continue
-        # config.json — ТОЛЬКО из git HEAD, а не с диска: на диске лежат
-        # персональные menu_offset/menu_scale/theme разработчика, в архив
-        # они не должны попадать. Сравнение с worktree НЕ используется:
-        # застейдженный персональный конфиг (git add) сделал бы diff
-        # чистым, и личные значения утекли бы в zip (R1 аудита #2).
+        # config.json comes ONLY from git HEAD, never from disk: the working
+        # copy holds the developer's personal menu_offset/menu_scale/theme and
+        # those must not ship. Comparing against the worktree is NOT enough —
+        # a staged personal config (git add) would make the diff clean and the
+        # personal values would leak into the zip (audit #2, R1).
         if f == "config.json":
             try:
                 data = subprocess.check_output(["git", "show", "HEAD:config.json"])
                 z.writestr(f, data)
             except subprocess.CalledProcessError:
-                # config.json ещё ни разу не коммитился — берём с диска.
+                # config.json has never been committed — take it from disk.
                 z.write(f, f)
             continue
         z.write(f, f)

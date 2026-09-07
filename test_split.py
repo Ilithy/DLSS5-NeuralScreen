@@ -1,12 +1,12 @@
-"""Проверка шторки «до/после»: левая часть кадра остаётся необработанной.
+"""Check the before/after wipe: the left part of the frame stays unprocessed.
 
-Воркер гоняется напрямую, без окна и без Desktop Duplication: цвет мы
-присылаем сами, поэтому «сырой захват» — это ровно наш входной кадр, и его
-можно сравнить с результатом попиксельно.
+The worker is driven directly, without a window and without Desktop
+Duplication: we send the colour ourselves, so the "raw capture" is exactly our
+input frame and it can be compared with the result pixel by pixel.
 
-Ожидание: слева от шторки выход совпадает со входом бит в бит, справа —
-отличается (там прошёл NGX), а на самой границе стоит полоса-разделитель
-цвета акцента.
+Expectation: to the left of the wipe the output matches the input bit for bit,
+to the right it differs (NGX ran there), and on the boundary itself there is a
+divider strip in the accent colour.
 """
 import struct
 import subprocess
@@ -22,14 +22,15 @@ from main import (FRAME_FLAG_SPLIT, FRAME_FLAG_WANT_PIXELS, FRAME_FMT,  # noqa: 
                   FRAME_MAGIC, HEADER_FMT, OUT_FMT, OUT_MAGIC, PROFILES,
                   VIDEO_MAGIC, WORKER_EXE)
 
-W, H = 1280, 720          # full-res кадр
-WORK_W, WORK_H = 1280, 720  # 1:1, без апскейла — сравнение проще
+W, H = 1280, 720          # full-res frame
+WORK_W, WORK_H = 1280, 720  # 1:1, no upscale - easier to compare
 SPLIT = 0.5
 WARMUP = 8
 
 
 def make_frame(seed: int) -> np.ndarray:
-    """Кадр с деталями: на плоском цвете NGX нечего менять, тест ослепнет."""
+    """A frame with detail: on flat colour NGX has nothing to change and the
+    test would go blind."""
     rng = np.random.default_rng(seed)
     yy, xx = np.mgrid[0:H, 0:W]
     frame = np.zeros((H, W, 4), dtype=np.uint8)
@@ -47,7 +48,7 @@ def read_exact(pipe, n: int) -> bytes:
     while len(buf) < n:
         chunk = pipe.read(n - len(buf))
         if not chunk:
-            raise EOFError(f"воркер закрыл stdout (получено {len(buf)} из {n})")
+            raise EOFError(f"the worker closed stdout (got {len(buf)} of {n})")
         buf += chunk
     return buf
 
@@ -67,9 +68,9 @@ def send_and_get(worker, index: int, frame: np.ndarray, motion: np.ndarray,
     head = read_exact(worker.stdout, struct.calcsize(OUT_FMT))
     magic, _idx, ok, nbytes, ngx, _pts = struct.unpack(OUT_FMT, head)
     if magic != OUT_MAGIC:
-        raise RuntimeError(f"чужой ответ 0x{magic:08X}")
+        raise RuntimeError(f"foreign reply 0x{magic:08X}")
     if not ok:
-        raise RuntimeError(f"воркер вернул ok=0, ngx=0x{ngx:08X}")
+        raise RuntimeError(f"the worker returned ok=0, ngx=0x{ngx:08X}")
     if nbytes == 0:
         return None
     return np.frombuffer(read_exact(worker.stdout, nbytes),
@@ -78,7 +79,7 @@ def send_and_get(worker, index: int, frame: np.ndarray, motion: np.ndarray,
 
 def main() -> int:
     if not WORKER_EXE.is_file():
-        print(f"ПРОВАЛ: воркер не найден: {WORKER_EXE}")
+        print(f"FAIL: worker not found: {WORKER_EXE}")
         return 1
     params = dict(PROFILES["Strong / Cinematic"])
     header = struct.pack(
@@ -99,53 +100,54 @@ def main() -> int:
         worker.stdin.flush()
         motion = np.zeros((WORK_H, WORK_W, 2), dtype=np.float16)
 
-        # Пара кадров без шторки — конвейер должен ожить и что-то менять
+        # A couple of frames without the wipe - the pipeline must come alive
+        # and change something
         frame = make_frame(1)
         plain = None
         for i in range(2):
             plain = send_and_get(worker, i, frame, motion, 0.0)
         if plain is None:
-            print("ПРОВАЛ: воркер не вернул пиксели")
+            print("FAIL: the worker returned no pixels")
             return 1
         changed = float((plain[..., :3] != frame[..., :3]).any(axis=2).mean())
-        print(f"без шторки NGX изменил {changed:.1%} пикселей")
+        print(f"without the wipe NGX changed {changed:.1%} of the pixels")
         if changed < 0.10:
-            failures.append(f"NGX почти ничего не менял ({changed:.1%}) — "
-                            f"тест не смог бы отличить половины")
+            failures.append(f"NGX changed almost nothing ({changed:.1%}) - "
+                            f"the test could not tell the halves apart")
 
         out = send_and_get(worker, 2, frame, motion, SPLIT)
         if out is None:
-            print("ПРОВАЛ: со шторкой пиксели не вернулись")
+            print("FAIL: no pixels came back with the wipe on")
             return 1
         split_x = int(W * SPLIT)
-        # Разделитель шириной lw стоит по обе стороны от границы, поэтому
-        # половины сравниваем в стороне от него (см. SplitCompose).
+        # The divider of width lw straddles the boundary, so the halves are
+        # compared away from it (see SplitCompose).
         lw = 3 if H >= 1400 else 2
         d0, d1 = split_x - lw // 2, split_x - lw // 2 + lw
         left_same = bool(np.array_equal(out[:, :d0, :3], frame[:, :d0, :3]))
         right_diff = float((out[:, d1:, :3] != frame[:, d1:, :3]).any(axis=2).mean())
-        print(f"шторка на x={split_x}: слева совпадает со входом — "
-              f"{'да' if left_same else 'НЕТ'}; справа изменено {right_diff:.1%}")
+        print(f"wipe at x={split_x}: the left side matches the input - "
+              f"{'yes' if left_same else 'NO'}; the right side changed {right_diff:.1%}")
         if not left_same:
             bad = int((out[:, :d0, :3] != frame[:, :d0, :3]).any(axis=2).sum())
-            failures.append(f"левая половина не равна входу ({bad} пикселей)")
+            failures.append(f"the left half does not equal the input ({bad} pixels)")
         if right_diff < 0.10:
-            failures.append(f"правая половина почти не отличается ({right_diff:.1%})")
+            failures.append(f"the right half barely differs ({right_diff:.1%})")
 
-        # Разделитель: все пиксели полосы должны быть ровно цвета акцента
+        # The divider: every pixel of the strip must be exactly the accent colour
         accent = np.array([0xD9, 0x77, 0x57], dtype=np.uint8)
         band = out[:, d0:d1, :3]
         on_accent = float((band == accent).all(axis=2).mean())
-        print(f"разделитель x={d0}..{d1 - 1}: цвета акцента {on_accent:.1%} полосы")
+        print(f"divider x={d0}..{d1 - 1}: accent colour over {on_accent:.1%} of the strip")
         if on_accent < 0.99:
             uniq = np.unique(band.reshape(-1, 3), axis=0)[:4]
-            failures.append(f"полоса-разделитель не того цвета "
-                            f"({on_accent:.1%}), первые цвета: {uniq.tolist()}")
+            failures.append(f"the divider strip is the wrong colour "
+                            f"({on_accent:.1%}), first colours: {uniq.tolist()}")
 
-        # И без шторки полосы быть не должно
+        # And with the wipe off there must be no strip at all
         plain_band = plain[:, d0:d1, :3]
         if float((plain_band == accent).all(axis=2).mean()) > 0.5:
-            failures.append("разделитель нарисован и при выключенной шторке")
+            failures.append("the divider is drawn even with the wipe switched off")
     finally:
         try:
             worker.stdin.close()
@@ -158,13 +160,13 @@ def main() -> int:
         err = worker.stderr.read().decode("utf-8", "replace")
         tail = [l for l in err.splitlines() if "pure" in l or "error" in l.lower()]
         if tail:
-            print("лог воркера:", " | ".join(tail[-3:]))
+            print("worker log:", " | ".join(tail[-3:]))
 
     if failures:
         for f in failures:
-            print("ПРОВАЛ:", f)
+            print("FAIL:", f)
         return 1
-    print("OK: шторка работает — слева вход бит в бит, справа обработанный кадр")
+    print("OK: the wipe works - input bit for bit on the left, the processed frame on the right")
     return 0
 
 

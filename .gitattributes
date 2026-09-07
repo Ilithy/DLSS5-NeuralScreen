@@ -1,11 +1,11 @@
-# Переводы строк фиксируем явно: на машине разработки core.autocrlf=true,
-# без этого файла рабочая копия после clone разъедется с тем, что в индексе.
+# Line endings are pinned explicitly: the dev machine has core.autocrlf=true,
+# and without this file the working copy diverges from the index after a clone.
 * text=auto eol=lf
 
-# Батники исполняет cmd.exe — им нужен CRLF
+# Batch files are run by cmd.exe - they need CRLF
 *.bat text eol=crlf
 
-# Бинарники не трогать
+# Do not touch binaries
 *.lib binary
 *.dll binary
 *.obj binary

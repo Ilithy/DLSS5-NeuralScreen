@@ -1,26 +1,27 @@
-"""Модель GPU и его архитектура — через nvapi, без внешних процессов.
+"""GPU model and architecture, through nvapi, with no external processes.
 
-Нужно интерфейсу: показать, на чём мы работаем, и поддерживается ли
-Neural Rendering. Архитектура берётся тем же путём, каким её узнаёт сама
-библиотека NVIDIA (nvapi_QueryInterface -> NvAPI_GPU_GetArchInfo), поэтому
-значение совпадает с тем, по которому она принимает решение.
+The interface needs it: to show what we are running on and whether Neural
+Rendering is available. The architecture is read the same way NVIDIA's own
+library reads it (nvapi_QueryInterface -> NvAPI_GPU_GetArchInfo), so the
+value matches the one it makes its decision on.
 
-Всё завёрнуто в try: без nvapi (не-NVIDIA машина, обрезанный драйвер)
-модуль просто вернёт пустые поля, а не уронит программу.
+Everything is wrapped in try: without nvapi (a non-NVIDIA machine, a
+stripped driver) the module returns empty fields instead of taking the
+program down.
 """
 from __future__ import annotations
 
 import ctypes
 
-# id функций nvapi — хеши их имён
+# nvapi function ids are hashes of their names
 _ID_INITIALIZE = 0x0150E828
 _ID_ENUM_GPUS = 0xE5AC921F
 _ID_GET_ARCH = 0xD8265D24
 _ID_GET_NAME = 0xCEEE8E9F
 
-# NV_GPU_ARCHITECTURE_ID: группа в старших разрядах. Neural Rendering
-# (feature 18) официально живёт только на Blackwell — см. NGXGpuArchitecture
-# в самой nvngx_dlssnr.dll.
+# NV_GPU_ARCHITECTURE_ID: the group lives in the high bits. Neural Rendering
+# (feature 18) officially requires Blackwell — see NGXGpuArchitecture inside
+# nvngx_dlssnr.dll itself.
 ARCH_NAMES = {
     0x170: ("Turing", "20xx"),
     0x180: ("Ampere", "30xx"),
@@ -40,7 +41,7 @@ class _ArchInfo(ctypes.Structure):
 
 
 def probe() -> dict:
-    """{name, arch, arch_group, family, official} — пустые поля при неудаче."""
+    """{name, arch, arch_group, family, official} — empty fields on failure."""
     out = {"name": "", "arch": "", "arch_group": 0, "family": "",
            "official": False}
     try:
@@ -69,8 +70,8 @@ def probe() -> dict:
             fn = ctypes.CFUNCTYPE(ctypes.c_int, ctypes.c_void_p,
                                   ctypes.c_char_p)(p_name)
             if fn(gpu, buf) == 0:
-                # «NVIDIA GeForce RTX 5070 Ti» -> «RTX 5070 Ti»: в строку меню
-                # длинное имя не влезает, а вендор там и не нужен.
+                # "NVIDIA GeForce RTX 5070 Ti" -> "RTX 5070 Ti": the full name
+                # does not fit the menu line, and the vendor adds nothing there.
                 name = buf.value.decode("ascii", "replace").strip()
                 for prefix in ("NVIDIA GeForce ", "NVIDIA "):
                     if name.startswith(prefix):
@@ -99,14 +100,18 @@ def probe() -> dict:
 
 
 def describe(info: dict) -> str:
-    """Строка для меню: «RTX 5070 Ti · Blackwell»."""
-    name = info.get("name") or "GPU неизвестен"
+    """Menu line: "RTX 5070 Ti · Blackwell". Empty when the GPU is unknown —
+    the menu shows its own placeholder rather than an English string in a
+    localised interface."""
+    name = info.get("name")
+    if not name:
+        return ""
     arch = info.get("arch")
     return f"{name} · {arch}" if arch else name
 
 
 if __name__ == "__main__":
     got = probe()
-    print(describe(got))
-    print(f"группа 0x{got['arch_group']:X}, официально поддерживается: "
-          f"{'да' if got['official'] else 'нет'}")
+    print(describe(got) or "unknown GPU")
+    print(f"group 0x{got['arch_group']:X}, officially supported: "
+          f"{'yes' if got['official'] else 'no'}")

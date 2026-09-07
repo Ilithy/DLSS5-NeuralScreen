@@ -1,12 +1,12 @@
-"""Прокрутка меню и растягивание по вертикали.
+"""Menu scrolling and vertical stretching.
 
-Панель выросла до ~1000 px по содержимому: на 1080p она занимала почти весь
-экран, и деться от этого было некуда. Теперь высоту можно тянуть за нижнюю
-кромку, а лишнее прокручивается.
+The panel grew to ~1000 px of content: at 1080p it took up almost the whole
+screen and there was no way around it. Now the height can be dragged by the
+bottom edge and the surplus scrolls.
 
-Проверяется: полоса появляется только когда есть куда прокручивать, колесо
-двигает содержимое и упирается в границы, невидимые (прокрученные) строки не
-принимают клик, высота зажимается содержимым и экраном.
+Checked: the bar appears only when there is somewhere to scroll, the wheel
+moves the content and stops at the boundaries, invisible (scrolled-away) rows
+do not take clicks, the height is clamped by the content and the screen.
 """
 import os
 import sys
@@ -59,112 +59,112 @@ def main() -> int:
     failures = []
     surf = pygame.Surface((1920, 1080))
 
-    # 1. Высокий экран: содержимое влезает, полосы нет
+    # 1. A tall screen: the content fits, there is no bar
     menu = build()
     menu.draw(pygame.Surface((1920, 2400)))
-    print(f"экран 2400: панель {menu.panel_rect.h}, содержимое "
-          f"{menu.content_height}, прокрутка {menu._max_scroll}")
+    print(f"screen 2400: panel {menu.panel_rect.h}, content "
+          f"{menu.content_height}, scroll {menu._max_scroll}")
     if menu._max_scroll != 0:
-        failures.append("на высоком экране появилась прокрутка")
+        failures.append("scrolling appeared on a tall screen")
     if menu._scroll_thumb.h != 0:
-        failures.append("полоса нарисована без нужды")
+        failures.append("the bar was drawn without need")
 
-    # 2. Пользователь задал высоту меньше содержимого
+    # 2. The user set a height smaller than the content
     menu = build()
     menu.draw(surf)
     full_h = menu.panel_rect.h
     menu.user_height = full_h // 2
     menu.draw(surf)
-    print(f"высота {full_h} -> {menu.panel_rect.h}, "
-          f"прокрутка до {menu._max_scroll}, полоса {menu._scroll_thumb.h} px")
+    print(f"height {full_h} -> {menu.panel_rect.h}, "
+          f"scroll up to {menu._max_scroll}, bar {menu._scroll_thumb.h} px")
     if menu.panel_rect.h >= full_h:
-        failures.append("высота не уменьшилась")
+        failures.append("the height did not shrink")
     if menu._max_scroll <= 0 or menu._scroll_thumb.h <= 0:
-        failures.append("полоса не появилась при обрезанной высоте")
+        failures.append("the bar did not appear with a clipped height")
 
-    # 3. Колесо двигает и упирается
+    # 3. The wheel moves and stops at the ends
     wheel(menu, -3)
     menu.draw(surf)
     after_down = menu.scroll
-    print(f"колесо вниз: прокрутка {after_down}")
+    print(f"wheel down: scroll {after_down}")
     if after_down <= 0:
-        failures.append("колесо вниз не сдвинуло содержимое")
+        failures.append("the wheel down did not move the content")
     for _ in range(40):
         wheel(menu, -3)
     menu.draw(surf)
     if menu.scroll != menu._max_scroll:
-        failures.append(f"прокрутка не упёрлась в конец "
+        failures.append(f"the scroll did not stop at the end "
                         f"({menu.scroll} != {menu._max_scroll})")
     for _ in range(60):
         wheel(menu, 3)
     menu.draw(surf)
     if menu.scroll != 0:
-        failures.append(f"прокрутка не вернулась в начало ({menu.scroll})")
+        failures.append(f"the scroll did not return to the top ({menu.scroll})")
 
-    # 4. Прокрученная за верх строка не принимает клик
+    # 4. A row scrolled above the top does not take a click
     menu.scroll = menu._max_scroll
     menu.draw(surf)
-    # Иконки шапки лежат выше области прокрутки НАМЕРЕННО и кликабельны —
-    # они не часть прокручиваемого содержимого.
+    # The header icons sit above the scroll area DELIBERATELY and are
+    # clickable - they are not part of the scrolled content.
     above = [i for i in menu.items
              if i.rect.bottom < menu._viewport.top and i.kind != "icon"]
-    print(f"строк уехало под заголовок: {len(above)}")
+    print(f"rows moved under the title bar: {len(above)}")
     if above:
         target = above[0]
         got = menu.hit(target.rect.center)
         if got is not None:
-            failures.append(f"клик попал в невидимую строку {got.key}")
+            failures.append(f"the click landed in the invisible row {got.key}")
     else:
-        print("  (нечего проверять: ни одна строка не ушла целиком)")
+        print("  (nothing to check: no row moved out entirely)")
 
-    # 5. Видимая строка клик принимает
+    # 5. A visible row does take a click
     inside = [i for i in menu.items
               if menu._viewport.collidepoint(i.rect.center)]
     if not inside:
-        failures.append("в видимой области не осталось ни одной строки")
+        failures.append("no row is left in the visible area")
     elif menu.hit(inside[0].rect.center) is None:
-        failures.append("видимая строка не принимает клик")
+        failures.append("a visible row does not take a click")
 
-    # 5b. Иконка шапки кликается, хотя лежит вне области прокрутки
+    # 5b. A header icon is clickable even though it lies outside the scroll area
     icons = [i for i in menu.items if i.kind == "icon"]
     if not icons:
-        failures.append("в шапке нет иконок")
+        failures.append("there are no icons in the header")
     else:
         got = menu.hit(icons[0].rect.center)
-        print(f"иконка {icons[0].key}: клик "
-              f"{'проходит' if got is not None else 'НЕ проходит'}")
+        print(f"icon {icons[0].key}: the click "
+              f"{'lands' if got is not None else 'does NOT land'}")
         if got is None:
-            failures.append("иконка шапки не принимает клик")
+            failures.append("the header icon does not take a click")
 
-    # 5c. Иконки шапки не едут вместе с прокруткой
+    # 5c. The header icons do not travel with the scroll
     for pos in (0, menu._max_scroll // 2, menu._max_scroll):
         menu.scroll = pos
         menu.draw(surf)
         for ic in [i for i in menu.items if i.kind == "icon"]:
             if not menu._title_bar.contains(ic.rect):
-                failures.append(f"иконка {ic.key} уехала из шапки "
-                                f"при прокрутке {pos}: {tuple(ic.rect)} "
-                                f"вне {tuple(menu._title_bar)}")
+                failures.append(f"icon {ic.key} drifted out of the header "
+                                f"at scroll {pos}: {tuple(ic.rect)} "
+                                f"outside {tuple(menu._title_bar)}")
                 break
-    print("иконки шапки при прокрутке: на месте"
-          if not any("уехала" in f for f in failures) else "иконки шапки: УЕХАЛИ")
+    print("header icons while scrolling: in place"
+          if not any("drifted" in f for f in failures) else "header icons: DRIFTED")
     menu.scroll = 0
     menu.draw(surf)
 
-    # 6. Высоту не растянуть выше содержимого
+    # 6. The height cannot be stretched past the content
     menu.user_height = menu.content_height * 3
     menu.draw(surf)
-    print(f"запрошено {menu.content_height * 3}, получено {menu.panel_rect.h} "
-          f"(содержимое {menu.content_height})")
+    print(f"requested {menu.content_height * 3}, got {menu.panel_rect.h} "
+          f"(content {menu.content_height})")
     if menu.panel_rect.h > menu.content_height:
-        failures.append("панель выше содержимого — внизу пустота")
+        failures.append("the panel is taller than the content - empty space below")
 
     pygame.quit()
     if failures:
         for f in failures:
-            print("ПРОВАЛ:", f)
+            print("FAIL:", f)
         return 1
-    print("OK: прокрутка, зажим высоты и попадания работают")
+    print("OK: scrolling, the height clamp and hit testing all work")
     return 0
 
 

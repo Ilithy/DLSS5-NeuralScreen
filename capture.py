@@ -1,10 +1,10 @@
-"""ScreenCapture — захват рабочего стола для прототипа DLSS 5 NR (desktop-nr).
+"""ScreenCapture - desktop capture for the DLSS 5 NR prototype (desktop-nr).
 
-Бэкенд: DXCamera (Windows Desktop Duplication API, DXGI).
-Кадры отдаются как np.ndarray shape (H, W, 4) dtype uint8 в RGBA
-(конвертацию из BGRA делает сам dxcam, в переиспользуемый буфер).
+Backend: DXCamera (Windows Desktop Duplication API, DXGI).
+Frames come back as np.ndarray shape (H, W, 4) dtype uint8 in RGBA (dxcam
+does the BGRA conversion itself, into a reusable buffer).
 
-Пример:
+Example:
     cap = ScreenCapture(monitor_idx=0)
     frame = cap.grab()          # (2160, 3840, 4) uint8 RGBA
     cap.close()
@@ -19,11 +19,11 @@ import numpy as np
 
 
 def list_monitors() -> list[tuple[int, int, int]]:
-    """Список мониторов: [(idx, w, h), ...] через EnumDisplayMonitors.
+    """Monitors as [(idx, w, h), ...] via EnumDisplayMonitors.
 
-    Индекс совпадает с output_idx dxcam (порядок вывода). DPI-awareness
-    должна быть активна в вызывающем процессе (иначе размеры в
-    масштабированных пикселях).
+    The index is assumed to match dxcam's output_idx (output order). DPI
+    awareness must already be set in the calling process, otherwise the sizes
+    come back in scaled pixels.
     """
     monitors: list[tuple[int, int, int, int]] = []
 
@@ -40,53 +40,54 @@ def list_monitors() -> list[tuple[int, int, int]]:
 
 
 class ScreenCapture:
-    """Захват монитора через DXCamera (Desktop Duplication API)."""
+    """Monitor capture through DXCamera (Desktop Duplication API)."""
 
     def __init__(self, monitor_idx: int = 0):
         import dxcam
 
         self._dxcam = dxcam
         self.monitor_idx = monitor_idx
-        # output_color="RGBA": конвертацию BGRA→RGBA делает dxcam в свой
-        # переиспользуемый буфер. Раньше это делал cv2.cvtColor здесь же —
-        # лишние 33 МБ аллокации на каждый 4K-кадр.
+        # output_color="RGBA": dxcam converts BGRA->RGBA into its own reusable
+        # buffer. This used to be a cv2.cvtColor right here — an extra 33 MB
+        # allocated for every 4K frame.
         self._camera = dxcam.create(
             output_idx=monitor_idx,
             output_color="RGBA",
         )
         if self._camera is None:
             raise RuntimeError(
-                f"dxcam.create(output_idx={monitor_idx}) вернул None — "
-                "монитор не найден или захват недоступен"
+                f"dxcam.create(output_idx={monitor_idx}) returned None — "
+                "monitor not found or capture unavailable"
             )
-        # Разрешение монитора (W, H) из описания вывода
+        # Monitor resolution (W, H) from the output description
         output = getattr(self._camera, "_output", None)
         res = getattr(output, "resolution", None)
         if res is not None:
             self.resolution = (int(res[0]), int(res[1]))
         else:
-            # Фолбэк: первый кадр
+            # Fallback: the first frame
             probe = self._camera.grab()
             if probe is None:
-                raise RuntimeError("Не удалось получить первый кадр для определения разрешения")
+                raise RuntimeError(
+                    "could not grab a first frame to determine the resolution")
             self.resolution = (probe.shape[1], probe.shape[0])
 
     def grab(self) -> np.ndarray:
-        """Захватить текущий кадр монитора.
+        """Grab the monitor's current frame.
 
         Returns:
-            np.ndarray shape (H, W, 4) dtype uint8, каналы RGBA,
-            C-contiguous (frombuffer/tobytes без копии).
-            Может вернуть None, если кадр ещё не готов (редко).
+            np.ndarray shape (H, W, 4) dtype uint8, RGBA channels,
+            C-contiguous (frombuffer/tobytes without a copy).
+            May return None when the frame is not ready yet (rare).
 
-        Каждый grab() отдаёт отдельный массив: соседние кадры не делят
-        память (проверено — _work/test_capture_rgba.py), так что кадр
-        можно держать через итерацию цикла.
+        Every grab() hands back a separate array: neighbouring frames do not
+        share memory (checked — _work/test_capture_rgba.py), so a frame can be
+        held across a loop iteration.
         """
         return self._camera.grab()
 
     def close(self) -> None:
-        """Освободить ресурсы захвата."""
+        """Release the capture resources."""
         if self._camera is not None:
             self._camera.release()
             self._camera = None

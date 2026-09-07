@@ -1,17 +1,17 @@
-"""DLSS 5 Desktop NR — интеграционный каркас прототипа.
+"""DLSS 5 Desktop NR - the integration skeleton of the prototype.
 
-Петля: захват рабочего стола (capture.ScreenCapture) → motion guides
-(guides.TemporalGuideGenerator) → NGX-воркер (native/nvngx.dll,
-режим --live) → вывод на весь экран (display.Display).
+The loop: desktop capture (capture.ScreenCapture) -> motion guides
+(guides.TemporalGuideGenerator) -> the NGX worker (native/nvngx.dll in
+--live mode) -> fullscreen output (display.Display).
 
-Управление (глобальные хоткеи, RegisterHotKey — нажатие не доходит до
-активного приложения, см. hotkeys.py):
-    F9            — NR вкл/выкл
-    F8            — окно настроек
-    Ctrl+Alt+Up/Down — масштаб обработки
-    Ctrl+Alt+Q    — выход (он же пункт «Выход» в трее)
+Controls (global hotkeys, RegisterHotKey - the keypress never reaches the
+active application, see hotkeys.py):
+    F9            - NR on/off
+    F8            - the settings menu
+    Ctrl+Alt+Up/Down - processing scale
+    Ctrl+Alt+Q    - quit (the same as "Exit" in the tray)
 
-Запуск:
+Run:
     python main.py [--config config.json]
 """
 
@@ -31,29 +31,31 @@ import time
 import uuid
 from pathlib import Path
 
-# --- Лог в файл вместо консоли ------------------------------------------
-# Релиз запускается через pythonw.exe (без консольного окна): stdout/stderr
-# там равны None, и любой print упал бы. Перенаправляем их в NeuralScreen.log
-# рядом с main.py — все print продолжают работать, пользователь видит лог
-# файлом, а не окном. Ошибки старта (нет DLL и т.п.) дополнительно
-# показываются messagebox-ом (см. _fatal_dialog внизу).
+# --- Log to a file instead of the console --------------------------------
+# The release is launched through pythonw.exe (no console window): stdout and
+# stderr are None there and any print would fail. We redirect them into
+# NeuralScreen.log next to main.py - every print keeps working and the user
+# reads the log as a file rather than a window. Startup errors (a missing DLL
+# and the like) are additionally shown in a message box (see the bottom of
+# this file).
 LOG_PATH = Path(__file__).resolve().parent / "NeuralScreen.log"
 
 
 def _init_logging() -> None:
-    """Перенаправить stdout/stderr в NeuralScreen.log (utf-8)."""
+    """Redirect stdout/stderr into NeuralScreen.log (utf-8)."""
     try:
         log_file = open(LOG_PATH, "a", encoding="utf-8", buffering=1)
         sys.stdout = log_file
         sys.stderr = log_file
     except Exception:
-        pass  # не получилось — print'ы просто пропадут, не упадём
+        pass  # it did not work - the prints just vanish, we do not crash
 
-# DPI-awareness ДО любых импортов (cv2, capture, display, tray): если какой-то
-# модуль выставит awareness раньше (например, dxcam вызывает
-# SetProcessDpiAwareness(2) при создании Output), повторный вызов вернёт
-# ERROR_ACCESS_DENIED и окно pygame будет масштабировано (125% → 3072x1728).
-# PER_MONITOR_AWARE_V2 = -4. Ошибки игнорируем: display.py дублирует вызов.
+# DPI awareness BEFORE any import (cv2, capture, display, tray): if some
+# module sets awareness first (dxcam, for instance, calls
+# SetProcessDpiAwareness(2) when creating an Output), a second call returns
+# ERROR_ACCESS_DENIED and the pygame window ends up scaled (125% ->
+# 3072x1728). PER_MONITOR_AWARE_V2 = -4. Errors are ignored: display.py
+# repeats the call.
 try:
     ctypes.windll.user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4))
 except Exception:
@@ -65,13 +67,13 @@ except Exception:
         except Exception:
             pass
 
-# Embed-python (python313._pth) не добавляет cwd в sys.path — добавляем папку
-# скрипта вручную, чтобы работали локальные модули (capture, display, guides).
+# Embedded Python (python313._pth) does not add cwd to sys.path - we add the
+# script folder by hand so the local modules work (capture, display, guides).
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import cv2
 import numpy as np
-import pygame  # HUD-наложение на записываемый кадр (image.frombuffer)
+import pygame  # HUD overlay on the recorded frame (image.frombuffer)
 
 from capture import ScreenCapture, list_monitors
 from display import Display
@@ -82,13 +84,13 @@ from recorder import VideoRecorder
 from gpuinfo import describe as gpu_describe, probe as gpu_probe
 from i18n import STRINGS as UI_STRINGS
 
-# Страница проекта: README, хоткеи, требования. Открывается кнопкой в меню.
+# The project page: README, hotkeys, requirements. Opened from the menu.
 REPO_URL = "https://github.com/perseval-BLR/DLSS5-NeuralScreen"
 from tray import TrayController
 
-# --- Протокол воркера (совпадает с dlss5_converter/core.py) --------------
-# v3 (magic D5V3): заголовок с full_w/full_h — воркер сам ресайзит кадры
-# на GPU (NGX Upscaling), Python не ресайзит на CPU.
+# --- Worker protocol (matches dlss5_converter/core.py) -------------------
+# v3 (magic D5V3): a header with full_w/full_h - the worker resizes the frames
+# on the GPU itself (NGX Upscaling), Python does not resize on the CPU.
 VIDEO_MAGIC = 0x33563544  # 'DV5' v3
 FRAME_MAGIC = 0x314D5246  # 'FMR1'
 OUT_MAGIC = 0x3154554F    # 'OUT1'
@@ -100,73 +102,77 @@ HEADER_FMT = "<10I4f2I"   # magic, w, h, warmup, frame_count, profile, preset,
 FRAME_FMT = "<4Iq"        # magic, index, reset, reserved, pts
 OUT_FMT = "<5Iq"          # magic, index, ok, bytes, ngx_result, pts
 
-# SHMI: кадр передаётся через общую память, в пайп уходит только заголовок
-# FRM1 с флагом FRAME_FLAG_SHM. Воркер грузит пиксели в текстуру прямо из
-# маппинга — исчезают две копии 33 МБ (запись в пайп и чтение из него).
+# SHMI: the frame travels through shared memory and only the FRM1 header with
+# the FRAME_FLAG_SHM flag goes down the pipe. The worker loads the pixels into
+# a texture straight from the mapping - two 33 MB copies disappear (the write
+# into the pipe and the read out of it).
 SHM_MAGIC = 0x494D4853      # 'SHMI'
 SHM_ACK_MAGIC = 0x4B434153  # 'SACK'
-SHM_FMT = "<4Iq64s"         # magic, color_bytes, motion_bytes, flags, pts, name (88 байт)
-SHM_ACK_FMT = "<4Iq"        # magic, ok, reserved0, reserved1, pts (24 байта)
-FRAME_FLAG_SHM = 0x1         # бит в поле reserved заголовка кадра
-FRAME_FLAG_WANT_PIXELS = 0x2  # вернуть пиксели даже в режиме окна (для скриншота)
-FRAME_FLAG_MOTION_SMALL = 0x4  # поле движения в разрешении потока, растянет воркер
-FRAME_FLAG_SPLIT = 0x20        # шторка до/после; позиция — в старших 16 битах reserved
+SHM_FMT = "<4Iq64s"         # magic, color_bytes, motion_bytes, flags, pts, name (88 bytes)
+SHM_ACK_FMT = "<4Iq"        # magic, ok, reserved0, reserved1, pts (24 bytes)
+FRAME_FLAG_SHM = 0x1         # a bit in the reserved field of the frame header
+FRAME_FLAG_WANT_PIXELS = 0x2  # return the pixels even in window mode (for a screenshot)
+FRAME_FLAG_MOTION_SMALL = 0x4  # motion field at flow resolution, upscaled by the worker
+FRAME_FLAG_SPLIT = 0x20        # before/after wipe; position in the high 16 bits of reserved
 
-# MOTS: поле движения приходит в разрешении оптического потока (~320x180), а
-# растягивает его до work-разрешения воркер на GPU. С CPU снимается resize и
-# конвертация 6 миллионов значений — по замерам ~8 мс на кадр.
+# MOTS: the motion field arrives at the optical-flow resolution (~320x180) and
+# the worker upscales it to the work resolution on the GPU. The CPU is spared
+# a resize and the conversion of 6 million values - ~8 ms per frame measured.
 MOTION_MAGIC = 0x53544F4D      # 'MOTS'
 MOTION_ACK_MAGIC = 0x4B43414D  # 'MACK'
-MOTION_FMT = "<4Iq"            # magic, width, height, flags, pts (24 байта)
+MOTION_FMT = "<4Iq"            # magic, width, height, flags, pts (24 bytes)
 MOTION_ACK_FMT = "<4Iq"
 
 
-# WNDO: воркер сам показывает результат в своём окне поверх экрана. Пока окно
-# поднято, OUT1 приходит с bytes=0 — пиксели не возвращаются в Python вообще,
-# исчезают readback на стороне воркера, обратный пайп и blit в pygame.
+# WNDO: the worker shows the result itself, in its own window above the
+# screen. While that window is up OUT1 arrives with bytes=0 - no pixels come
+# back to Python at all, and the worker's readback, the reverse pipe and the
+# pygame blit all disappear.
 WINDOW_MAGIC = 0x4F444E57      # 'WNDO'
 WINDOW_ACK_MAGIC = 0x4B434157  # 'WACK'
-WINDOW_FMT = "<4Iq"            # magic, width, height, flags, pts (24 байта)
+WINDOW_FMT = "<4Iq"            # magic, width, height, flags, pts (24 bytes)
 WINDOW_ACK_FMT = "<4Iq"        # magic, ok, reserved0, reserved1, pts
-WINDOW_FLAG_CAPTURABLE = 0x1   # отладка: НЕ прятать окно от захвата экрана
-WINDOW_FLAG_DISABLE = 0x2      # закрыть окно, вернуться к передаче пикселей
+WINDOW_FLAG_CAPTURABLE = 0x1   # debug: do NOT hide the window from screen capture
+WINDOW_FLAG_DISABLE = 0x2      # close the window, go back to sending pixels
 
-# RNSZ: смена work-разрешения на лету (без рестарта процесса воркера).
-# Воркер пересоздаёт NGX feature по новым размерам и отвечает RACK.
+# RNSZ: change the work resolution on the fly (without restarting the worker
+# process). The worker recreates the NGX feature at the new sizes and answers
+# RACK.
 RESIZE_MAGIC = 0x5A534E52  # 'RNSZ'
 RESIZE_ACK_MAGIC = 0x4B434152  # 'RACK'
-RESIZE_FMT = "<10I4f2I"   # та же раскладка, что HEADER_FMT (magic вместо VIDEO_MAGIC)
-RACK_FMT = "<4Iq"         # magic, ok, ngx_result, reserved, pts (24 байта)
+RESIZE_FMT = "<10I4f2I"   # the same layout as HEADER_FMT (magic instead of VIDEO_MAGIC)
+RACK_FMT = "<4Iq"         # magic, ok, ngx_result, reserved, pts (24 bytes)
 
-# DDA1: воркер сам захватывает экран (Desktop Duplication) — цвет идёт
-# напрямую в GPU-текстуру, Python больше не передаёт 33 МБ кадра. Кадры
-# FRM1 уходят с флагом FRAME_FLAG_NO_COLOR: только motion, без цвета.
+# DDA1: the worker captures the screen itself (Desktop Duplication) - the
+# colour goes straight into a GPU texture and Python no longer ships 33 MB per
+# frame. FRM1 frames go out with FRAME_FLAG_NO_COLOR: motion only, no colour.
 DDA_MAGIC = 0x31414444  # 'DDA1'
 DDA_ACK_MAGIC = 0x4B434144  # 'DACK'
-DDA_FMT = "<4Iq"        # magic, width, height, flags, pts (24 байта)
+DDA_FMT = "<4Iq"        # magic, width, height, flags, pts (24 bytes)
 DDA_ACK_FMT = "<4Iq"    # magic, ok, reserved0, reserved1, pts
-FRAME_FLAG_NO_COLOR = 0x8  # в DDA-режиме: цвет не шлём (воркер берёт сам)
-FRAME_FLAG_BYPASS = 0x10  # NR OFF: пропустить NGX, показать сырой захват
+FRAME_FLAG_NO_COLOR = 0x8  # in DDA mode: we send no colour (the worker takes it)
+FRAME_FLAG_BYPASS = 0x10  # NR OFF: skip NGX, show the raw capture
 
-# GRAY: воркер пишет luminance (даунсэмпл экрана, ~320x180) в обратный
-# маппинг Python — для оптического потока guides. В DDA-режиме это
-# заменяет dxcam-захват: gray приходит прямо с GPU.
-# OUTS: обратный канал под ПИКСЕЛИ. Кадр записи на 4K весит 33 МБ, и через
-# пайп это ~7 мс на кадр (замерено: recv 17.4 -> 31.6 мс при включении
-# записи). Через общую память те же байты по трубе не идут.
+# GRAY: the worker writes luminance (a downsample of the screen, ~320x180)
+# into a reverse mapping for Python - for the guides' optical flow. In DDA
+# mode this replaces the dxcam grab: the gray frame comes straight off the GPU.
+# OUTS: the reverse channel for PIXELS. A 4K recorded frame weighs 33 MB, and
+# through the pipe that is ~7 ms per frame (measured: recv 17.4 -> 31.6 ms
+# when recording is switched on). Through shared memory those bytes never
+# travel down the pipe.
 OUTS_MAGIC = 0x5354554F      # 'OUTS'
 OUTS_ACK_MAGIC = 0x324B414F  # 'OAK2'
-OUTS_FMT = "<4Iq64s"         # как GRAY_FMT: magic, w, h, flags, pts, name
+OUTS_FMT = "<4Iq64s"         # like GRAY_FMT: magic, w, h, flags, pts, name
 OUTS_ACK_FMT = "<4Iq"
-# VideoResultHeader.bytes: пиксели лежат в секции OUTS, а не в пайпе.
+# VideoResultHeader.bytes: the pixels are in the OUTS section, not in the pipe.
 OUT_BYTES_IN_SHM = 0xFFFFFFFF
 
 GRAY_MAGIC = 0x59415247  # 'GRAY'
 GRAY_ACK_MAGIC = 0x4B434147  # 'GAK'
-GRAY_FMT = "<4Iq64s"    # magic, width, height, flags, pts, name (88 байт)
+GRAY_FMT = "<4Iq64s"    # magic, width, height, flags, pts, name (88 bytes)
 GRAY_ACK_FMT = "<4Iq"   # magic, ok, reserved0, reserved1, pts
 
-# --- Профили DLSS 5 NR (порядок полей как в конвертере) -------------------
+# --- DLSS 5 NR profiles (field order as in the converter) -----------------
 PROFILES = {
     "Faithful": dict(profile=0, preset=0, style=0, auto_mask=0, ui_correction=0,
                      intensity=0.70, local_tone=0.75, local_structure=0.75, skin_structure=-1.0),
@@ -180,23 +186,23 @@ PROFILES = {
 
 BASE_DIR = Path(__file__).resolve().parent
 NATIVE_DIR = BASE_DIR / "native"
-# ВАЖНО: NGX Core возвращает FAIL_PlatformError на Init_Ext для ЛЮБОГО имени
-# процесса, кроме nvngx.dll (проверено экспериментально; merserk-0.1 собирает
-# воркер так же — /Fe:bin\runtime\nvngx.dll). Имя файла — часть контракта NGX.
+# IMPORTANT: NGX Core returns FAIL_PlatformError from Init_Ext for ANY process
+# name other than nvngx.dll (verified experimentally; merserk-0.1 builds its
+# worker the same way). The file name is part of the NGX contract.
 WORKER_EXE = NATIVE_DIR / "nvngx.dll"
 
-FPS_LOG_INTERVAL = 2.0  # сек, лог FPS в консоль
-PERF_LOG_INTERVAL = 5.0  # сек, лог средних таймингов этапов конвейера
+FPS_LOG_INTERVAL = 2.0  # seconds, FPS log to the console
+PERF_LOG_INTERVAL = 5.0  # seconds, log of the mean pipeline stage timings
 PERF_KEYS = ("grab", "resize_full", "guides", "send", "recv", "show")
 
-# Глобальные хоткеи живут в hotkeys.py (RegisterHotKey). Раскладка и
-# причины выбора комбинаций — там же, в docstring модуля.
+# The global hotkeys live in hotkeys.py (RegisterHotKey). The layout and the
+# reasons behind the combinations are in that module's docstring.
 WORK_SCALE_STEP = 0.05
 WORK_SCALE_MIN = 0.1
 WORK_SCALE_MAX = 1.0
-# NGX feature 18 молчит на 3840x2160 (проверено изолированно: воркер
-# зависает на кадре 0 при work=4K, и в legacy, и в upscale-режиме).
-# Ограничиваем work-разрешение 2560x1440 — гарантированно работает.
+# NGX feature 18 goes silent at 3840x2160 (verified in isolation: the worker
+# hangs on frame 0 with work=4K, both in legacy and in upscale mode).
+# We cap the work resolution at 2560x1440 - that is known to work.
 WORK_MAX_W = 2560
 WORK_MAX_H = 1440
 
@@ -204,8 +210,8 @@ DEFAULT_LANG = "en"
 
 
 def _work_size(width: int, height: int, scale: float) -> tuple[int, int]:
-    """Work-разрешение NGX: scale от full, но не больше WORK_MAX_W/H
-    (NGX молчит на 4K — ограничение проверено изолированно)."""
+    """The NGX work resolution: scale of full, but no larger than
+    WORK_MAX_W/H (NGX goes silent at 4K - the limit verified in isolation)."""
     w = max(64, int(round(width * scale / 2) * 2))
     h = max(64, int(round(height * scale / 2) * 2))
     if w > WORK_MAX_W or h > WORK_MAX_H:
@@ -216,18 +222,18 @@ def _work_size(width: int, height: int, scale: float) -> tuple[int, int]:
 
 
 class SharedFrameBuffer:
-    """Общая память под входной кадр воркера (команда SHMI).
+    """Shared memory for the worker's input frame (the SHMI command).
 
-    Раскладка фиксирована и НЕ зависит от work_scale:
-        [0 .. color_capacity)                — RGBA8 full-res
-        [color_capacity .. +motion_capacity) — motion float16 work-res
-    Смещение motion постоянно, поэтому смена разрешения (RNSZ) не требует
-    перевыговаривания SHMI — меняется только используемая длина.
+    The layout is fixed and does NOT depend on work_scale:
+        [0 .. color_capacity)                - RGBA8 full-res
+        [color_capacity .. +motion_capacity) - motion float16 work-res
+    The motion offset is constant, so a resolution change (RNSZ) needs no
+    renegotiation of SHMI - only the used length changes.
 
-    ИНВАРИАНТ: слот один. Нельзя класть кадр N+1, пока воркер не вернул
-    результат кадра N, иначе перезапишем пиксели у него под руками. Цикл
-    main строго парный (send -> recv), так что инвариант соблюдается.
-    Появится конвейеризация — понадобится второй слот.
+    INVARIANT: there is one slot. Frame N+1 must not be placed until the
+    worker has returned the result for frame N, otherwise we overwrite the
+    pixels under its hands. The main loop is strictly paired (send -> recv),
+    so the invariant holds. Add pipelining and a second slot will be needed.
     """
 
     def __init__(self, full_w: int, full_h: int,
@@ -235,23 +241,24 @@ class SharedFrameBuffer:
         self.color_capacity = full_w * full_h * 4
         self.motion_capacity = max_work_w * max_work_h * 4
         self.size = self.color_capacity + self.motion_capacity
-        # Имя секции: ASCII, уникальное на процесс — воркер открывает его
-        # через OpenFileMappingA в том же сеансе Windows.
+        # The section name: ASCII, unique per process - the worker opens it
+        # through OpenFileMappingA in the same Windows session.
         self.name = f"NeuralScreen_{os.getpid()}_{uuid.uuid4().hex[:8]}"
         self._mm = mmap.mmap(-1, self.size, tagname=self.name)
         self._buf = np.ndarray((self.size,), dtype=np.uint8, buffer=self._mm)
-        self.negotiated = False  # выставляет start_worker после SACK
+        self.negotiated = False  # set by start_worker after SACK
 
-        # --- Обратный канал: gray (luminance) для guides в DDA-режиме ---
-        # Воркер пишет сюда даунсэмпл экрана (320x180 = размер потока),
-        # Python читает его вместо dxcam-захвата для DISOpticalFlow.
+        # --- Reverse channel: gray (luminance) for guides in DDA mode ---
+        # The worker writes a downsample of the screen here (320x180 = the
+        # flow size) and Python reads it instead of the dxcam grab for
+        # DISOpticalFlow.
         self.gray_w, self.gray_h = 0, 0
         self.gray_bytes = 0
         self.gray_name = f"NeuralScreenGray_{os.getpid()}_{uuid.uuid4().hex[:6]}"
         self._gray_mm: mmap.mmap | None = None
         self._gray_buf: np.ndarray | None = None  # (gray_bytes,) uint8
 
-        # --- Обратный канал: пиксели результата (запись/скриншот) ---
+        # --- Reverse channel: the result pixels (recording/screenshot) ---
         self.out_w, self.out_h = 0, 0
         self.out_bytes = 0
         self.out_name = ""
@@ -259,12 +266,13 @@ class SharedFrameBuffer:
         self._out_buf: np.ndarray | None = None  # (h, w, 4) uint8
 
     def open_gray(self, w: int, h: int) -> None:
-        """Открыть gray-секцию размером w*h (создать, если не была).
+        """Open a gray section of w*h bytes (create it if there was none).
 
-        При смене размера имя секции МЕНЯЕТСЯ: воркер держит старый handle,
-        и CreateFileMapping с тем же именем вернул бы старую секцию — mmap
-        большего размера упал бы, и канал тихо умер (H2 аудита).
-        send_gray() передаёт воркеру свежее имя после open_gray().
+        On a size change the section name CHANGES: the worker holds the old
+        handle and CreateFileMapping with the same name would return the old
+        section - a larger mmap would fail and the channel would die quietly
+        (audit H2). send_gray() passes the fresh name to the worker after
+        open_gray().
         """
         if self._gray_mm is not None and self.gray_w == w and self.gray_h == h:
             return
@@ -276,11 +284,11 @@ class SharedFrameBuffer:
         self._gray_buf = np.ndarray((self.gray_bytes,), dtype=np.uint8, buffer=self._gray_mm)
 
     def open_out(self, w: int, h: int) -> None:
-        """Открыть секцию под возвращаемые пиксели (RGBA8 w*h).
+        """Open the section for the returned pixels (RGBA8 w*h).
 
-        Имя меняется при каждом открытии — как у gray: воркер держит старый
-        handle, и CreateFileMapping с тем же именем вернул бы старую секцию
-        прежнего размера.
+        The name changes on every open - just like gray: the worker holds the
+        old handle and CreateFileMapping with the same name would return the
+        old section, at its old size.
         """
         if self._out_mm is not None and self.out_w == w and self.out_h == h:
             return
@@ -292,9 +300,9 @@ class SharedFrameBuffer:
         self._out_buf = np.ndarray((h, w, 4), dtype=np.uint8, buffer=self._out_mm)
 
     def read_out(self) -> np.ndarray | None:
-        """Копия кадра из секции. Копия обязательна: слот один, и воркер
-        перепишет его следующим кадром, а кадр живёт дольше — он уходит в
-        очередь кодировщика."""
+        """A copy of the frame from the section. The copy is mandatory: there
+        is one slot, the worker overwrites it with the next frame, and the
+        frame outlives that - it goes into the encoder queue."""
         if self._out_buf is None:
             return None
         return self._out_buf.copy()
@@ -312,12 +320,13 @@ class SharedFrameBuffer:
         self.out_w = self.out_h = 0
 
     def read_gray(self) -> np.ndarray | None:
-        """Вернуть копию gray-кадра (320x180 uint8) или None, если не открыт.
+        """Return a copy of the gray frame (320x180 uint8), or None if it is
+        not open.
 
-        Воркер пишет memcpy без разделяемого барьера — теоретически возможен
-        tear. На 320×180 это микросекунды; один разъехавшийся кадр
-        оптического потока некритичен (guides переживают, следующий кадр
-        чинится). Принятый риск — seqlock был бы overengineering'ом.
+        The worker writes with memcpy and no shared barrier - a tear is
+        theoretically possible. At 320x180 that is microseconds; one torn
+        optical-flow frame is not critical (guides survive it and the next
+        frame fixes it). An accepted risk - a seqlock would be overengineering.
         """
         if self._gray_buf is None:
             return None
@@ -334,15 +343,15 @@ class SharedFrameBuffer:
             self._gray_mm = None
 
     def put(self, rgba: np.ndarray, motion: np.ndarray) -> None:
-        """Положить кадр и motion в маппинг (по одному memcpy на каждый)."""
+        """Put the frame and motion into the mapping (one memcpy each)."""
         color = rgba.reshape(-1)
         if color.nbytes > self.color_capacity:
-            raise ValueError(f"кадр {color.nbytes} Б не влезает в "
-                             f"{self.color_capacity} Б общей памяти")
+            raise ValueError(f"a frame of {color.nbytes} B does not fit into "
+                             f"{self.color_capacity} B of shared memory")
         mv = motion.reshape(-1).view(np.uint8)
         if mv.nbytes > self.motion_capacity:
-            raise ValueError(f"motion {mv.nbytes} Б не влезает в "
-                             f"{self.motion_capacity} Б общей памяти")
+            raise ValueError(f"motion of {mv.nbytes} B does not fit into "
+                             f"{self.motion_capacity} B of shared memory")
         np.copyto(self._buf[:color.nbytes], color)
         off = self.color_capacity
         np.copyto(self._buf[off:off + mv.nbytes], mv)
@@ -350,32 +359,32 @@ class SharedFrameBuffer:
     def close(self) -> None:
         self.negotiated = False
         self.close_gray()
-        self._buf = None  # numpy держит буфер: без сброса mmap.close() бросит BufferError
+        self._buf = None  # numpy holds the buffer: without the reset mmap.close() raises BufferError
         try:
             self._mm.close()
         except Exception as exc:
-            print(f"[main] Не удалось закрыть общую память: {exc}", file=sys.stderr)
+            print(f"[main] could not close the shared memory: {exc}", file=sys.stderr)
 
 
 def load_config(path: Path) -> dict:
-    """Загрузить и провалидировать config.json."""
+    """Load and validate config.json."""
     with open(path, "r", encoding="utf-8") as fh:
         cfg = json.load(fh)
     required = {"monitor", "width", "height", "fullscreen", "warmup", "profile",
                 "intensity", "local_tone", "local_structure", "skin_structure"}
     missing = required - set(cfg)
     if missing:
-        raise ValueError(f"config.json: отсутствуют поля: {sorted(missing)}")
+        raise ValueError(f"config.json: missing fields: {sorted(missing)}")
     if cfg["profile"] not in PROFILES:
-        raise ValueError(f"config.json: неизвестный профиль {cfg['profile']!r}; "
-                         f"доступны: {sorted(PROFILES)}")
+        raise ValueError(f"config.json: unknown profile {cfg['profile']!r}; "
+                         f"available: {sorted(PROFILES)}")
     for key in ("width", "height", "warmup"):
         if not isinstance(cfg[key], int) or cfg[key] <= 0:
-            raise ValueError(f"config.json: поле {key} должно быть положительным целым")
-    # work_scale: 0.25..1.0 — разрешение NGX-обработки относительно вывода
+            raise ValueError(f"config.json: field {key} must be a positive integer")
+    # work_scale: 0.25..1.0 - the NGX processing resolution relative to the output
     scale = float(cfg.get("work_scale", 1.0))
     cfg["work_scale"] = min(WORK_SCALE_MAX, max(WORK_SCALE_MIN, scale))
-    # lang: язык HUD/алертов/окна настроек (en/ru, по умолчанию ru)
+    # lang: the language of the HUD/alerts/menu (en/ru, DEFAULT_LANG by default)
     lang = str(cfg.get("lang", DEFAULT_LANG))
     if lang not in UI_STRINGS:
         lang = DEFAULT_LANG
@@ -384,7 +393,7 @@ def load_config(path: Path) -> dict:
 
 
 def resolve_params(cfg: dict) -> dict:
-    """Профиль + кастомные NR-параметры из config (null = использовать профиль)."""
+    """Profile + custom NR parameters from the config (null = use the profile)."""
     params = dict(PROFILES[cfg["profile"]])
     for key in ("intensity", "local_tone", "local_structure", "skin_structure"):
         value = cfg.get(key)
@@ -394,23 +403,24 @@ def resolve_params(cfg: dict) -> dict:
 
 
 def _read_exact(stream, size: int) -> bytes:
-    """Прочитать ровно size байт из потока (воркер может отдать меньше)."""
+    """Read exactly size bytes from the stream (the worker may give fewer)."""
     chunks = bytearray()
     while len(chunks) < size:
         block = stream.read(size - len(chunks))
         if not block:
-            raise EOFError(f"Воркер остановился после {len(chunks)} из {size} байт ответа")
+            raise EOFError(f"the worker stopped after {len(chunks)} of {size} reply bytes")
         chunks.extend(block)
     return bytes(chunks)
 
 
 def _drain_stderr(worker, logs: list[str], stop: threading.Event) -> None:
-    """Фоновый сбор stderr воркера (иначе буфер переполнится и воркер зависнет).
+    """Background drain of the worker's stderr (otherwise the buffer fills up
+    and the worker hangs).
 
-    Один поток на воркера; завершается по EOF (процесс умер) или по
-    stop-событию (shutdown_worker). Старый поток после рестарта читает
-    из ЗАКРЫТОГО stderr старого воркера: readline() возвращает b""
-    (EOF) и поток выходит — не висит и не читает stderr нового воркера.
+    One thread per worker; it finishes on EOF (the process died) or on the
+    stop event (shutdown_worker). After a restart the old thread reads from
+    the CLOSED stderr of the old worker: readline() returns b"" (EOF) and the
+    thread exits - it does not hang and does not read the new worker's stderr.
     """
     try:
         for raw in iter(worker.stderr.readline, b""):
@@ -418,15 +428,16 @@ def _drain_stderr(worker, logs: list[str], stop: threading.Event) -> None:
                 break
             line = raw.decode("utf-8", "replace").rstrip()
             logs.append(line)
-            # Список растёт неограниченно (NS_PHASE=1 добавляет строку на
-            # кадр) — все потребители читают только хвост, держим 2000.
+            # The list grows without bound (NS_PHASE=1 adds a line per frame)
+            # - every consumer reads only the tail, so we keep 2000.
             if len(logs) > 2000:
                 del logs[: len(logs) - 2000]
-            # Лог воркера — в общий лог, но только когда включён профилировщик
-            # (NS_PHASE=1): иначе он оседает в буфере и виден лишь когда
-            # что-то упало. Кроме замеров фаз пропускаем и [pure]/[host]:
-            # там код результата NGX и выбранный пресет модели, без них не
-            # понять, что вообще создалось.
+            # The worker log goes into the shared log, but only when the
+            # profiler is on (NS_PHASE=1): otherwise it just sits in the
+            # buffer and is seen only when something crashed. Besides the
+            # phase measurements we let [pure]/[host] through: they carry the
+            # NGX result code and the chosen model preset, and without them
+            # there is no telling what was actually created.
             if os.environ.get("NS_PHASE") == "1" and (
                     "[phase]" in line or "[pure]" in line or "[host]" in line):
                 print(line)
@@ -437,20 +448,20 @@ def _drain_stderr(worker, logs: list[str], stop: threading.Event) -> None:
 def start_worker(params: dict, width: int, height: int, warmup: int,
                  full_w: int = 0, full_h: int = 0,
                  shm: "SharedFrameBuffer | None" = None) -> tuple[subprocess.Popen, list[str]]:
-    """Запустить NGX-воркер в режиме --live и отправить заголовок.
+    """Start the NGX worker in --live mode and send the header.
 
-    width/height — work-разрешение (NGX feature), full_w/full_h — размер
-    входных кадров от Python (воркер сам ресайзит на GPU через NGX
-    Upscaling; full_w=0 → старый режим 1:1).
+    width/height is the work resolution (the NGX feature), full_w/full_h is
+    the size of the input frames coming from Python (the worker resizes them
+    on the GPU through NGX Upscaling; full_w=0 -> the old 1:1 mode).
 
-    Возвращает (worker, logs, reader, stop): reader — постоянный
-    поток-читатель stdout (см. WorkerReader), stop — событие для
-    завершения _drain_stderr при shutdown.
+    Returns (worker, logs, reader, stop): reader is the permanent stdout
+    reader thread (see WorkerReader), stop is the event used to finish
+    _drain_stderr on shutdown.
     """
     if not WORKER_EXE.is_file():
         raise FileNotFoundError(
-            f"Воркер не найден: {WORKER_EXE}\n"
-            "Скопируйте nvngx.dll (собранный воркер) и nvngx_dlssnr.dll в папку native/."
+            f"worker not found: {WORKER_EXE}\n"
+            "Copy nvngx.dll (the built worker) and nvngx_dlssnr.dll into native/."
         )
     creation_flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
     worker = subprocess.Popen(
@@ -464,15 +475,15 @@ def start_worker(params: dict, width: int, height: int, warmup: int,
     logs: list[str] = []
     stop = threading.Event()
     threading.Thread(target=_drain_stderr, args=(worker, logs, stop), daemon=True).start()
-    # Воркер в upscale-режиме (full_w>0) возвращает full-res кадры —
-    # reader должен ждать full-размеры, иначе byte_count не сойдётся.
+    # In upscale mode (full_w>0) the worker returns full-res frames - the
+    # reader must expect the full sizes, otherwise byte_count will not match.
     out_w = full_w if full_w else width
     out_h = full_h if full_h else height
     reader = WorkerReader(worker, out_w, out_h, shm)
 
     header = struct.pack(
         HEADER_FMT,
-        VIDEO_MAGIC, width, height, int(warmup), 0,  # frame_count=0 → бесконечный цикл
+        VIDEO_MAGIC, width, height, int(warmup), 0,  # frame_count=0 -> an endless loop
         params["profile"], params["preset"], params["style"],
         params["auto_mask"], params["ui_correction"],
         params["intensity"], params["local_tone"],
@@ -488,10 +499,10 @@ def start_worker(params: dict, width: int, height: int, warmup: int,
 
 def _negotiate_shm(worker: subprocess.Popen, reader: "WorkerReader",
                    shm: SharedFrameBuffer, timeout: float = 10.0) -> None:
-    """Передать воркеру имя общей памяти (SHMI) и дождаться SACK.
+    """Hand the shared memory name to the worker (SHMI) and wait for SACK.
 
-    Отказ не смертелен: если воркер не смог открыть маппинг, остаёмся на
-    передаче кадра через пайп — этот путь никуда не делся и работает.
+    A refusal is not fatal: if the worker could not open the mapping we stay
+    on sending the frame down the pipe - that path is still there and works.
     """
     shm.negotiated = False
     try:
@@ -501,10 +512,10 @@ def _negotiate_shm(worker: subprocess.Popen, reader: "WorkerReader",
         worker.stdin.flush()
         reader.wait_sack(timeout)
         shm.negotiated = True
-        print(f"[main] Общая память согласована: {shm.size / 1e6:.1f} МБ, "
-              f"кадр не идёт через пайп")
+        print(f"[main] shared memory agreed: {shm.size / 1e6:.1f} MB, "
+              f"the frame does not go through the pipe")
     except Exception as exc:
-        print(f"[main] Общая память недоступна ({exc}) — кадры через пайп",
+        print(f"[main] shared memory unavailable ({exc}) - frames through the pipe",
               file=sys.stderr)
 
 
@@ -514,31 +525,32 @@ def send_frame(worker: subprocess.Popen, index: int, rgba: np.ndarray,
                want_pixels: bool = False, motion_small: bool = False,
                no_color: bool = False, bypass: bool = False,
                split: float = 0.0) -> None:
-    """Отправить кадр воркеру.
+    """Send a frame to the worker.
 
-    С согласованной общей памятью в пайп уходит только 24-байтовый заголовок
-    с флагом FRAME_FLAG_SHM, пиксели кладутся в маппинг. Иначе — старый путь:
-    заголовок + RGBA8 + motion float16 телом в пайп.
+    With shared memory agreed, only the 24-byte header with the
+    FRAME_FLAG_SHM flag goes down the pipe and the pixels are placed into the
+    mapping. Otherwise it is the old path: header + RGBA8 + motion float16
+    sent inline through the pipe.
 
-    no_color (DDA-режим): цвет берёт воркер сам из Desktop Duplication —
-    в пайп уходит только motion, rgba игнорируется.
-    bypass (NR OFF): воркер пропускает NGX и показывает сырой захват —
-    оверлей (окно, HUD) остаётся живым, эффект выключен.
-    split (0..1): доля кадра слева, которую воркер оставит необработанной —
-    шторка «до/после». 0 — выключено.
+    no_color (DDA mode): the worker takes the colour itself from Desktop
+    Duplication - only motion goes down the pipe, rgba is ignored.
+    bypass (NR OFF): the worker skips NGX and shows the raw capture - the
+    overlay (window, HUD) stays alive while the effect is off.
+    split (0..1): the share of the frame on the left the worker leaves
+    unprocessed - the before/after wipe. 0 means off.
     """
     flags = (FRAME_FLAG_WANT_PIXELS if want_pixels else 0) | \
             (FRAME_FLAG_MOTION_SMALL if motion_small else 0) | \
             (FRAME_FLAG_NO_COLOR if no_color else 0) | \
             (FRAME_FLAG_BYPASS if bypass else 0)
     if split > 0.0:
-        # Позиция шторки едет в старших 16 битах того же поля флагов:
-        # отдельного поля в заголовке нет, а расширять его ради одного
-        # числа значит менять протокол на обеих сторонах.
+        # The wipe position rides in the high 16 bits of the same flags field:
+        # there is no dedicated field in the header, and widening it for a
+        # single number would mean changing the protocol on both sides.
         frac = min(0xFFFF, max(0, int(round(min(1.0, split) * 0xFFFF))))
         flags |= FRAME_FLAG_SPLIT | (frac << 16)
     if no_color:
-        # DDA-режим: только motion, без цвета (SHM не используется для цвета)
+        # DDA mode: motion only, no colour (SHM is not used for colour)
         worker.stdin.write(struct.pack(FRAME_FMT, FRAME_MAGIC, index, int(reset), flags, pts))
         worker.stdin.write(motion.tobytes())
         worker.stdin.flush()
@@ -557,11 +569,12 @@ def send_frame(worker: subprocess.Popen, index: int, rgba: np.ndarray,
 
 def send_resize(worker: subprocess.Popen, params: dict, width: int, height: int,
                 warmup: int, full_w: int = 0, full_h: int = 0) -> None:
-    """Отправить RNSZ — смена work-разрешения/параметров на лету.
+    """Send RNSZ - change the work resolution/parameters on the fly.
 
-    Воркер пересоздаёт NGX feature по новым размерам (ReleaseFeature →
-    CreateFeature в том же процессе) и отвечает RACK. Рестарт процесса
-    не нужен — именно рестарт был источником зависаний/вылетов (exit 127).
+    The worker recreates the NGX feature at the new sizes (ReleaseFeature ->
+    CreateFeature inside the same process) and answers RACK. A process restart
+    is not needed - a restart was exactly what caused the hangs and crashes
+    (exit 127).
     """
     worker.stdin.write(struct.pack(
         RESIZE_FMT,
@@ -577,9 +590,9 @@ def send_resize(worker: subprocess.Popen, params: dict, width: int, height: int,
 
 def send_motion_size(worker: subprocess.Popen, width: int, height: int,
                      flags: int = 0, pts: int = 0) -> None:
-    """MOTS: в каком разрешении будет приходить поле движения.
+    """MOTS: at what resolution the motion field will arrive.
 
-    0x0 — выключить: поле снова пойдёт в work-разрешении.
+    0x0 turns it off: the field goes back to the work resolution.
     """
     worker.stdin.write(struct.pack(MOTION_FMT, MOTION_MAGIC, int(width), int(height),
                                    int(flags), int(pts)))
@@ -588,10 +601,10 @@ def send_motion_size(worker: subprocess.Popen, width: int, height: int,
 
 def send_window(worker: subprocess.Popen, width: int, height: int,
                 flags: int = 0, pts: int = 0) -> None:
-    """WNDO: попросить воркер поднять своё окно вывода (или закрыть его).
+    """WNDO: ask the worker to raise its own output window (or close it).
 
-    width=height=0 или флаг WINDOW_FLAG_DISABLE — закрыть окно и вернуться
-    к передаче пикселей через пайп.
+    width=height=0 or the WINDOW_FLAG_DISABLE flag closes the window and goes
+    back to sending pixels through the pipe.
     """
     worker.stdin.write(struct.pack(WINDOW_FMT, WINDOW_MAGIC, int(width), int(height),
                                    int(flags), int(pts)))
@@ -600,10 +613,11 @@ def send_window(worker: subprocess.Popen, width: int, height: int,
 
 def send_dda(worker: subprocess.Popen, width: int, height: int,
              flags: int = 0, pts: int = 0) -> None:
-    """DDA1: попросить воркера захватывать экран самому (Desktop Duplication).
+    """DDA1: ask the worker to capture the screen itself (Desktop Duplication).
 
-    width=height=0 — выключить захват и вернуться к передаче кадра из Python.
-    Пока активен, кадры FRM1 несут FRAME_FLAG_NO_COLOR (только motion).
+    width=height=0 turns the capture off and goes back to sending the frame
+    from Python. While it is active FRM1 frames carry FRAME_FLAG_NO_COLOR
+    (motion only).
     """
     worker.stdin.write(struct.pack(DDA_FMT, DDA_MAGIC, int(width), int(height),
                                    int(flags), int(pts)))
@@ -612,14 +626,14 @@ def send_dda(worker: subprocess.Popen, width: int, height: int,
 
 def send_gray(worker: subprocess.Popen, width: int, height: int,
               name: str, flags: int = 0, pts: int = 0) -> None:
-    """GRAY: передать воркеру имя обратного маппинга для luminance-кадра.
+    """GRAY: give the worker the name of the reverse mapping for luminance.
 
-    В DDA-режиме воркер пишет сюда даунсэмпл экрана (ширина x высота,
-    обычно 320x180 = размер поля потока), Python читает его для guides.
-    width=height=0 — выключить обратный канал.
+    In DDA mode the worker writes a downsample of the screen there (width x
+    height, usually 320x180 = the flow field size) and Python reads it for
+    guides. width=height=0 turns the reverse channel off.
     """
     if len(name) >= 64:
-        raise ValueError("имя gray-секции длиннее 63 символов")
+        raise ValueError("the gray section name is longer than 63 characters")
     worker.stdin.write(struct.pack(GRAY_FMT, GRAY_MAGIC, int(width), int(height),
                                    int(flags), int(pts), name.encode("ascii")))
     worker.stdin.flush()
@@ -627,29 +641,31 @@ def send_gray(worker: subprocess.Popen, width: int, height: int,
 
 def send_out(worker: subprocess.Popen, width: int, height: int,
              name: str, flags: int = 0, pts: int = 0) -> None:
-    """OUTS: передать воркеру имя секции, куда класть пиксели результата.
+    """OUTS: give the worker the name of the section for the result pixels.
 
-    width=height=0 — выключить канал, пиксели снова пойдут телом в пайп.
+    width=height=0 turns the channel off and the pixels travel inline through
+    the pipe again.
     """
     if len(name) >= 64:
-        raise ValueError("имя out-секции длиннее 63 символов")
+        raise ValueError("the out section name is longer than 63 characters")
     worker.stdin.write(struct.pack(OUTS_FMT, OUTS_MAGIC, int(width), int(height),
                                    int(flags), int(pts), name.encode("ascii")))
     worker.stdin.flush()
 
 
 class WorkerReader:
-    """Постоянный поток-читатель stdout воркера (один на воркера).
+    """The permanent reader thread for the worker's stdout (one per worker).
 
-    Создаётся в start_worker, живёт пока жив воркер, умирает по EOF:
-    shutdown_worker завершает процесс → pipe закрывается → read()
-    возвращает b"" → _read_exact бросает EOFError → sentinel в очередь.
+    Created in start_worker, it lives as long as the worker does and dies on
+    EOF: shutdown_worker terminates the process -> the pipe closes -> read()
+    returns b"" -> _read_exact raises EOFError -> a sentinel goes into the
+    queue.
 
-    Замена старого recv_frame (поток на КАЖДЫЙ кадр): при таймауте
-    поток-читатель НЕ висит на read() — он продолжает читать следующие
-    кадры, а main просто не получил ответ вовремя. При рестарте старый
-    reader умирает по EOF старого stdout и физически не может прочитать
-    данные нового воркера (разные pipes) — гонки чтения нет.
+    A replacement for the old recv_frame (a thread per EVERY frame): on a
+    timeout the reader thread does NOT hang on read() - it keeps reading the
+    following frames, main simply did not get its answer in time. On a restart
+    the old reader dies on the EOF of the old stdout and physically cannot
+    read the data of the new worker (different pipes) - there is no read race.
     """
 
     def __init__(self, worker: subprocess.Popen, width: int, height: int,
@@ -657,7 +673,7 @@ class WorkerReader:
         self._worker = worker
         self._width = width
         self._height = height
-        # Через неё приходят пиксели, когда согласован канал OUTS.
+        # The pixels arrive through it once the OUTS channel is agreed.
         self._shm = shm
         self._queue: queue.Queue = queue.Queue()
         self._thread = threading.Thread(target=self._run, daemon=True,
@@ -670,28 +686,28 @@ class WorkerReader:
                 magic_raw = _read_exact(self._worker.stdout, 4)
                 magic = struct.unpack("<I", magic_raw)[0]
                 if magic == MOTION_ACK_MAGIC:
-                    # MACK: подтверждение MOTS
+                    # MACK: acknowledgement of MOTS
                     rest = _read_exact(self._worker.stdout, struct.calcsize(MOTION_ACK_FMT) - 4)
                     _magic, ok, _r0, _r1, _pts = struct.unpack(MOTION_ACK_FMT, magic_raw + rest)
                     self._queue.put(("mack", ok))
                 elif magic == WINDOW_ACK_MAGIC:
-                    # WACK: подтверждение WNDO — окно вывода поднято/закрыто
+                    # WACK: acknowledgement of WNDO - the window is up or closed
                     rest = _read_exact(self._worker.stdout, struct.calcsize(WINDOW_ACK_FMT) - 4)
                     _magic, ok, _r0, _r1, _pts = struct.unpack(WINDOW_ACK_FMT, magic_raw + rest)
                     self._queue.put(("wack", ok))
                 elif magic == SHM_ACK_MAGIC:
-                    # SACK: подтверждение SHMI — воркер открыл маппинг
+                    # SACK: acknowledgement of SHMI - the worker opened the mapping
                     rest = _read_exact(self._worker.stdout, struct.calcsize(SHM_ACK_FMT) - 4)
                     _magic, ok, _r0, _r1, _pts = struct.unpack(SHM_ACK_FMT, magic_raw + rest)
                     self._queue.put(("sack", ok))
                 elif magic == RESIZE_ACK_MAGIC:
-                    # RACK (24 байта): подтверждение RNSZ — кладём в очередь,
-                    # main забирает через wait_rack()
+                    # RACK (24 bytes): acknowledgement of RNSZ - we put it in
+                    # the queue, main takes it via wait_rack()
                     rest = _read_exact(self._worker.stdout, struct.calcsize(RACK_FMT) - 4)
                     _magic, ok, ngx_result, _reserved, _pts = struct.unpack(RACK_FMT, magic_raw + rest)
                     self._queue.put(("rack", (ok, ngx_result)))
                 elif magic == DDA_ACK_MAGIC:
-                    # DACK (24 байта): подтверждение DDA1 — захват перешёл к воркеру
+                    # DACK (24 bytes): acknowledgement of DDA1 - capture moved to the worker
                     rest = _read_exact(self._worker.stdout, struct.calcsize(DDA_ACK_FMT) - 4)
                     _magic, ok, _r0, _r1, _pts = struct.unpack(DDA_ACK_FMT, magic_raw + rest)
                     self._queue.put(("dack", ok))
@@ -702,7 +718,7 @@ class WorkerReader:
                         OUTS_ACK_FMT, magic_raw + rest)
                     self._queue.put(("outs", ok))
                 elif magic == GRAY_ACK_MAGIC:
-                    # GAK: подтверждение GRAY — обратный канал luminance открыт
+                    # GAK: acknowledgement of GRAY - the reverse luminance channel is open
                     rest = _read_exact(self._worker.stdout, struct.calcsize(GRAY_ACK_FMT) - 4)
                     _magic, ok, _r0, _r1, _pts = struct.unpack(GRAY_ACK_FMT, magic_raw + rest)
                     self._queue.put(("gak", ok))
@@ -710,162 +726,163 @@ class WorkerReader:
                     rest = _read_exact(self._worker.stdout, struct.calcsize(OUT_FMT) - 4)
                     _magic, out_index, ok, byte_count, ngx_result, _pts = struct.unpack(OUT_FMT, magic_raw + rest)
                     if not ok:
-                        raise RuntimeError(f"Воркер ответил ошибкой на кадр {out_index}: ok={ok}")
+                        raise RuntimeError(f"worker answered with an error for frame {out_index}: ok={ok}")
                     if ngx_result != 1:
                         raise RuntimeError(
-                            f"NGX evaluation failed на кадре {out_index}: 0x{ngx_result:08X}")
+                            f"NGX evaluation failed on frame {out_index}: 0x{ngx_result:08X}")
                     if byte_count == 0:
-                        # Режим WNDO: воркер показал кадр сам в своём окне,
-                        # пиксели через пайп не идут
+                        # WNDO mode: the worker showed the frame in its own
+                        # window, no pixels go through the pipe
                         self._queue.put((out_index, None))
                         continue
                     if byte_count == OUT_BYTES_IN_SHM:
-                        # Пиксели в секции OUTS. Копию делаем здесь, в потоке
-                        # читателя: main всё равно ждёт кадр, зато копия не
-                        # ложится на его же поток вместе с остальной работой.
+                        # The pixels are in the OUTS section. The copy is made
+                        # here, in the reader thread: main is waiting for the
+                        # frame anyway, and this way the copy does not pile
+                        # onto its thread along with everything else.
                         frame = self._shm.read_out() if self._shm else None
                         if frame is None:
                             raise RuntimeError(
-                                "воркер сказал «пиксели в общей памяти», "
-                                "а секция не открыта")
+                                "the worker said the pixels are in shared "
+                                "memory, but the section is not open")
                         self._queue.put((out_index, frame))
                         continue
                     if byte_count != self._width * self._height * 4:
                         raise RuntimeError(
-                            f"Воркер вернул {byte_count} байт вместо {self._width * self._height * 4}")
+                            f"worker returned {byte_count} bytes instead of {self._width * self._height * 4}")
                     data = _read_exact(self._worker.stdout, byte_count)
                     frame = np.frombuffer(data, dtype=np.uint8).reshape(self._height, self._width, 4)
                     self._queue.put((out_index, frame))
                 else:
-                    raise RuntimeError(f"Неверная магия ответа воркера: 0x{magic:08X}")
+                    raise RuntimeError(f"invalid magic in the worker reply: 0x{magic:08X}")
         except Exception as exc:
-            # EOF (воркер завершён/убит) или ошибка протокола — sentinel
+            # EOF (the worker exited or was killed) or a protocol error - sentinel
             self._queue.put((None, exc))
 
     def set_output_size(self, width: int, height: int) -> None:
-        """Сменить ожидаемый размер выходных кадров (сразу после RNSZ)."""
+        """Change the expected size of the output frames (right after RNSZ)."""
         self._width = width
         self._height = height
 
     def wait_mack(self, timeout: float) -> None:
-        """Дождаться MACK — подтверждение размера поля движения (MOTS)."""
+        """Wait for MACK - the acknowledgement of the motion field size (MOTS)."""
         deadline = time.monotonic() + timeout
         while True:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                raise TimeoutError(f"воркер не подтвердил MOTS за {timeout:.0f}с")
+                raise TimeoutError(f"the worker did not acknowledge MOTS within {timeout:.0f}s")
             try:
                 got, payload = self._queue.get(timeout=remaining)
             except queue.Empty:
                 continue
             if got is None:
-                raise payload if isinstance(payload, Exception) else EOFError("воркер остановился")
+                raise payload if isinstance(payload, Exception) else EOFError("the worker stopped")
             if got == "mack":
                 if not payload:
-                    raise RuntimeError("воркер не смог включить растяжение motion на GPU")
+                    raise RuntimeError("the worker could not enable GPU motion upscaling")
                 return
 
     def wait_wack(self, timeout: float) -> None:
-        """Дождаться WACK — подтверждение команды WNDO."""
+        """Wait for WACK - the acknowledgement of the WNDO command."""
         deadline = time.monotonic() + timeout
         while True:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                raise TimeoutError(f"воркер не подтвердил WNDO за {timeout:.0f}с")
+                raise TimeoutError(f"the worker did not acknowledge WNDO within {timeout:.0f}s")
             try:
                 got, payload = self._queue.get(timeout=remaining)
             except queue.Empty:
                 continue
             if got is None:
-                raise payload if isinstance(payload, Exception) else EOFError("воркер остановился")
+                raise payload if isinstance(payload, Exception) else EOFError("the worker stopped")
             if got == "wack":
                 if not payload:
-                    raise RuntimeError("воркер не смог поднять окно вывода")
+                    raise RuntimeError("the worker could not raise the output window")
                 return
 
     def wait_dack(self, timeout: float) -> None:
-        """Дождаться DACK — подтверждение команды DDA1 (захват у воркера)."""
+        """Wait for DACK - the acknowledgement of DDA1 (capture in the worker)."""
         deadline = time.monotonic() + timeout
         while True:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                raise TimeoutError(f"воркер не подтвердил DDA1 за {timeout:.0f}с")
+                raise TimeoutError(f"the worker did not acknowledge DDA1 within {timeout:.0f}s")
             try:
                 got, payload = self._queue.get(timeout=remaining)
             except queue.Empty:
                 continue
             if got is None:
-                raise payload if isinstance(payload, Exception) else EOFError("воркер остановился")
+                raise payload if isinstance(payload, Exception) else EOFError("the worker stopped")
             if got == "dack":
                 if not payload:
-                    raise RuntimeError("воркер не смог включить захват экрана")
+                    raise RuntimeError("the worker could not enable screen capture")
                 return
 
     def wait_gak(self, timeout: float) -> None:
-        """Дождаться GAK — подтверждение открытия обратного gray-канала."""
+        """Wait for GAK - the acknowledgement that the reverse gray channel is open."""
         deadline = time.monotonic() + timeout
         while True:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                raise TimeoutError(f"воркер не подтвердил GRAY за {timeout:.0f}с")
+                raise TimeoutError(f"the worker did not acknowledge GRAY within {timeout:.0f}s")
             try:
                 got, payload = self._queue.get(timeout=remaining)
             except queue.Empty:
                 continue
             if got is None:
-                raise payload if isinstance(payload, Exception) else EOFError("воркер остановился")
+                raise payload if isinstance(payload, Exception) else EOFError("the worker stopped")
             if got == "gak":
                 if not payload:
-                    raise RuntimeError("воркер не смог открыть gray-канал")
+                    raise RuntimeError("the worker could not open the gray channel")
                 return
 
     def wait_oak(self, timeout: float) -> None:
-        """Дождаться OAK2 — подтверждение канала пикселей через общую память."""
+        """Wait for OAK2 - the acknowledgement of the shared-memory pixel channel."""
         deadline = time.monotonic() + timeout
         while True:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                raise TimeoutError(f"воркер не подтвердил OUTS за {timeout:.0f}с")
+                raise TimeoutError(f"the worker did not acknowledge OUTS within {timeout:.0f}s")
             try:
                 got, payload = self._queue.get(timeout=remaining)
             except queue.Empty:
                 continue
             if got is None:
-                raise payload if isinstance(payload, Exception) else EOFError("воркер остановился")
+                raise payload if isinstance(payload, Exception) else EOFError("the worker stopped")
             if got == "outs":
                 if not payload:
-                    raise RuntimeError("воркер не смог открыть канал пикселей")
+                    raise RuntimeError("the worker could not open the pixel channel")
                 return
 
     def wait_sack(self, timeout: float) -> None:
-        """Дождаться SACK — подтверждение общей памяти (SHMI)."""
+        """Wait for SACK - the shared memory acknowledgement (SHMI)."""
         deadline = time.monotonic() + timeout
         while True:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                raise TimeoutError(f"воркер не подтвердил SHMI за {timeout:.0f}с")
+                raise TimeoutError(f"the worker did not acknowledge SHMI within {timeout:.0f}s")
             try:
                 got, payload = self._queue.get(timeout=remaining)
             except queue.Empty:
                 continue
             if got is None:
-                raise payload if isinstance(payload, Exception) else EOFError("воркер остановился")
+                raise payload if isinstance(payload, Exception) else EOFError("the worker stopped")
             if got == "sack":
                 if not payload:
-                    raise RuntimeError("воркер не смог открыть общую память")
+                    raise RuntimeError("the worker could not open the shared memory")
                 return
 
     def wait_rack(self, timeout: float) -> None:
-        """Дождаться RACK — подтверждение смены разрешения (RNSZ).
+        """Wait for RACK - the acknowledgement of a resolution change (RNSZ).
 
-        Кадры, пришедшие до RACK (после таймаута recv), пропускаются.
+        Frames that arrived before RACK (after a recv timeout) are skipped.
         """
         deadline = time.monotonic() + timeout
         while True:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise TimeoutError(
-                    f"Воркер не подтвердил смену разрешения за {timeout:.0f}с")
+                    f"the worker did not acknowledge the resolution change within {timeout:.0f}s")
             try:
                 got, payload = self._queue.get(timeout=remaining)
             except queue.Empty:
@@ -873,56 +890,57 @@ class WorkerReader:
             if got == "rack":
                 ok, ngx_result = payload
                 if not ok:
-                    raise RuntimeError(f"RNSZ отклонён воркером: ngx=0x{ngx_result:08X}")
+                    raise RuntimeError(f"RNSZ rejected by the worker: ngx=0x{ngx_result:08X}")
                 return
-            # (index, frame) — кадр до RACK — пропустить
+            # (index, frame) - a frame from before RACK - skip it
 
     def recv(self, index: int, timeout: float):
-        """Дождаться кадр index; timeout > 0 — защита от зависания NGX.
+        """Wait for frame index; timeout > 0 guards against an NGX hang.
 
-        Возвращает np.ndarray с пикселями, либо None — если воркер показал
-        кадр сам в своём окне (режим WNDO) и пикселей не присылал.
+        Returns an np.ndarray with the pixels, or None if the worker showed
+        the frame in its own window (WNDO mode) and sent no pixels.
 
-        Ответы с чужим index (кадры, которые main уже не ждёт после
-        таймаута) отбрасываются — десинхронизация протокола невозможна.
+        Replies with a foreign index (frames main no longer waits for after a
+        timeout) are dropped - the protocol cannot desynchronise.
         """
         deadline = time.monotonic() + timeout
         while True:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise TimeoutError(
-                    f"Воркер молчит {timeout:.0f}с на кадре {index} — NGX не ответил после рестарта")
+                    f"the worker has been silent for {timeout:.0f}s on frame {index} - NGX did not answer after the restart")
             try:
                 got_index, payload = self._queue.get(timeout=remaining)
             except queue.Empty:
-                continue  # цикл сам бросит TimeoutError по истечении deadline
+                continue  # the loop raises TimeoutError itself once the deadline passes
             if got_index is None:
                 if isinstance(payload, Exception):
                     raise payload
-                raise EOFError("Воркер остановился")
+                raise EOFError("the worker stopped")
             if got_index == index:
                 return payload
-            # Ответ на кадр, который main уже не ждёт (после таймаута) — пропустить
+            # A reply for a frame main no longer waits for (after a timeout) - skip
 
 
 def check_worker(worker: subprocess.Popen, logs: list[str]) -> None:
-    """Если воркер упал — вывести последние строки stderr и поднять исключение."""
+    """If the worker died - print the last stderr lines and raise."""
     code = worker.poll()
     if code is not None:
-        tail = "\n".join(logs[-40:]) or "(stderr пуст)"
+        tail = "\n".join(logs[-40:]) or "(stderr empty)"
         raise RuntimeError(
-            f"NGX-воркер завершился с кодом {code}.\n"
-            f"Последние строки stderr:\n{tail}"
+            f"the NGX worker exited with code {code}.\n"
+            f"last stderr lines:\n{tail}"
         )
 
 
 def shutdown_worker(worker: subprocess.Popen, stop: threading.Event | None = None) -> None:
-    """Graceful shutdown: закрыть stdin (EOF → воркер выходит с кодом 0), ждать 10 c.
+    """Graceful shutdown: close stdin (EOF -> the worker exits with code 0), wait 10 s.
 
-    stop — событие завершения _drain_stderr (из start_worker): ставится
-    сразу, чтобы drain-поток не висел на readline() закрытого stderr
-    (на Windows закрытие pipe из другого потока не будит readline —
-    поток выходит только по EOF после смерти процесса или по stop).
+    stop is the finish event for _drain_stderr (from start_worker): it is set
+    immediately so the drain thread does not hang on readline() of a closed
+    stderr (on Windows closing a pipe from another thread does not wake
+    readline - the thread exits only on EOF after the process dies, or on
+    stop).
     """
     if worker.poll() is not None:
         if stop is not None:
@@ -937,9 +955,9 @@ def shutdown_worker(worker: subprocess.Popen, stop: threading.Event | None = Non
         pass
     try:
         code = worker.wait(timeout=10)
-        print(f"[main] Воркер завершился корректно (код {code})")
+        print(f"[main] worker exited cleanly (code {code})")
     except subprocess.TimeoutExpired:
-        print("[main] Воркер не вышел за 10 c — принудительное завершение")
+        print("[main] worker did not exit within 10 s - forcing termination")
         worker.terminate()
         try:
             worker.wait(timeout=5)
@@ -951,21 +969,22 @@ def restart_worker(worker: subprocess.Popen, params: dict, width: int, height: i
                    warmup: int, full_w: int = 0, full_h: int = 0,
                    stop: threading.Event | None = None,
                    shm: "SharedFrameBuffer | None" = None) -> tuple[subprocess.Popen, list[str], WorkerReader, threading.Event]:
-    """Перезапустить воркер с новым разрешением (смена work_scale).
+    """Restart the worker at a new resolution (a work_scale change).
 
-    Воркер создаёт NGX feature по размерам из заголовка и читает ровно
-    w*h*4 байт на кадр — менять разрешение на лету нельзя, только рестарт.
-    Warmup при рестарте берём меньше (30), чтобы не фризить экран.
+    The worker creates the NGX feature from the header sizes and reads exactly
+    w*h*4 bytes per frame - the resolution cannot be changed on the fly, only
+    by a restart. Warmup on a restart is smaller (30) so the screen does not
+    freeze.
 
-    Пауза 2 c между shutdown и start: старый воркер держит GPU-ресурсы
-    NGX (nvngx_dlssnr.dll, 165 МБ + D3D12 device) — конкурентная
-    инициализация нового процесса на том же GPU зависает/роняет процесс
-    (наблюдалось: exit 127 и зависание recv после apply_settings).
+    A 2 s pause between shutdown and start: the old worker holds the NGX GPU
+    resources (nvngx_dlssnr.dll, 165 MB + a D3D12 device) - initialising a new
+    process concurrently on the same GPU hangs or kills it (observed: exit 127
+    and a hung recv after apply_settings).
 
-    Старый reader/drain умирают по EOF закрытых pipes старого воркера
-    (shutdown_worker завершает процесс) — гонки чтения с новым воркером
-    нет: pipes разные, старый поток физически не может прочитать stdout
-    нового процесса.
+    The old reader/drain die on EOF of the old worker's closed pipes
+    (shutdown_worker terminates the process) - there is no read race with the
+    new worker: the pipes are different and the old thread physically cannot
+    read the stdout of the new process.
     """
     shutdown_worker(worker, stop)
     time.sleep(2.0)
@@ -973,12 +992,12 @@ def restart_worker(worker: subprocess.Popen, params: dict, width: int, height: i
 
 
 def hotkey_labels(bindings: dict) -> dict:
-    """Биндинги -> {команда: «F9»} для подписей на кнопках меню."""
+    """Bindings -> {command: "F9"} for the captions on the menu buttons."""
     return {cmd: name for _mods, _vk, cmd, name in bindings.values()}
 
 
 def _autostart_enabled() -> bool:
-    """Автозапуск сейчас включён? (HKCU Run, значение NeuralScreen)."""
+    """Is autostart currently on? (HKCU Run, the NeuralScreen value)."""
     import winreg
     try:
         key = winreg.OpenKey(winreg.HKEY_CURRENT_USER,
@@ -996,10 +1015,10 @@ def _autostart_enabled() -> bool:
 
 
 def _set_autostart(enabled: bool) -> bool:
-    """Включить/выключить автозапуск с Windows (HKCU Run).
+    """Enable/disable autostart with Windows (HKCU Run).
 
-    Запускаем NeuralScreen.vbs через wscript — скрытый лаунчер без консоли.
-    Возвращает True при успехе.
+    We launch NeuralScreen.vbs through wscript - a hidden launcher with no
+    console. Returns True on success.
     """
     import winreg
     try:
@@ -1018,14 +1037,14 @@ def _set_autostart(enabled: bool) -> bool:
         winreg.CloseKey(key)
         return True
     except Exception as exc:
-        print(f"[main] Автозапуск не настроен: {exc}", file=sys.stderr)
+        print(f"[main] autostart not configured: {exc}", file=sys.stderr)
         return False
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="DLSS 5 Desktop NR prototype")
     parser.add_argument("--config", type=Path, default=BASE_DIR / "config.json",
-                        help="путь к config.json (по умолчанию рядом с main.py)")
+                        help="path to config.json (defaults to next to main.py)")
     args = parser.parse_args()
     _init_logging()  # pythonw: stdout/stderr -> NeuralScreen.log
 
@@ -1037,20 +1056,21 @@ def main() -> int:
     work_scale = float(cfg["work_scale"])
     lang = str(cfg["lang"])
 
-    # Разрешение вывода — С РЕАЛЬНОГО МОНИТОРА, а не из застывшего
-    # config.json (монитор могли переключить на 1440p, а конфиг помнит 4K —
-    # оверлей/запись/окно воркера начнут расходиться с экраном).
+    # The output resolution comes FROM THE REAL MONITOR, not from a stale
+    # config.json (the monitor may have been switched to 1440p while the
+    # config still remembers 4K - the overlay, the recording and the worker
+    # window would start drifting away from the screen).
     capture = ScreenCapture(monitor_idx=monitor)
     mon_w, mon_h = capture.resolution
     if mon_w > 0 and mon_h > 0 and (mon_w, mon_h) != (width, height):
-        print(f"[main] Монитор {monitor} — {mon_w}x{mon_h} (конфиг: {width}x{height}), "
-              f"беру реальное разрешение")
+        print(f"[main] monitor {monitor} is {mon_w}x{mon_h} (config: {width}x{height}), "
+              f"taking the real resolution")
         width, height = mon_w, mon_h
 
-    print(f"[main] NeuralScreen — профиль {cfg['profile']!r}, "
-          f"разрешение {width}x{height}, монитор {monitor}")
-    print(f"[main] Параметры NGX: {params}")
-    print(f"[main] work_scale {work_scale:.2f} (NGX-разрешение "
+    print(f"[main] NeuralScreen - profile {cfg['profile']!r}, "
+          f"resolution {width}x{height}, monitor {monitor}")
+    print(f"[main] NGX parameters: {params}")
+    print(f"[main] work_scale {work_scale:.2f} (NGX resolution "
           f"{int(width * work_scale)}x{int(height * work_scale)})")
 
     worker: subprocess.Popen | None = None
@@ -1062,41 +1082,42 @@ def main() -> int:
     hotkeys: HotkeyController | None = None
     recorder: VideoRecorder | None = None
     try:
-        # Воркер и guides работают на work-разрешении (NGX feature создаётся
-        # по размерам заголовка; guides.assert требует совпадения размеров)
+        # The worker and guides run at the work resolution (the NGX feature is
+        # created from the header sizes; guides' assert requires them to match)
         work_w, work_h = _work_size(width, height, work_scale)
-        # v3-протокол (full_w/full_h) ТОЛЬКО при work != full: при work==full
-        # (scale 1.0) воркер в upscale-режиме падает/зависает (проверено
-        # изолированно) — используем legacy full_w=0, как в D5V2.
+        # The v3 protocol (full_w/full_h) ONLY when work != full: at work==full
+        # (scale 1.0) the worker crashes or hangs in upscale mode (verified in
+        # isolation) - we use legacy full_w=0, as in D5V2.
         full_w = width if (work_w != width or work_h != height) else 0
         full_h = height if (work_w != width or work_h != height) else 0
-        # Общая память под входной кадр: размер не зависит от work_scale
-        # (см. SharedFrameBuffer), поэтому создаётся один раз на процесс.
+        # Shared memory for the input frame: its size does not depend on
+        # work_scale (see SharedFrameBuffer), so it is created once per process.
         shm = SharedFrameBuffer(width, height)
         worker, worker_logs, reader, worker_stop = start_worker(
             params, work_w, work_h, warmup, full_w, full_h, shm)
-        print(f"[main] Воркер запущен (pid {worker.pid}), заголовок отправлен "
+        print(f"[main] worker started (pid {worker.pid}), header sent "
               f"({work_w}x{work_h})")
 
-        print(f"[main] Захват монитора {monitor}: {capture.resolution}")
+        print(f"[main] capturing monitor {monitor}: {capture.resolution}")
 
         display = Display(width, height, fullscreen=bool(cfg["fullscreen"]))
         display.set_lang(lang)
-        # Программа рисует поверх рабочего стола и сама по себе никак себя не
-        # проявляет — без этого после запуска непонятно, работает она или нет.
+        # The program draws over the desktop and gives no sign of itself -
+        # without this it is unclear after launch whether it is running.
         startup_menu = bool(cfg.get("open_menu_on_start", True))
-        # Шторка «до/после»: доля кадра слева, которую воркер оставляет сырой.
+        # The before/after wipe: the share of the frame the worker leaves raw.
         split_pos = min(1.0, max(0.0, float(cfg.get("split", 0.0))))
-        # Какая карта и работает ли на ней NR. Модель спрашиваем у nvapi, а
-        # факт поддержки берём не из архитектуры, а из ответа воркера: он
-        # единственный знает, создалась ли feature 18.
+        # Which card this is and whether NR works on it. The model comes from
+        # nvapi, but the support verdict comes from the worker rather than the
+        # architecture: only it knows whether feature 18 was created.
         gpu_info = gpu_probe()
         gpu_text = gpu_describe(gpu_info)
         gpu_ok: bool | None = None
-        print(f"[main] GPU: {gpu_text} (группа 0x{gpu_info['arch_group']:X}, "
-              f"официальная поддержка {'да' if gpu_info['official'] else 'нет'})")
+        print(f"[main] GPU: {gpu_text or 'unknown'} "
+              f"(group 0x{gpu_info['arch_group']:X}, officially supported: "
+              f"{'yes' if gpu_info['official'] else 'no'})")
         startup_pending = True
-        # Размер, положение и тема меню — как их оставил пользователь.
+        # The menu size, position and theme - exactly as the user left them.
         display.menu.set_user_scale(float(cfg.get("menu_scale", 1.0)))
         saved_theme = cfg.get("theme")
         if isinstance(saved_theme, str) and saved_theme in ("light", "dark"):
@@ -1107,24 +1128,27 @@ def main() -> int:
         saved_height = cfg.get("menu_height")
         if isinstance(saved_height, (int, float)) and saved_height > 0:
             display.menu.user_height = int(saved_height)
-        print(f"[main] Окно вывода {display.width}x{display.height}")
+        print(f"[main] output window {display.width}x{display.height}")
 
-        # Трей-иконка: команды в очередь, main-цикл их читает
+        # Tray icon: commands go into a queue, the main loop reads them
         tray_commands: queue.Queue = queue.Queue()
-        # Ответы диалога «Сохранить как». Диалог модальный и живёт в своём
-        # потоке (см. _open_save_dialog), путь приходит сюда.
+        # Answers from the "Save as" dialog. The dialog is modal and lives in
+        # its own thread (see _open_save_dialog); the path arrives here.
         shot_paths: queue.Queue = queue.Queue()
         shot_dialog_open = False
-        tray = TrayController(tray_commands)
+        tray = TrayController(tray_commands, labels={
+            "settings": UI_STRINGS[lang].get("settings_title", "Settings"),
+            "quit": UI_STRINGS[lang].get("exit", "Exit"),
+        })
         tray._set_state(nr=True, scale=work_scale)
         tray.start()
-        print("[main] Трей-иконка запущена")
+        print("[main] tray icon started")
 
-        # Глобальные хоткеи: RegisterHotKey, а не опрос состояния клавиш.
-        # Система отдаёт нажатие только нам и не передаёт его активному
-        # приложению — F9 в игре переключает NR, и игра клавиши не видит.
-        # Команды идут в ту же очередь, что и у трея. Пользовательские
-        # биндинги — из config.json ("hotkeys": {"toggle": "F9", ...}).
+        # Global hotkeys: RegisterHotKey rather than polling the key state.
+        # The system gives the keypress to us alone and does not pass it to the
+        # active application - F9 inside a game toggles NR and the game never
+        # sees the key. The commands go into the same queue the tray uses. The
+        # user's bindings come from config.json ("hotkeys": {"toggle": "F9", ...}).
         hotkey_overrides = cfg.get("hotkeys")
         if not isinstance(hotkey_overrides, dict):
             hotkey_overrides = {}
@@ -1132,63 +1156,64 @@ def main() -> int:
         hotkeys = HotkeyController(tray_commands, hotkey_bindings)
         hotkeys.start()
         if hotkeys.registered:
-            print(f"[main] Хоткеи зарегистрированы: {', '.join(hotkeys.registered)} "
+            print(f"[main] hotkeys registered: {', '.join(hotkeys.registered)} "
                   f"({describe_hotkeys(hotkey_bindings)})")
         if hotkeys.failed:
-            print(f"[main] Хоткеи заняты другой программой: {', '.join(hotkeys.failed)}",
+            print(f"[main] hotkeys taken by another program: {', '.join(hotkeys.failed)}",
                   file=sys.stderr)
-        # Подписи на кнопках меню — из тех же биндингов, что зарегистрированы.
-        # Строго после build_bindings: раньше их просто нет.
+        # The captions on the menu buttons come from the same bindings that were
+        # registered. Strictly after build_bindings: before that they do not exist.
         display.menu.set_hotkeys(hotkey_labels(hotkey_bindings))
 
-        # Настройки живут в оверлейном меню (F8). Отдельного окна больше
-        # нет: оно было вторым интерфейсом с теми же полями, воровало фокус
-        # у игры и тянуло за собой весь tcl/tk в runtime.
+        # The settings live in the overlay menu (F8). There is no separate
+        # window any more: it was a second interface over the same fields, it
+        # stole focus from the game and dragged the whole of tcl/tk into the
+        # runtime.
 
         guides = TemporalGuideGenerator(work_w, work_h)
 
-        # Переиспользуемый буфер: каждый кадр аллоцирует ~100 МБ (захват 4K
-        # + ресайзы + flow), GC не успевает → OOM на ~1900 кадрах. Буфер
-        # переиспользуем через cv2.resize(dst=...). work/out-буферы не нужны:
-        # в v3 ресайз full→work→full делает воркер на GPU (NGX Upscaling).
+        # A reused buffer: every frame allocated ~100 MB (a 4K grab plus the
+        # resizes plus flow), the GC could not keep up -> OOM around frame 1900.
+        # The buffer is reused through cv2.resize(dst=...). work/out buffers are
+        # not needed: in v3 the full->work->full resize is done by the worker on
+        # the GPU (NGX Upscaling).
         buf_full = np.empty((height, width, 4), dtype=np.uint8)
 
         paused = False
         frame_index = 0
         pts = 0
-        guide = None  # инициализация до цикла: F9 до первого NR-кадра не должен давать NameError
-        output_rgba = None  # последний NR-кадр (для скриншота); None до первого
-        # Режим WNDO: кадр показывает воркер, в Python пиксели не приходят.
+        guide = None  # initialised before the loop: F9 before the first NR frame must not raise NameError
+        output_rgba = None  # the last NR frame (for a screenshot); None until the first one
+        # WNDO mode: the worker shows the frame, no pixels come back to Python.
         want_present = bool(cfg.get("worker_present", True))
         want_motion_small = bool(cfg.get("motion_on_gpu", True))
-        want_dda = bool(cfg.get("capture_in_worker", True))  # DDA: цвет берёт воркер
-        # Пиксели результата обратно — через общую память, а не через пайп.
+        want_dda = bool(cfg.get("capture_in_worker", True))  # DDA: the worker takes the colour
+        # The result pixels come back through shared memory, not the pipe.
         want_out_shm = bool(cfg.get("pixels_in_shm", True))
         out_shm = False
         out_attempted = False
-        motion_small = False  # воркер растягивает поле движения сам
-        motion_attempted = False  # пробовали для текущего воркера
-        present_mode = False      # окно воркера сейчас поднято
-        present_attempted = False  # пробовали для текущего воркера (не спамить)
-        dda_mode = False          # воркер захватывает экран сам
-        dda_attempted = False     # пробовали для текущего воркера (не спамить)
-        gray_active = False       # guides берут luminance из gray-канала воркера
-        pending_shot: Path | None = None  # скриншот ждёт кадр с пикселями
-        recorder: VideoRecorder | None = None  # запись (Insert), MP4 AV1 NVENC
-        work_frame = None  # текущий work-кадр; None → захватить в начале цикла
+        motion_small = False  # the worker upscales the motion field itself
+        motion_attempted = False  # already tried for the current worker
+        present_mode = False      # the worker window is up right now
+        present_attempted = False  # already tried for the current worker (do not spam)
+        dda_mode = False          # the worker captures the screen itself
+        dda_attempted = False     # already tried for the current worker (do not spam)
+        gray_active = False       # guides take luminance from the worker's gray channel
+        pending_shot: Path | None = None  # a screenshot waiting for a frame with pixels
+        recorder: VideoRecorder | None = None  # recording (Insert), MP4 AV1 NVENC
+        work_frame = None  # the current work frame; None -> grab at the top of the loop
         fps_window: list[float] = []
         last_log = time.monotonic()
         last_fps = 0.0
-        # Тайминги этапов: средние мс за PERF_LOG_INTERVAL (лог [perf])
+        # Stage timings: mean ms over PERF_LOG_INTERVAL (the [perf] log)
         perf: dict[str, list[float]] = {k: [] for k in PERF_KEYS}
         last_perf_log = time.monotonic()
 
         def _ask_save_path(parent_hwnd: int, default_name: str) -> Path | None:
-            """Нативный диалог «Сохранить как» (GetSaveFileNameW).
+            """The native "Save as" dialog (GetSaveFileNameW).
 
-            Возвращает выбранный путь или None при отмене. JPEG-фильтр по
-            умолчанию; расширение добавляется, если пользователь его не
-            указал.
+            Returns the chosen path, or None on cancel. The JPEG filter is the
+            default; the extension is appended when the user leaves it out.
             """
             try:
                 import ctypes
@@ -1239,8 +1264,8 @@ def main() -> int:
                     path = path.with_suffix(".jpg")
                 return path
             except Exception as exc:
-                print(f"[main] Диалог сохранения недоступен ({exc}) — "
-                      f"скриншот в screenshots/", file=sys.stderr)
+                print(f"[main] save dialog unavailable ({exc}) - "
+                      f"screenshot goes to screenshots/", file=sys.stderr)
                 shot_dir = BASE_DIR / "screenshots"
                 shot_dir.mkdir(exist_ok=True)
                 stamp = time.strftime("%Y%m%d-%H%M%S")
@@ -1248,17 +1273,17 @@ def main() -> int:
                 return shot_dir / f"neuralscreen-{stamp}.jpg"
 
         def _save_screenshot(path: Path, rgba) -> None:
-            """Сохранить кадр в JPEG максимального качества.
+            """Save the frame as a maximum-quality JPEG.
 
-            Открытое меню попадает в скриншот: наш слой исключён из
-            захвата, поэтому его рисуем на кадр сами.
+            An open menu ends up in the screenshot: our layer is excluded from
+            capture, so we draw it onto the frame ourselves.
             """
             try:
                 surf = pygame.image.frombuffer(
                     rgba, (rgba.shape[1], rgba.shape[0]), "RGBX")
                 display.draw_capture_overlay(surf)
             except Exception as exc:
-                print(f"[main] Меню на скриншот не легло: {exc}", file=sys.stderr)
+                print(f"[main] menu was not baked into the screenshot: {exc}", file=sys.stderr)
             try:
                 import cv2 as _cv2
                 path.parent.mkdir(parents=True, exist_ok=True)
@@ -1266,35 +1291,35 @@ def main() -> int:
                                   _cv2.cvtColor(rgba, _cv2.COLOR_RGBA2BGRA),
                                   [_cv2.IMWRITE_JPEG_QUALITY, 100])
                 if ok:
-                    print(f"[main] Скриншот: {path}")
+                    print(f"[main] screenshot: {path}")
                     display.alert(f"Screenshot: {path.name}")
                 else:
-                    print(f"[main] Ошибка записи скриншота: {path}", file=sys.stderr)
+                    print(f"[main] failed to write the screenshot: {path}", file=sys.stderr)
             except Exception as exc:
-                print(f"[main] Ошибка скриншота: {exc}", file=sys.stderr)
+                print(f"[main] screenshot failed: {exc}", file=sys.stderr)
 
         def _perf(key: str, t0: float) -> None:
-            """Записать длительность этапа (мс) в словарь таймингов."""
+            """Record the stage duration (ms) into the timings dictionary."""
             perf[key].append((time.perf_counter() - t0) * 1000.0)
         running = True
-        # Защита от быстрых изменений (автоповтор стрелок, дёрганье слайдера):
-        # промежуточные значения coalescятся, применяется только последнее.
-        # 0.5 c, а не 2 c: смена идёт через RNSZ в живом процессе воркера,
-        # а не через рестарт с NGX init/shutdown + sleep(2) — дорогой путь
-        # остался только фолбэком.
-        RESTART_COOLDOWN = 0.5  # сек
-        RESTART_WARMUP = 10     # warmup после смены разрешения (не фризить экран)
-        RACK_TIMEOUT = 20.0     # сек, ожидание RACK после RNSZ
+        # Protection against rapid changes (arrow key repeat, a jerked slider):
+        # the intermediate values are coalesced and only the last one is applied.
+        # 0.5 s rather than 2 s: the change goes through RNSZ inside the live
+        # worker process, not through a restart with an NGX init/shutdown plus
+        # sleep(2) - the expensive path is only a fallback now.
+        RESTART_COOLDOWN = 0.5  # seconds
+        RESTART_WARMUP = 10     # warmup after a resolution change (do not freeze the screen)
+        RACK_TIMEOUT = 20.0     # seconds to wait for RACK after RNSZ
         last_restart = 0.0
-        pending_apply: tuple | None = None  # отложенное (scale, profile, params)
-        # Лимит авто-восстановления: если воркер умирает N раз подряд —
-        # выключаем NR (пауза) и алертим, чтобы не крутить цикл рестартов.
+        pending_apply: tuple | None = None  # the deferred (scale, profile, params)
+        # Auto-recovery limit: if the worker dies N times in a row we turn NR
+        # off (pause) and raise an alert instead of spinning through restarts.
         MAX_CONSECUTIVE_RESTARTS = 3
         consecutive_restarts = 0
         guide_fails = 0
 
         def _recreate_capture() -> None:
-            """Пересоздать захват (свежая DDA-сессия) после сбоя/смены режима."""
+            """Recreate the capture (a fresh DDA session) after a failure or mode change."""
             nonlocal capture
             try:
                 capture.close()
@@ -1303,56 +1328,58 @@ def main() -> int:
             capture = ScreenCapture(monitor_idx=monitor)
 
         def _safe_grab() -> np.ndarray | None:
-            """grab() с пересозданием захвата при сбое.
+            """grab() that recreates the capture on failure.
 
-            Запуск игры в fullscreen инвалидирует Desktop Duplication
-            (DXGI_ERROR_ACCESS_LOST / смена режима) — dxcam может бросить
-            исключение вместо None. Пересоздаём DDA-сессию и возвращаем
-            None (цикл пропустит итерацию).
+            Launching a game in fullscreen invalidates Desktop Duplication
+            (DXGI_ERROR_ACCESS_LOST / a mode change) - dxcam may raise instead
+            of returning None. We recreate the DDA session and return None (the
+            loop skips the iteration).
             """
             nonlocal capture
             try:
                 return capture.grab()
             except Exception as exc:
-                print(f"[main] Сбой захвата ({exc}) — пересоздаю DDA-сессию")
+                print(f"[main] capture failed ({exc}) - recreating the DDA session")
                 try:
                     _recreate_capture()
                 except Exception as exc2:
-                    print(f"[main] Пересоздание захвата не удалось: {exc2}",
+                    print(f"[main] recreating the capture failed: {exc2}",
                           file=sys.stderr)
                 return None
 
         def _do_restart(new_scale: float, new_profile: str, new_params: dict) -> None:
-            """Сменить work_scale/профиль/параметры БЕЗ пересоздания pygame/захвата.
+            """Change work_scale/profile/parameters WITHOUT recreating pygame or the capture.
 
-            Основной путь — RNSZ: воркер пересоздаёт NGX feature в том же
-            процессе и отвечает RACK (~0.3 c вместо ~3 c на рестарт). Если
-            RNSZ не прошёл — полный рестарт процесса воркера.
+            The main path is RNSZ: the worker recreates the NGX feature inside
+            the same process and answers RACK (~0.3 s instead of ~3 s for a
+            restart). If RNSZ did not go through - a full restart of the worker
+            process.
 
-            КРИТИЧНО: guides пересоздаётся по НОВОМУ work-разрешению и
-            присваивается во внешнюю переменную (nonlocal guides). Раньше
-            присваивание было локальным — внешний guides оставался старого
-            размера, и main слал motion старых размеров, тогда как воркер
-            читает ровно new_w*new_h*4 байт:
-              * scale вверх  → воркер ждёт недостающие байты и молчит, main
-                виснет в reader.recv(60 c), окно не качает сообщения →
-                Application Hang (Event Id 1002) → exit 127;
-              * scale вниз   → лишние байты рассинхронизируют поток, воркер
-                видит чужую магию и выходит → BrokenPipe → цикл рестартов.
-            Воспроизведено изолированно: _work/test_stale_motion_repro.py
-            (случай A — TimeoutError, B — BrokenPipeError, C — контроль OK).
-            pygame/D3D11 к вылетам отношения не имел.
+            CRITICAL: guides is recreated at the NEW work resolution and
+            assigned to the outer variable (nonlocal guides). The assignment
+            used to be local - the outer guides stayed at the old size and main
+            sent motion of the old size, while the worker reads exactly
+            new_w*new_h*4 bytes:
+              * scaling up   -> the worker waits for the missing bytes and goes
+                silent, main hangs in reader.recv(60 s), the window stops
+                pumping messages -> Application Hang (Event Id 1002) -> exit 127;
+              * scaling down -> the extra bytes desynchronise the stream, the
+                worker sees a foreign magic and exits -> BrokenPipe -> a restart
+                loop.
+            Reproduced in isolation: _work/test_stale_motion_repro.py (case A -
+            TimeoutError, B - BrokenPipeError, C - the control, OK).
+            pygame/D3D11 had nothing to do with the crashes.
             """
             nonlocal work_scale, work_w, work_h, params, frame_index, pts, work_frame
             nonlocal worker, worker_logs, reader, worker_stop, last_restart
-            nonlocal guides  # ← без этого main шлёт motion старого размера
+            nonlocal guides  # without this main sends motion of the old size
             work_scale = new_scale
             cfg["profile"] = new_profile
             params = new_params
             new_w, new_h = _work_size(width, height, work_scale)
             new_full_w = width if (new_w != width or new_h != height) else 0
             new_full_h = height if (new_w != width or new_h != height) else 0
-            print(f"[main] Применяю: профиль {new_profile!r}, "
+            print(f"[main] applying: profile {new_profile!r}, "
                   f"work_scale {work_scale:.2f} ({new_w}x{new_h}), params {params}")
             display.alert(UI_STRINGS[lang]["settings_applied"])
 
@@ -1365,40 +1392,43 @@ def main() -> int:
                     reader.wait_rack(timeout=RACK_TIMEOUT)
                     reader.set_output_size(new_full_w or new_w, new_full_h or new_h)
                     applied = True
-                    print(f"[main] RNSZ применён: {new_w}x{new_h} за "
-                          f"{(time.perf_counter() - t_rnsz) * 1000:.0f} мс")
+                    print(f"[main] RNSZ applied: {new_w}x{new_h} in "
+                          f"{(time.perf_counter() - t_rnsz) * 1000:.0f} ms")
                 except Exception as exc:
-                    print(f"[main] RNSZ не прошёл ({exc}) — полный рестарт воркера",
+                    print(f"[main] RNSZ did not go through ({exc}) - full worker restart",
                           file=sys.stderr)
             if not applied:
                 worker, worker_logs, reader, worker_stop = restart_worker(
                     worker, params, new_w, new_h, RESTART_WARMUP,
                     new_full_w, new_full_h, worker_stop, shm)
                 _forget_present()
-                # Новый воркер не знает про DDA/gray: сбросить флаги, чтобы
-                # главный цикл заново послал DDA1/GRAY. Иначе кадры уходят с
-                # NO_COLOR в воркер без захвата — рассинхрон, цикл рестартов.
+                # The new worker knows nothing about DDA/gray: reset the flags
+                # so the main loop sends DDA1/GRAY again. Otherwise the frames
+                # go out with NO_COLOR to a worker that is not capturing - a
+                # desync and a restart loop.
                 _forget_dda()
                 _forget_out()
 
-            # Порядок важен: work_w/work_h и guides меняются ВМЕСТЕ, иначе
-            # размер motion разойдётся с тем, что ждёт воркер (см. docstring).
+            # The order matters: work_w/work_h and guides change TOGETHER,
+            # otherwise the motion size drifts away from what the worker
+            # expects (see the docstring).
             work_w, work_h = new_w, new_h
             guides = TemporalGuideGenerator(work_w, work_h, emit_small=motion_small)
-            _sync_motion_size()  # разрешение потока могло измениться
-            _sync_gray()         # gray-канал живёт в воркере, размер = flow guides
+            _sync_motion_size()  # the flow resolution may have changed
+            _sync_gray()         # the gray channel lives in the worker, size = guides flow
             frame_index = 0
             pts = 0
-            work_frame = None  # индексы сброшены — нужен свежий захват
+            work_frame = None  # the indices are reset - a fresh grab is needed
             tray._set_state(scale=work_scale)
             last_restart = time.monotonic()
 
         def _switch_monitor(new_monitor: int) -> None:
-            """Сменить монитор захвата/вывода — полный перезапуск конвейера.
+            """Switch the capture/output monitor - a full pipeline restart.
 
-            Разрешение, захват, окно, воркер и shm завязаны на монитор —
-            на лету не переключить. Запись останавливается (размер кадра
-            меняется). Меню пересоздаётся с сохранением темы/языка/раскладки.
+            The resolution, the capture, the window, the worker and the shm
+            are all tied to the monitor - it cannot be switched on the fly.
+            Recording stops (the frame size changes). The menu is recreated
+            with its theme/language/layout preserved.
             """
             nonlocal monitor, width, height, work_w, work_h
             nonlocal shm, worker, worker_logs, reader, worker_stop
@@ -1410,19 +1440,20 @@ def main() -> int:
             nonlocal out_shm, out_attempted
             if new_monitor == monitor:
                 return
-            # Меню открыто — из него и переключают. Новый Display создаётся с
-            # закрытым меню, поэтому запоминаем состояние и возвращаем его.
+            # The menu is open - it is where the switch comes from. A new
+            # Display starts with the menu closed, so we remember the state
+            # and put it back.
             menu_was_open = display.menu.visible
-            print(f"[main] Смена монитора: {monitor} -> {new_monitor}")
-            # Запись: размер кадра изменится — закрываем честно (moov).
+            print(f"[main] monitor change: {monitor} -> {new_monitor}")
+            # Recording: the frame size will change - close it honestly (moov).
             if recorder is not None:
                 try:
                     recorder.close()
                 except Exception as exc:
-                    print(f"[main] Ошибка закрытия записи: {exc}", file=sys.stderr)
+                    print(f"[main] failed to close the recording: {exc}", file=sys.stderr)
                 recorder = None
             pending_shot = None
-            # Воркер и shm — старые размеры.
+            # The worker and the shm hold the old sizes.
             shutdown_worker(worker, worker_stop)
             try:
                 shm.close()
@@ -1432,7 +1463,7 @@ def main() -> int:
                 capture.close()
             except Exception:
                 pass
-            # Новый монитор: реальное разрешение.
+            # The new monitor: its real resolution.
             monitor = new_monitor
             cfg["monitor"] = monitor
             capture = ScreenCapture(monitor_idx=monitor)
@@ -1443,7 +1474,7 @@ def main() -> int:
             shm = SharedFrameBuffer(width, height)
             worker, worker_logs, reader, worker_stop = start_worker(
                 params, work_w, work_h, warmup, full_w, full_h, shm)
-            # Окно и меню — заново, с сохранением пользовательских настроек.
+            # The window and the menu are rebuilt, keeping the user settings.
             try:
                 display.close()
             except Exception:
@@ -1467,10 +1498,10 @@ def main() -> int:
                 display.menu.visible = True
                 display.set_menu_opaque(True)
                 display.set_menu_input(True)
-            # guides и буферы — под новое разрешение.
+            # guides and the buffers follow the new resolution.
             guides = TemporalGuideGenerator(work_w, work_h, emit_small=motion_small)
             buf_full = np.empty((height, width, 4), dtype=np.uint8)
-            # Флаги конвейера — новый воркер ничего не знает.
+            # Pipeline flags - the new worker knows nothing.
             present_mode = False
             present_attempted = False
             dda_mode = False
@@ -1480,24 +1511,25 @@ def main() -> int:
             motion_attempted = False
             out_shm = False
             out_attempted = False
-            gpu_ok = None  # новый воркер — новый вердикт feature 18
+            gpu_ok = None  # a new worker means a new verdict on feature 18
             frame_index = 0
             pts = 0
             work_frame = None
-            # Последний NR-кадр — от прежнего монитора и прежнего размера.
-            # Без сброса скриншот сразу после переключения сохранил бы его.
+            # The last NR frame belongs to the previous monitor and size.
+            # Without the reset a screenshot right after the switch would
+            # save it.
             output_rgba = None
             _save_menu_layout()
-            print(f"[main] Монитор {monitor}: {width}x{height}, "
+            print(f"[main] monitor {monitor}: {width}x{height}, "
                   f"work {work_w}x{work_h}")
             display.alert(f"Monitor {monitor}: {width}x{height}")
 
         def _enable_out_shm() -> None:
-            """OUTS: договориться, что пиксели результата пойдут в секцию.
+            """OUTS: agree that the result pixels will go through a section.
 
-            Зовётся после каждого запуска воркера: команда живёт в его
-            процессе, новый про неё не знает. Отказ не смертелен — пиксели
-            пойдут телом в пайп, как раньше.
+            Called after every worker start: the command lives inside its
+            process and a new one knows nothing about it. A refusal is not
+            fatal - the pixels travel down the pipe as before.
             """
             nonlocal out_shm, out_attempted
             out_attempted = True
@@ -1508,19 +1540,20 @@ def main() -> int:
                 send_out(worker, width, height, shm.out_name)
                 reader.wait_oak(timeout=15.0)
                 out_shm = True
-                print(f"[main] Пиксели результата — через общую память "
-                      f"({width}x{height}, {shm.out_bytes / 1024 / 1024:.0f} МБ)")
+                print(f"[main] result pixels through shared memory "
+                      f"({width}x{height}, {shm.out_bytes / 1024 / 1024:.0f} MB)")
             except Exception as exc:
                 out_shm = False
-                print(f"[main] Общая память под пиксели недоступна ({exc}) — "
-                      f"идут через пайп", file=sys.stderr)
+                print(f"[main] shared memory for pixels unavailable ({exc}) - "
+                      f"they go through the pipe", file=sys.stderr)
 
         def _sync_motion_size() -> None:
-            """MOTS: согласовать с воркером разрешение поля движения.
+            """MOTS: agree the motion field resolution with the worker.
 
-            Зовётся после создания guides и после каждого запуска воркера:
-            команда живёт в процессе воркера и новый про неё не знает.
-            Отказ не смертелен — считаем растяжение на CPU, как раньше.
+            Called after guides is created and after every worker start: the
+            command lives inside the worker process and a new one knows
+            nothing about it. A refusal is not fatal - we do the upscale on
+            the CPU, as before.
             """
             nonlocal motion_small, motion_attempted
             motion_attempted = True
@@ -1531,19 +1564,19 @@ def main() -> int:
                 send_motion_size(worker, guides.motion_width, guides.motion_height)
                 reader.wait_mack(timeout=15.0)
                 motion_small = True
-                print(f"[main] Поле движения {guides.motion_width}x{guides.motion_height} — "
-                      f"растягивает воркер на GPU")
+                print(f"[main] motion field {guides.motion_width}x{guides.motion_height} - "
+                      f"upscaled by the worker on the GPU")
             except Exception as exc:
                 guides.emit_small = False
                 motion_small = False
-                print(f"[main] Растяжение motion на GPU недоступно ({exc}) — считаем на CPU",
+                print(f"[main] GPU motion upscale unavailable ({exc}) - doing it on the CPU",
                       file=sys.stderr)
 
         def _enable_present() -> None:
-            """Попросить воркера показывать кадр самому (WNDO).
+            """Ask the worker to present the frame itself (WNDO).
 
-            Отказ не смертелен: остаёмся на возврате пикселей в Python и
-            обычной отрисовке в pygame — этот путь никуда не делся.
+            A refusal is not fatal: we stay on returning pixels to Python and
+            drawing them in pygame - that path has not gone anywhere.
             """
             nonlocal present_mode, present_attempted
             present_attempted = True
@@ -1552,16 +1585,16 @@ def main() -> int:
                 reader.wait_wack(timeout=15.0)
                 present_mode = True
                 display.set_hud_only(True)
-                display.raise_topmost()  # HUD должен быть НАД окном воркера
-                print("[main] Вывод в окне воркера: кадр не возвращается в Python")
+                display.raise_topmost()  # the HUD must be ABOVE the worker's window
+                print("[main] presenting in the worker window: no frame comes back to Python")
             except Exception as exc:
                 present_mode = False
                 display.set_hud_only(False)
-                print(f"[main] Окно воркера недоступно ({exc}) — вывод через pygame",
+                print(f"[main] worker window unavailable ({exc}) - output through pygame",
                       file=sys.stderr)
 
         def _disable_present() -> None:
-            """Закрыть окно воркера и вернуться к отрисовке кадра в pygame."""
+            """Close the worker window and go back to drawing in pygame."""
             nonlocal present_mode, present_attempted
             if not present_mode:
                 return
@@ -1569,13 +1602,13 @@ def main() -> int:
                 send_window(worker, 0, 0, WINDOW_FLAG_DISABLE)
                 reader.wait_wack(timeout=10.0)
             except Exception as exc:
-                print(f"[main] Не удалось закрыть окно воркера: {exc}", file=sys.stderr)
+                print(f"[main] could not close the worker window: {exc}", file=sys.stderr)
             present_mode = False
-            present_attempted = False  # после паузы окно можно поднять снова
+            present_attempted = False  # after a pause the window can be raised again
             display.set_hud_only(False)
 
         def _forget_present() -> None:
-            """Воркер перезапущен — его окно и настройки умерли с процессом."""
+            """The worker restarted - its window and settings died with the process."""
             nonlocal present_mode, present_attempted, motion_small, motion_attempted
             present_mode = False
             present_attempted = False
@@ -1584,12 +1617,12 @@ def main() -> int:
             display.set_hud_only(False)
 
         def _sync_gray() -> None:
-            """GRAY: перевыговорить обратный канал luminance под guides.
+            """GRAY: renegotiate the reverse luminance channel for guides.
 
-            Воркер пишет в маппинг ровно flow-размер guides. Канал меняется
-            вместе с guides (после RNSZ flow может измениться), поэтому
-            пересинхронизация нужна в _enable_dda и после apply.
-            Отказ не смертелен — guides останутся на dxcam.
+            The worker writes exactly the flow size of guides into the
+            mapping. The channel changes together with guides (flow may
+            change after RNSZ), so a resync is needed in _enable_dda and
+            after apply. A refusal is not fatal - guides stay on dxcam.
             """
             nonlocal gray_active
             if not dda_mode:
@@ -1600,38 +1633,39 @@ def main() -> int:
                 send_gray(worker, gw, gh, shm.gray_name)
                 reader.wait_gak(timeout=15.0)
                 gray_active = True
-                print(f"[main] Gray-канал {gw}x{gh}: guides берут luminance из воркера")
+                print(f"[main] gray channel {gw}x{gh}: guides take luminance from the worker")
             except Exception as exc:
                 gray_active = False
-                print(f"[main] Gray-канал недоступен ({exc}) — guides через dxcam",
+                print(f"[main] gray channel unavailable ({exc}) - guides through dxcam",
                       file=sys.stderr)
 
         def _enable_dda() -> None:
-            """Попросить воркера захватывать экран самому (DDA1).
+            """Ask the worker to capture the screen itself (DDA1).
 
-            Пока активен, кадры FRM1 несут FRAME_FLAG_NO_COLOR — цвет в пайп
-            не идёт, воркер берёт его из Desktop Duplication прямо на GPU.
-            Вместе с DDA активируем обратный gray-канал: воркер пишет туда
-            luminance (размер поля потока), guides читают его и не зависят
-            от dxcam. Отказ не смертелен: остаёмся на передаче из Python.
+            While it is active FRM1 frames carry FRAME_FLAG_NO_COLOR - no
+            colour goes down the pipe, the worker takes it from Desktop
+            Duplication straight on the GPU. Together with DDA we activate
+            the reverse gray channel: the worker writes luminance there (the
+            flow field size), guides read it and no longer depend on dxcam.
+            A refusal is not fatal: we stay on sending frames from Python.
             """
             nonlocal dda_mode, dda_attempted, capture
             dda_attempted = True
             try:
-                # Кадр в DDA-режиме всё равно должен быть у guides (motion),
-                # поэтому dxcam продолжает работать — просто цвет не шлём воркеру.
+                # In DDA mode guides still need the frame (motion), so dxcam
+                # keeps running - we simply stop sending colour to the worker.
                 send_dda(worker, width, height, 0)
                 reader.wait_dack(timeout=15.0)
                 dda_mode = True
                 _sync_gray()
-                print("[main] Захват экрана в воркере (DDA1): цвет не идёт через пайп")
+                print("[main] screen capture inside the worker (DDA1): no colour through the pipe")
             except Exception as exc:
                 dda_mode = False
-                print(f"[main] Захват в воркере недоступен ({exc}) — кадры через Python",
+                print(f"[main] capture inside the worker unavailable ({exc}) - frames through Python",
                       file=sys.stderr)
 
         def _disable_dda() -> None:
-            """Выключить захват в воркере и вернуться к передаче кадра из Python."""
+            """Turn off capture in the worker and send the frame from Python again."""
             nonlocal dda_mode
             if not dda_mode:
                 return
@@ -1639,32 +1673,33 @@ def main() -> int:
                 send_dda(worker, 0, 0, 0)
                 reader.wait_dack(timeout=10.0)
             except Exception as exc:
-                print(f"[main] Не удалось выключить захват в воркере: {exc}", file=sys.stderr)
+                print(f"[main] could not turn off capture in the worker: {exc}", file=sys.stderr)
             dda_mode = False
 
         def _forget_dda() -> None:
-            """Воркер перезапущен — его DDA-захват умер с процессом."""
+            """The worker restarted - its DDA capture died with the process."""
             nonlocal dda_mode, dda_attempted, gray_active
             dda_mode = False
             dda_attempted = False
             gray_active = False
 
         def _forget_out() -> None:
-            """Воркер перезапущен — про секцию OUTS он не знает."""
+            """The worker restarted - it knows nothing about the OUTS section."""
             nonlocal out_shm, out_attempted
             out_shm = False
             out_attempted = False
 
         def _save_menu_layout() -> None:
-            """Запомнить размер и положение панели в config.json.
+            """Remember the panel size and position in config.json.
 
-            Пишем на закрытии меню и на выходе, а не на каждое движение мыши:
-            перетаскивание иначе молотило бы файл десятки раз в секунду.
+            We write on menu close and on exit rather than on every mouse
+            move: dragging would otherwise hammer the file dozens of times
+            per second.
             """
             try:
                 data = json.loads(args.config.read_text(encoding="utf-8"))
                 data["menu_scale"] = round(display.menu.user_scale, 2)
-                # Высота: None — «по содержимому», так и пишем.
+                # Height: None means "fit the content", and that is what we write.
                 data["menu_height"] = (None if display.menu.user_height is None
                                        else int(display.menu.user_height))
                 data["open_menu_on_start"] = startup_menu
@@ -1677,15 +1712,15 @@ def main() -> int:
                     json.dumps(data, ensure_ascii=False, indent=2) + "\n",
                     encoding="utf-8")
             except Exception as exc:
-                print(f"[main] Не удалось сохранить вид меню: {exc}", file=sys.stderr)
+                print(f"[main] could not save the menu layout: {exc}", file=sys.stderr)
 
         def _refresh_gpu_ok() -> None:
-            """Работает ли NR — по ответу воркера, а не по архитектуре.
+            """Whether NR works - from the worker's answer, not the architecture.
 
-            Наверняка это знает только воркер: он зовёт CreateFeature и
-            получает код NGX. Архитектура говорит лишь о том, что обещает
-            NVIDIA. Решённый ответ не пересматриваем — рестарты воркера
-            добавляют строки, но вердикт от этого не меняется.
+            Only the worker knows for sure: it calls CreateFeature and gets
+            the NGX code back. The architecture only tells us what NVIDIA
+            promises. Once decided, the answer is not revisited - worker
+            restarts add lines but the verdict does not change.
             """
             nonlocal gpu_ok
             if gpu_ok is not None:
@@ -1694,21 +1729,22 @@ def main() -> int:
                 if "feature 18 ready" in line:
                     gpu_ok = True
                     return
-                # Реальная строка отказа воркера — «[pure] direct feature 18
-                # create failed»; «Unsupported GPU architecture» живёт внутри
-                # nvngx_dlssnr.dll и в stderr воркера не попадает.
+                # The real refusal line from the worker is "[pure] direct
+                # feature 18 create failed"; "Unsupported GPU architecture"
+                # lives inside nvngx_dlssnr.dll and never reaches its stderr.
                 if "feature 18 create failed" in line:
                     gpu_ok = False
                     return
 
         def _open_save_dialog() -> None:
-            """Показать «Сохранить как», не останавливая конвейер.
+            """Show "Save as" without stalling the pipeline.
 
-            GetSaveFileNameW модальный: в главном цикле он замораживал бы
-            оверлей на последнем кадре, а при активной записи пауза над
-            диалогом уезжала в MP4 стоп-кадром (PTS берётся от часов).
-            Поэтому диалог живёт в своём потоке, а путь возвращается через
-            очередь. Второй диалог не открываем — окно уже висит.
+            GetSaveFileNameW is modal: in the main loop it would freeze the
+            overlay on the last frame, and with a recording running the pause
+            over the dialog would land in the MP4 as a still (PTS comes from
+            the clock). So the dialog lives in its own thread and the path
+            comes back through a queue. A second dialog is not opened - one
+            window is already up.
             """
             nonlocal shot_dialog_open
             if shot_dialog_open:
@@ -1721,24 +1757,24 @@ def main() -> int:
                 try:
                     shot_paths.put(_ask_save_path(hwnd, default_name))
                 except Exception as exc:
-                    print(f"[main] Диалог сохранения упал: {exc}", file=sys.stderr)
+                    print(f"[main] the save dialog crashed: {exc}", file=sys.stderr)
                     shot_paths.put(None)
 
             threading.Thread(target=_run, name="save-dialog", daemon=True).start()
 
         def _drain_save_dialog() -> None:
-            """Забрать путь из диалога, если пользователь уже ответил."""
+            """Take the path from the dialog if the user has already answered."""
             nonlocal shot_dialog_open, pending_shot
             try:
                 while True:
                     shot_path = shot_paths.get_nowait()
                     shot_dialog_open = False
                     if shot_path is None:
-                        print("[main] Скриншот отменён пользователем")
+                        print("[main] screenshot cancelled by the user")
                         continue
                     if present_mode:
                         pending_shot = shot_path
-                        print(f"[main] Скриншот со следующего кадра: {shot_path}")
+                        print(f"[main] screenshot from the next frame: {shot_path}")
                     elif output_rgba is not None:
                         _save_screenshot(shot_path, output_rgba)
                     else:
@@ -1747,10 +1783,10 @@ def main() -> int:
                 pass
 
         def _save_hotkeys(mapping: dict) -> None:
-            """Записать назначения в config.json.
+            """Write the assignments into config.json.
 
-            Отдельно от _save_menu_layout: тот зовётся на закрытии меню, а
-            клавишу пользователь ждёт увидеть сохранённой сразу.
+            Separate from _save_menu_layout: that one runs on menu close,
+            while the user expects a key to be saved right away.
             """
             try:
                 data = json.loads(args.config.read_text(encoding="utf-8"))
@@ -1759,11 +1795,11 @@ def main() -> int:
                     json.dumps(data, ensure_ascii=False, indent=2) + "\n",
                     encoding="utf-8")
             except Exception as exc:
-                print(f"[main] Не удалось сохранить хоткеи: {exc}",
+                print(f"[main] could not save the hotkeys: {exc}",
                       file=sys.stderr)
 
         def _menu_payload() -> dict:
-            """Текущее состояние для меню — один источник правды."""
+            """The current state for the menu - a single source of truth."""
             _refresh_gpu_ok()
             return {
                 "nr": not paused,
@@ -1787,29 +1823,29 @@ def main() -> int:
             }
 
         def _apply_menu_action(action: tuple) -> None:
-            """Действие из меню -> реальная настройка.
+            """A menu action -> a real setting.
 
-            Меню ничего не меняет само: оно сообщает, чего хочет пользователь,
-            а решение принимается здесь, там же где живут params и cfg.
+            The menu changes nothing on its own: it reports what the user
+            wants and the decision is taken here, where params and cfg live.
             """
             nonlocal lang, running, startup_menu, split_pos, hotkey_bindings
             kind = action[0]
             if kind == "nr":
                 tray_commands.put("toggle")
             elif kind == "split":
-                # Воркер пересоздавать не нужно: позиция шторки едет в
-                # заголовке каждого кадра.
+                # No need to recreate the worker: the wipe position rides in
+                # every frame's header.
                 split_pos = min(1.0, max(0.0, float(action[1])))
             elif kind == "toggle" and action[1] == "open_on_start":
                 startup_menu = not startup_menu
                 _save_menu_layout()
-                print(f"[main] Меню при запуске: {'да' if startup_menu else 'нет'}")
+                print(f"[main] menu at startup: {'yes' if startup_menu else 'no'}")
             elif kind == "toggle" and action[1] == "autostart":
-                # Автозапуск с Windows (HKCU Run). Состояние хранится в
-                # реестре, не в config — читаем и инвертируем.
+                # Autostart with Windows (HKCU Run). The state lives in the
+                # registry, not in the config - read it and invert.
                 new_state = not _autostart_enabled()
                 if _set_autostart(new_state):
-                    print(f"[main] Автозапуск с Windows: {'вкл' if new_state else 'выкл'}")
+                    print(f"[main] autostart with Windows: {'on' if new_state else 'off'}")
                     display.alert(UI_STRINGS[lang].get(
                         "autostart_on" if new_state else "autostart_off",
                         "Autostart ON" if new_state else "Autostart OFF"))
@@ -1826,10 +1862,11 @@ def main() -> int:
                     lang = action[1]
                     display.set_lang(lang)
                     display.menu.set_state({"lang": lang})
-                    print(f"[main] Язык интерфейса -> {lang}")
+                    print(f"[main] interface language -> {lang}")
             elif kind == "capture":
-                # Пока меню ждёт нажатие, глобальные хоткеи надо снять: иначе
-                # F8 переключит меню вместо того, чтобы попасть в поле.
+                # While the menu waits for a keypress the global hotkeys must
+                # be suspended: otherwise F8 toggles the menu instead of
+                # landing in the field.
                 if action[1]:
                     hotkeys.suspend()
                 else:
@@ -1838,7 +1875,7 @@ def main() -> int:
                 cmd, text = action[1], action[2]
                 parsed = parse_binding(text)
                 if parsed is None:
-                    print(f"[main] Не понял комбинацию {text!r}", file=sys.stderr)
+                    print(f"[main] could not parse the combination {text!r}", file=sys.stderr)
                     display.alert(UI_STRINGS[lang]["hotkey_bad"])
                 else:
                     over = cfg.get("hotkeys")
@@ -1852,16 +1889,16 @@ def main() -> int:
                     print(f"[main] {cmd} -> {text}")
                     display.alert(UI_STRINGS[lang]["settings_applied"])
             elif kind == "theme":
-                # Меню уже применило тему к себе (overlay_ui), здесь только
-                # запоминаем для config.json — _save_menu_layout() вызывается
-                # при закрытии меню и на выходе.
-                print(f"[main] Тема меню -> {action[1]}")
+                # The menu has already applied the theme to itself
+                # (overlay_ui); here we only remember it for config.json -
+                # _save_menu_layout() runs on menu close and on exit.
+                print(f"[main] menu theme -> {action[1]}")
             elif kind == "monitor":
-                # Значение приходит как "N: WxH" — берём индекс до двоеточия.
+                # The value arrives as "N: WxH" - take the index before the colon.
                 try:
                     new_monitor = int(str(action[1]).split(":")[0])
                 except (ValueError, IndexError):
-                    print(f"[main] Неверный монитор: {action[1]!r}", file=sys.stderr)
+                    print(f"[main] invalid monitor: {action[1]!r}", file=sys.stderr)
                     return
                 if new_monitor != monitor:
                     _switch_monitor(new_monitor)
@@ -1873,36 +1910,38 @@ def main() -> int:
                     display.set_menu_input(False)
                     _save_menu_layout()
                 elif name == "exit":
-                    print(f"[main] Выход: кнопка в меню оверлея "
-                          f"(кадров обработано {frame_index})")
+                    print(f"[main] exit: button in the overlay menu "
+                          f"(frames processed {frame_index})")
                     running = False
                 elif name == "record":
                     tray_commands.put("record")
                 elif name == "screenshot":
                     tray_commands.put("screenshot_menu")
                 elif name == "github":
-                    # Хоткеи, профили и требования описаны только в README —
-                    # из самой программы про них узнать было неоткуда.
+                    # The hotkeys, profiles and requirements are described
+                    # only in the README - there was no way to learn about
+                    # them from the program itself.
                     try:
                         import webbrowser
                         webbrowser.open(REPO_URL)
                         display.alert(UI_STRINGS[lang]["github_opened"])
                     except Exception as exc:
-                        print(f"[main] Не удалось открыть {REPO_URL}: {exc}",
+                        print(f"[main] could not open {REPO_URL}: {exc}",
                               file=sys.stderr)
 
         def request_apply(new_scale: float, new_profile: str, new_params: dict) -> None:
-            """Применить настройки с coalescing по RESTART_COOLDOWN.
+            """Apply the settings with coalescing over RESTART_COOLDOWN.
 
-            Единая точка для окна настроек, трея и хоткеев: раньше проверку
-            кулдауна делал только путь настроек, а трей и стрелки звали
-            _do_restart напрямую — автоповтор стрелки давал шквал RNSZ.
+            The single entry point for the settings window, the tray and the
+            hotkeys: the cooldown check used to live only on the settings
+            path, while the tray and the arrows called _do_restart directly -
+            key repeat on an arrow produced a flood of RNSZ.
             """
             nonlocal pending_apply
             if time.monotonic() - last_restart < RESTART_COOLDOWN:
                 pending_apply = (new_scale, new_profile, new_params)
-                print(f"[main] Применение отложено (cooldown {RESTART_COOLDOWN:.1f} c), "
-                      f"применится последнее значение")
+                print(f"[main] apply deferred (cooldown {RESTART_COOLDOWN:.1f} s), "
+                      f"the last value will be applied")
             else:
                 _do_restart(new_scale, new_profile, new_params)
 
@@ -1910,63 +1949,64 @@ def main() -> int:
             loop_start = time.perf_counter()
             now = time.monotonic()
 
-            # Команды из трея (thread-safe очередь)
+            # Commands from the tray (thread-safe queue)
             try:
                 while True:
                     cmd = tray_commands.get_nowait()
                     if cmd == "quit":
-                        print(f"[main] Выход: трей или Ctrl+Alt+Q "
-                              f"(кадров обработано {frame_index})")
+                        print(f"[main] exit: tray or the quit hotkey "
+                              f"(frames processed {frame_index})")
                         running = False
                     elif cmd == "settings":
-                        # F8 и левый клик по трею открывают меню в оверлее —
-                        # единственное место, где живут настройки.
+                        # F8 and a left click on the tray open the overlay
+                        # menu - the only place the settings live.
                         display.menu.set_state(_menu_payload())
                         opened = display.menu.toggle()
                         display.set_menu_opaque(opened)
                         display.set_menu_input(opened)
                         if not opened:
                             _save_menu_layout()
-                        print(f"[main] Меню в оверлее {'открыто' if opened else 'закрыто'}")
+                        print(f"[main] overlay menu {'opened' if opened else 'closed'}")
                     elif cmd == "toggle":
                         paused = not paused
                         if not paused:
-                            work_frame = None  # свежий захват после паузы
+                            work_frame = None  # a fresh grab after the pause
                         print(f"[main] NR {'OFF (bypass NGX)' if paused else 'ON'}")
                         display.alert(UI_STRINGS[lang]["nr_off" if paused else "nr_on"])
                         tray._set_state(nr=not paused)
                     elif cmd == "screenshot_menu":
                         _open_save_dialog()
                     elif cmd == "record":
-                        # Insert: запись NR-кадра в MP4. Кадры запрашиваем у
-                        # воркера через FRAME_FLAG_WANT_PIXELS (механизм
-                        # скриншота, но для каждого кадра записи).
+                        # Insert: record the NR frame into an MP4. The frames
+                        # are requested from the worker through
+                        # FRAME_FLAG_WANT_PIXELS (the screenshot mechanism,
+                        # but for every recorded frame).
                         if recorder is None:
                             rec_dir = BASE_DIR / "recordings"
                             rec_dir.mkdir(exist_ok=True)
                             stamp = time.strftime("%Y%m%d-%H%M%S")
-                            # Две записи в одну секунду не должны перезаписывать
-                            # друг друга — добавляем миллисекунды.
+                            # Two recordings within one second must not
+                            # overwrite each other - we add milliseconds.
                             stamp = f"{stamp}-{time.time() % 1 * 1000:03.0f}"
                             path = str(rec_dir / f"neuralscreen-{stamp}.mp4")
                             try:
                                 recorder = VideoRecorder(path, width, height, fps=60)
                             except Exception as exc:
-                                print(f"[main] Запись не стартовала: {exc}", file=sys.stderr)
+                                print(f"[main] recording did not start: {exc}", file=sys.stderr)
                                 display.alert(f"REC ERROR: {exc}")
                                 recorder = None
                             else:
-                                print(f"[main] Запись начата: {path}")
+                                print(f"[main] recording started: {path}")
                                 display.alert(UI_STRINGS[lang]["record_on"])
                         else:
                             rec_path = recorder.path
                             try:
                                 recorder.close()
                             except Exception as exc:
-                                print(f"[main] Ошибка закрытия записи: {exc}", file=sys.stderr)
+                                print(f"[main] failed to close the recording: {exc}", file=sys.stderr)
                             secs = recorder.duration_ms / 1000.0
-                            print(f"[main] Запись завершена: {rec_path} "
-                                  f"({recorder.written} кадров, {secs:.1f}с)")
+                            print(f"[main] recording finished: {rec_path} "
+                                  f"({recorder.written} frames, {secs:.1f}s)")
                             display.alert(UI_STRINGS[lang]["record_off"])
                             recorder = None
                     elif cmd in ("scale_up", "scale_down"):
@@ -1980,26 +2020,26 @@ def main() -> int:
             except queue.Empty:
                 pass
 
-            # Отложенное применение (coalescing): если рестарт был недавно,
-            # применяем последнее значение после паузы
+            # Deferred apply (coalescing): if a restart happened recently, we
+            # apply the last value once the pause is over
             if pending_apply is not None and time.monotonic() - last_restart >= RESTART_COOLDOWN:
                 p_scale, p_profile, p_params = pending_apply
                 pending_apply = None
-                print("[main] Применяю отложенные настройки")
+                print("[main] applying the deferred settings")
                 _do_restart(p_scale, p_profile, p_params)
 
             if not running:
                 break
 
-            # NR OFF — bypass: конвейер продолжает крутиться (захват → показ
-            # сырого кадра в окне воркера), но NGX-эффект пропущен. Оверлей
-            # (картинка + HUD) остаётся живым и предсказуемым; прячем всё
-            # только при реальном выходе. Bypass-кадр шлём как обычный (флаг
-            # в заголовке), чтобы парность send/recv не нарушалась.
+            # NR OFF - bypass: the pipeline keeps spinning (grab -> show the
+            # raw frame in the worker's window) but the NGX effect is skipped.
+            # The overlay (picture + HUD) stays alive and predictable; we hide
+            # everything only on a real exit. A bypass frame is sent like any
+            # other (the flag lives in the header) so send/recv stay paired.
             bypass = paused
-            # (для читаемости: в send_frame передаём bypass=bypass)
+            # (for readability: send_frame is called with bypass=bypass)
 
-            # Ответ диалога «Сохранить как» (он в своём потоке).
+            # The answer from the "Save as" dialog (it runs in its own thread).
             _drain_save_dialog()
 
             if want_present and not present_mode and not present_attempted:
@@ -2012,10 +2052,10 @@ def main() -> int:
             if want_out_shm and not out_shm and not out_attempted:
                 _enable_out_shm()
 
-            # --- Ввод в меню оверлея ---------------------------------
-            # События читаем только когда меню открыто: в остальное время
-            # окно click-through, событий нет, а лишний get() съедал бы
-            # очередь у pump() внутри отрисовки.
+            # --- Input for the overlay menu --------------------------
+            # Events are read only while the menu is open: the rest of the
+            # time the window is click-through, there are no events, and an
+            # extra get() would eat the queue from pump() inside drawing.
             if display.menu.visible:
                 for ev in pygame.event.get():
                     for action in display.menu.handle_event(ev):
@@ -2023,27 +2063,29 @@ def main() -> int:
                 if not display.menu.dragging:
                     display.menu.set_state(_menu_payload())
 
-            # --- Захват вперёд: пока NGX считает кадр N, захватываем N+1 ---
-            # work_frame == None бывает: первый кадр, после рестарта воркера
-            # (смена work_scale), после grab()==None. Тогда захват идёт в
-            # начале итерации, ДО send — синхронизация с воркером не теряется
-            # (send/recv всегда парные, recv обязателен после любого send).
-            # Воркер (v3, NGX Upscaling) сам ресайзит full→work→full на GPU:
-            # Python шлёт full-res кадр, motion — work-res (guides создан
-            # с work_w/work_h и сам уменьшает вход), получает full-res.
+            # --- Grab ahead: while NGX computes frame N we grab N+1 -------
+            # work_frame == None happens on the first frame, after a worker
+            # restart (a work_scale change) and after grab()==None. Then the
+            # grab happens at the start of the iteration, BEFORE send - the
+            # synchronisation with the worker is not lost (send/recv are
+            # always paired, recv is mandatory after any send).
+            # The worker (v3, NGX Upscaling) resizes full->work->full on the
+            # GPU itself: Python sends a full-res frame, motion at work-res
+            # (guides is built with work_w/work_h and downsamples its own
+            # input) and receives full-res back.
             if work_frame is None and not gray_active:
                 t0 = time.perf_counter()
                 frame = _safe_grab()
                 _perf("grab", t0)
                 if frame is None:
-                    continue  # кадр ещё не готов — пропускаем итерацию
+                    continue  # the frame is not ready yet - skip the iteration
                 if frame.shape[1] != width or frame.shape[0] != height:
                     t0 = time.perf_counter()
                     try:
                         cv2.resize(frame, (width, height), interpolation=cv2.INTER_LANCZOS4, dst=buf_full)
                     except cv2.error:
-                        # Смена разрешения монитора: buf_full предвыделен под
-                        # старый размер — пересоздаём и повторяем без dst
+                        # The monitor resolution changed: buf_full was
+                        # preallocated for the old size - recreate and retry
                         buf_full = np.empty((height, width, 4), dtype=np.uint8)
                         cv2.resize(frame, (width, height), interpolation=cv2.INTER_LANCZOS4, dst=buf_full)
                     _perf("resize_full", t0)
@@ -2052,10 +2094,11 @@ def main() -> int:
                     frame = np.ascontiguousarray(frame, dtype=np.uint8)
                 work_frame = frame
 
-            # --- Отправка кадра с авто-восстановлением ---
-            # Воркер может умереть/зависнуть (NGX после RNSZ, GPU-конфликт) —
-            # вместо вылета main перезапускает воркера с текущими параметрами
-            # и продолжает. Это финальная защита: программа не падает.
+            # --- Sending the frame with auto-recovery ---
+            # The worker can die or hang (NGX after RNSZ, a GPU conflict) -
+            # instead of crashing, main restarts the worker with the current
+            # parameters and carries on. This is the last line of defence:
+            # the program does not fall over.
             try:
                 t0 = time.perf_counter()
                 if gray_active:
@@ -2064,18 +2107,19 @@ def main() -> int:
                     guide = guides.process(work_frame)
                 _perf("guides", t0)
             except Exception as guide_exc:
-                # guides — не критичен: ValueError/TypeError/cv2.error (форма
-                # gray-кадра, деление на ноль) не должны валить процесс.
-                # Пропускаем кадр — воркер получит следующий. Но устойчивая
-                # ошибка (несовместимый gray-канал, битая форма) зациклит
-                # main на 100% CPU — после 5 сбоев подряд уходим на нулевой
-                # motion-фолбэк: кадр продолжит идти, картинка не замрёт.
-                print(f"[main] guides.process упал ({guide_exc}) — кадр пропущен",
+                # guides is not critical: ValueError/TypeError/cv2.error (the
+                # shape of the gray frame, a division by zero) must not take
+                # the process down. We skip the frame - the worker gets the
+                # next one. But a persistent error (an incompatible gray
+                # channel, a broken shape) would spin main at 100% CPU -
+                # after 5 failures in a row we fall back to zero motion: the
+                # frames keep flowing and the picture does not freeze.
+                print(f"[main] guides.process failed ({guide_exc}) - frame skipped",
                       file=sys.stderr)
                 guide_fails += 1
                 if guide_fails >= 5:
-                    print(f"[main] guides.process нестабилен — нулевой motion "
-                          f"(кадры продолжают идти)", file=sys.stderr)
+                    print(f"[main] guides.process is unstable - zero motion "
+                          f"(frames keep flowing)", file=sys.stderr)
                     guide_fails = 0
                     guide = guides.zero_guide()
                 else:
@@ -2093,17 +2137,17 @@ def main() -> int:
             except (BrokenPipeError, OSError, EOFError, RuntimeError) as exc:
                 consecutive_restarts += 1
                 if consecutive_restarts >= MAX_CONSECUTIVE_RESTARTS:
-                    print(f"[main] Воркер умирает {consecutive_restarts} раз подряд — NR OFF")
+                    print(f"[main] the worker died {consecutive_restarts} times in a row - NR OFF")
                     paused = True
                     display.alert(UI_STRINGS[lang]["nr_off"])
                     tray._set_state(nr=False)
                     consecutive_restarts = 0
                     work_frame = None
                     continue
-                print(f"[main] Воркер потерян при отправке ({exc}) — перезапуск "
+                print(f"[main] worker lost while sending ({exc}) - restarting "
                       f"({consecutive_restarts}/{MAX_CONSECUTIVE_RESTARTS})")
                 if worker_logs:
-                    print("[main] stderr воркера (хвост):")
+                    print("[main] worker stderr (tail):")
                     for line in worker_logs[-15:]:
                         print(f"  {line}")
                 worker, worker_logs, reader, worker_stop = restart_worker(
@@ -2120,13 +2164,13 @@ def main() -> int:
                 work_frame = None
                 continue
 
-            # Захват следующего кадра ПОКА воркер считает текущий (NGX
-            # ~70-100 мс/кадр — узкое место). dxcam потокобезопасен в одном
-            # потоке — второй поток не нужен, просто переставляем grab()
-            # между send и recv. Буферы: send_frame копирует данные в pipe
-            # (tobytes), guides.process не держит ссылок на вход — buf_full
-            # можно переиспользовать сразу.
-            # В DDA-режиме кадр берёт воркер сам — Python не захватывает.
+            # Grab the next frame WHILE the worker computes the current one
+            # (NGX is ~70-100 ms/frame - the bottleneck). dxcam is thread-safe
+            # within one thread - a second thread is unnecessary, we simply
+            # move grab() between send and recv. Buffers: send_frame copies
+            # the data into the pipe (tobytes) and guides.process keeps no
+            # references to its input - buf_full can be reused right away.
+            # In DDA mode the worker grabs the frame itself - Python does not.
             next_frame = None
             if not gray_active:
                 t0 = time.perf_counter()
@@ -2144,9 +2188,10 @@ def main() -> int:
                     next_frame = buf_full
                 else:
                     next_frame = np.ascontiguousarray(next_frame, dtype=np.uint8)
-            # next_frame == None: кадр не готов — следующий захват сделает
-            # начало следующей итерации (work_frame = None). Синхронизация
-            # с воркером не теряется: send уже отправлен, recv ниже обязателен.
+            # next_frame == None: the frame is not ready - the start of the
+            # next iteration will do the grab (work_frame = None). The
+            # synchronisation with the worker is not lost: send has already
+            # gone out and the recv below is mandatory.
 
             t0 = time.perf_counter()
             try:
@@ -2154,14 +2199,14 @@ def main() -> int:
             except (TimeoutError, EOFError, RuntimeError, OSError) as exc:
                 consecutive_restarts += 1
                 if consecutive_restarts >= MAX_CONSECUTIVE_RESTARTS:
-                    print(f"[main] Воркер молчит/умирает {consecutive_restarts} раз подряд — NR OFF")
+                    print(f"[main] worker silent/dying {consecutive_restarts} times in a row - NR OFF")
                     paused = True
                     display.alert(UI_STRINGS[lang]["nr_off"])
                     tray._set_state(nr=False)
                     consecutive_restarts = 0
                     work_frame = None
                     continue
-                print(f"[main] Воркер молчит/умер на кадре {frame_index} ({exc}) — перезапуск "
+                print(f"[main] worker silent/dead on frame {frame_index} ({exc}) - restarting "
                       f"({consecutive_restarts}/{MAX_CONSECUTIVE_RESTARTS})")
                 worker, worker_logs, reader, worker_stop = restart_worker(
                     worker, params, work_w, work_h, 10,
@@ -2177,9 +2222,9 @@ def main() -> int:
                 work_frame = None
                 continue
             _perf("recv", t0)
-            # Кадр получен — цепочка сбоев прервана. Без сброса счётчик
-            # копился за всю сессию, и три несвязанных сбоя (хоть с разницей
-            # в час) выключали NR.
+            # A frame arrived - the failure chain is broken. Without the reset
+            # the counter accumulated across the whole session and three
+            # unrelated failures (even an hour apart) turned NR off.
             consecutive_restarts = 0
             status = "NR OFF" if paused else "NR ON"
             pts += 1
@@ -2187,43 +2232,47 @@ def main() -> int:
             t0 = time.perf_counter()
             try:
                 if recorder is not None and output_rgba is not None:
-                    # Наш слой исключён из захвата (WDA_EXCLUDEFROM
-                    # CAPTURE), поэтому открытое меню кладём на кадр сами.
-                    # frombuffer ссылается на numpy-буфер (без копии):
-                    # blit пишет прямо в output_rgba.
+                    # Our layer is excluded from capture
+                    # (WDA_EXCLUDEFROMCAPTURE), so we bake the open menu onto
+                    # the frame ourselves. frombuffer references the numpy
+                    # buffer (no copy): the blit writes straight into
+                    # output_rgba.
                     try:
                         surf = pygame.image.frombuffer(
                             output_rgba, (output_rgba.shape[1], output_rgba.shape[0]), "RGBX")
                         display.draw_capture_overlay(surf)
                     except Exception as menu_exc:
-                        print(f"[main] Меню на кадр записи не легло: {menu_exc}",
+                        print(f"[main] menu was not baked into the recorded frame: {menu_exc}",
                               file=sys.stderr)
-                    # Запись — отдельный try: сбой кодера НЕ должен попадать в
-                    # except «Сбой вывода» (тот пересоздаёт pygame-окно на
-                    # каждом кадре — бесконечный цикл). Ошибка записи
-                    # останавливает запись, а не окно.
+                    # The recording gets its own try: an encoder failure must
+                    # NOT land in the "output failed" except (that one
+                    # recreates the pygame window on every frame - an endless
+                    # loop). A recording error stops the recording, not the
+                    # window.
                     try:
                         recorder.write(output_rgba)
                     except Exception as rec_exc:
-                        print(f"[main] Ошибка записи кадра ({rec_exc}) — "
-                              f"останавливаю запись", file=sys.stderr)
+                        print(f"[main] frame write failed ({rec_exc}) - "
+                              f"stopping the recording", file=sys.stderr)
                         try:
                             recorder.close()
                         except Exception:
                             pass
                         recorder = None
                 if present_mode:
-                    # В WNDO-режиме кадр на экране рисует воркер; в Python
-                    # пиксели приходят ТОЛЬКО по want_pixels (запись/скриншот).
-                    # Показывать их в pygame не нужно: это лишний блендинг 4K
-                    # (~22 мс) и мелькание кадра в HUD-слое поверх окна воркера.
-                    # HUD обновляется draw_overlay() с троттлингом (не каждый кадр).
+                    # In WNDO mode the worker draws the frame on screen; in
+                    # Python the pixels arrive ONLY on want_pixels
+                    # (recording/screenshot). There is no need to show them in
+                    # pygame: that is a pointless 4K blend (~22 ms) and a
+                    # flicker of the frame in the HUD layer above the worker's
+                    # window. The HUD is refreshed by draw_overlay() with
+                    # throttling (not every frame).
                     if pending_shot is not None and output_rgba is not None:
                         _save_screenshot(pending_shot, output_rgba)
                         pending_shot = None
                     display.draw_overlay()
                 elif output_rgba is None:
-                    # Кадр уже на экране — его показал воркер, тут только HUD
+                    # The frame is already on screen - the worker showed it, only the HUD here
                     display.draw_overlay()
                 else:
                     display.show(output_rgba)
@@ -2231,18 +2280,19 @@ def main() -> int:
                         _save_screenshot(pending_shot, output_rgba)
                         pending_shot = None
             except Exception as exc:
-                # Смена режима дисплея (запуск/выход из fullscreen-игры)
-                # может убить контекст pygame/SDL — пересоздаём окно.
-                print(f"[main] Сбой вывода ({exc}) — пересоздаю окно")
+                # A display mode change (entering/leaving a fullscreen game)
+                # can kill the pygame/SDL context - recreate the window.
+                print(f"[main] output failed ({exc}) - recreating the window")
                 try:
                     display.close()
                 except Exception:
                     pass
                 display = Display(width, height, fullscreen=bool(cfg["fullscreen"]))
                 display.set_lang(lang)
-                # Меню создаётся вместе с окном — возвращаем ему размер,
-                # положение, тему и язык, иначе после запуска игры оно
-                # прыгает в центр, светлеет и переходит на en.
+                # The menu is created together with the window - we give it
+                # back its size, position, theme and language, otherwise after
+                # a game starts it jumps to the centre, turns light and
+                # switches to en.
                 display.menu.set_user_scale(float(cfg.get("menu_scale", 1.0)))
                 display.menu.set_hotkeys(hotkey_labels(hotkey_bindings))
                 saved_theme = cfg.get("theme")
@@ -2253,7 +2303,7 @@ def main() -> int:
                 if isinstance(saved, (list, tuple)) and len(saved) == 2:
                     display.menu.offset = [int(saved[0]), int(saved[1])]
                 if present_mode:
-                    # Новое окно снова должно стать прозрачным слоем поверх воркера
+                    # The new window must become a transparent layer over the worker again
                     display.set_hud_only(True)
                     display.raise_topmost()
                 display.alert(UI_STRINGS[lang]["nr_on"])
@@ -2269,26 +2319,26 @@ def main() -> int:
 
             frame_index += 1
             if startup_pending and frame_index >= 2:
-                # Ждём первый показанный кадр: открытое меню поверх ещё не
-                # заполненного окна мигает чёрным.
+                # Wait for the first displayed frame: an open menu over a
+                # window that is not filled yet flashes black.
                 startup_pending = False
                 if startup_menu:
                     display.menu.set_state(_menu_payload())
                     display.menu.visible = True
                     display.set_menu_opaque(True)
                     display.set_menu_input(True)
-                    print("[main] Меню открыто при запуске")
+                    print("[main] menu opened at startup")
                 else:
                     display.alert(UI_STRINGS[lang]["started"], 3.5)
-            work_frame = next_frame  # None → захват в начале следующей итерации
+            work_frame = next_frame  # None -> grab at the start of the next iteration
             fps_window.append(time.perf_counter() - loop_start)
             if len(fps_window) > 120:
                 fps_window.pop(0)
 
             if now - last_log >= FPS_LOG_INTERVAL:
                 last_fps = len(fps_window) / sum(fps_window) if fps_window else 0.0
-                scene = f" | сцена {guide.scene_score:.3f}" if guide is not None else ""
-                print(f"[main] {status} | FPS {last_fps:5.1f} | кадров {frame_index} | "
+                scene = f" | scene {guide.scene_score:.3f}" if guide is not None else ""
+                print(f"[main] {status} | FPS {last_fps:5.1f} | frames {frame_index} | "
                       f"work {work_w}x{work_h}{scene}")
                 last_log = now
 
@@ -2303,24 +2353,24 @@ def main() -> int:
                     print("[perf] " + " | ".join(parts))
                 last_perf_log = now
 
-        print("[main] Выход по запросу пользователя")
+        print("[main] exiting at the user's request")
     except KeyboardInterrupt:
-        print("\n[main] Прервано (Ctrl+C)")
+        print("\n[main] interrupted (Ctrl+C)")
     except Exception as exc:
-        print(f"[main] ОШИБКА: {exc}", file=sys.stderr)
+        print(f"[main] ERROR: {exc}", file=sys.stderr)
         if worker is not None and worker.poll() is not None:
-            print("[main] Воркер упал; последние строки stderr:", file=sys.stderr)
+            print("[main] the worker crashed; last stderr lines:", file=sys.stderr)
             for line in worker_logs[-40:]:
                 print(f"  {line}", file=sys.stderr)
         return 1
     finally:
-        # Запись могла идти в момент выхода: без close() moov-атом не
-        # допишется и файл останется битым (плееры его не откроют).
+        # A recording may have been running at exit: without close() the moov
+        # atom is not written and the file stays broken (players refuse it).
         if recorder is not None:
             try:
                 recorder.close()
             except Exception as exc:
-                print(f"[main] Ошибка закрытия записи: {exc}", file=sys.stderr)
+                print(f"[main] failed to close the recording: {exc}", file=sys.stderr)
         if worker is not None:
             shutdown_worker(worker, worker_stop)
         if shm is not None:
@@ -2333,12 +2383,12 @@ def main() -> int:
             try:
                 capture.close()
             except Exception as exc:
-                print(f"[main] Ошибка закрытия захвата: {exc}", file=sys.stderr)
+                print(f"[main] failed to close the capture: {exc}", file=sys.stderr)
         if display is not None:
             try:
                 display.close()
             except Exception as exc:
-                print(f"[main] Ошибка закрытия окна: {exc}", file=sys.stderr)
+                print(f"[main] failed to close the window: {exc}", file=sys.stderr)
         try:
             hotkeys.stop()
         except Exception:
@@ -2347,7 +2397,7 @@ def main() -> int:
             tray.stop()
         except Exception:
             pass
-        print("[main] Ресурсы освобождены")
+        print("[main] resources released")
     return 0
 
 
@@ -2355,15 +2405,15 @@ if __name__ == "__main__":
     try:
         sys.exit(main())
     except Exception as exc:
-        # pythonw: консоли нет — показать причину отказа пользователю окном,
-        # детали — в NeuralScreen.log.
+        # pythonw: there is no console - show the reason in a message box and
+        # keep the details in NeuralScreen.log.
         import traceback
         traceback.print_exc()
         try:
             import ctypes as _ct
             _ct.windll.user32.MessageBoxW(
                 None,
-                f"NeuralScreen не запустился: {exc}\n\nПодробности в NeuralScreen.log рядом с программой.",
+                f"NeuralScreen failed to start: {exc}\n\nDetails in NeuralScreen.log next to the program.",
                 "NeuralScreen", 0x10)  # MB_ICONERROR
         except Exception:
             pass

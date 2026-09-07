@@ -1,19 +1,19 @@
-"""OverlayMenu — меню настроек прямо в оверлейном слое, как в ReShade.
+"""OverlayMenu - the settings menu right inside the overlay layer, like ReShade.
 
-Рисуется на той же pygame-поверхности, что HUD и алерты, поэтому окон
-по-прежнему одно: никакой борьбы за topmost и фокус с игрой.
+It is drawn on the same pygame surface as the HUD and the alerts, so there is
+still a single window: no fight over topmost and focus with the game.
 
-Разделение обязанностей: модуль СТРОИТ РАСКЛАДКУ и РИСУЕТ её. Он не трогает
-pygame.display, не читает события и ничего не знает про воркер. Раскладка —
-плоский список элементов с прямоугольниками, он же служит таблицей попаданий
-для мыши (hit()).
+Separation of duties: this module BUILDS THE LAYOUT and DRAWS it. It does not
+touch pygame.display, does not read events and knows nothing about the worker.
+The layout is a flat list of items with rectangles, and the same list serves as
+the hit table for the mouse (hit()).
 
-Вёрстка построчная: у каждого контрола своя строка подписи и своя строка
-самого контрола. Раньше они делили одну строку, и подпись налезала на
-значение и на стрелки.
+The layout is line-based: every control has its own label line and its own line
+for the control itself. They used to share one line and the label ran into the
+value and the arrows.
 
-Все размеры заданы в базовых единицах 1440p и умножаются на scale — тот же
-множитель, что у HUD (display.ui_scale_for).
+All sizes are given in 1440p base units and multiplied by scale - the same
+factor the HUD uses (display.ui_scale_for).
 """
 
 from __future__ import annotations
@@ -26,16 +26,16 @@ import pygame
 
 from i18n import STRINGS
 
-# --- Темы. Акцент общий, меняются фон и текст ----------------------------
+# --- Themes. The accent is shared; background and text change ------------
 THEMES = {
     "light": {
-        "bg": "#F0EEE6",       # тёплый кремовый фон панели
-        "surface": "#E8E5DC",  # дорожки ползунков, поля
+        "bg": "#F0EEE6",       # warm cream panel background
+        "surface": "#E8E5DC",  # slider tracks, fields
         "border": "#DCD8CC",
         "text": "#191919",
         "muted": "#79776F",
-        "accent": "#D97757",   # глиняный акцент
-        "ok": "#5E8C61",       # зелёный индикатора поддержки
+        "accent": "#D97757",   # clay accent
+        "ok": "#5E8C61",       # green of the support indicator
         "danger": "#BC4C2E",
     },
     "dark": {
@@ -51,8 +51,9 @@ THEMES = {
 }
 
 
-# Что показываем в переназначении и в каком порядке. Слева — команда, под
-# которой хоткей живёт в hotkeys.DEFAULT_BINDINGS и в config["hotkeys"].
+# What we show in the remapping page and in which order. On the left is the
+# command the hotkey lives under in hotkeys.DEFAULT_BINDINGS and in
+# config["hotkeys"].
 HOTKEY_ROWS = (
     ("toggle", "hk_nr"),
     ("settings", "hk_menu"),
@@ -62,16 +63,17 @@ HOTKEY_ROWS = (
 )
 
 
-# pygame.key.name() даёт «page up», а разбор в hotkeys.parse_binding ждёт
-# «PGUP». Расходятся только эти.
+# pygame.key.name() gives "page up" while the parser in hotkeys.parse_binding
+# expects "PGUP". These are the only ones that differ.
 _KEY_ALIASES = {"page up": "PGUP", "page down": "PGDN",
                 "return": "ENTER", "escape": "ESC"}
 
 
 def key_text(event) -> str | None:
-    """Событие клавиатуры -> строка вида «Ctrl+Alt+Q» для parse_binding.
+    """Keyboard event -> a string like "Ctrl+Alt+Q" for parse_binding.
 
-    None — если нажат только модификатор: биндинг из одного Ctrl не бывает.
+    None when only a modifier is pressed: there is no such thing as a binding
+    made of a lone Ctrl.
     """
     name = pygame.key.name(event.key)
     if name in ("left ctrl", "right ctrl", "left alt", "right alt",
@@ -91,10 +93,10 @@ def key_text(event) -> str | None:
 
 
 def palette(theme: str) -> dict:
-    """Палитра темы. Нужна и алертам в display.py — тот же вид."""
+    """The theme palette. The alerts in display.py need it too - same look."""
     return THEMES.get(theme, THEMES["light"])
 
-# --- Базовая вёрстка (единицы 1440p) --------------------------------------
+# --- Base layout (1440p units) --------------------------------------------
 PANEL_W = 540
 PAD = 26
 TITLE_H = 54
@@ -107,9 +109,9 @@ KNOB_R = 9
 BTN_H = 42
 BTN_PAD = 18
 BTN_GAP = 10
-ICON_W = 30        # кнопка в шапке: квадрат со скруглением, не кружок
-ACTION_H = 46      # кнопка действия: название + подпись хоткея под ним
-EXIT_H = 64        # выход: ещё и пояснение третьей строкой
+ICON_W = 30        # header button: a rounded square, not a circle
+ACTION_H = 46      # action button: title with the hotkey caption below it
+EXIT_H = 64        # exit: plus an explanation on a third line
 STAT_LINE_H = 24
 STAT_PAD = 14
 RADIUS = 10
@@ -130,10 +132,10 @@ def _rgb(color: str) -> tuple[int, int, int]:
 
 @dataclass
 class Item:
-    """Элемент раскладки: что это, где лежит, к чему относится."""
+    """A layout item: what it is, where it sits, what it belongs to."""
     kind: str                      # "slider" | "button" | "toggle" | "choice"
     key: str
-    rect: pygame.Rect              # область попадания мыши
+    rect: pygame.Rect              # mouse hit area
     lo: float = 0.0
     hi: float = 1.0
     value: float = 0.0
@@ -142,11 +144,12 @@ class Item:
 
 
 class OverlayMenu:
-    """Меню в оверлее: видимость, состояние, раскладка, отрисовка."""
+    """The overlay menu: visibility, state, layout, drawing."""
 
     def __init__(self, scale: float, font_loader: Callable[[int], Any]):
         self.scale = scale
-        # Ручной множитель: нужен до создания шрифтов, они считают размер через _u
+        # Manual multiplier: needed before the fonts are created, they size
+        # themselves through _u
         self.user_scale = 1.0
         self._load_font = font_loader
         self.visible = False
@@ -163,16 +166,17 @@ class OverlayMenu:
             "rec_seconds": 0.0,
             "open_on_start": True,
             "split": 0.0,
-            # Что за карта и работает ли на ней NR. gpu_ok: True/False/None
-            # (None — воркер ещё не ответил).
+            # Which card this is and whether NR runs on it. gpu_ok:
+            # True/False/None (None - the worker has not answered yet).
             "gpu_text": "",
             "gpu_ok": None,
             "monitor": "0",
             "monitors": [],
             "autostart": False,
         }
-        # Показания конвейера: то же, что в HUD. Меню задумано как одно
-        # место, где видно и настройки, и что происходит.
+        # Pipeline readings: the same ones the HUD shows. The menu is meant to
+        # be the single place where both the settings and what is going on are
+        # visible.
         self.stats: dict = {}
         self.items: list[Item] = []
         self._font = font_loader(self._u(FONT_SIZE))
@@ -180,59 +184,61 @@ class OverlayMenu:
         self._small_font = font_loader(self._u(SMALL_SIZE))
         self.panel_rect = pygame.Rect(0, 0, 0, 0)
         self._stats_rect = pygame.Rect(0, 0, 0, 0)
-        # Панель можно таскать за заголовок и тянуть за угол. Смещение
-        # хранится относительно центра экрана, поэтому переживает смену
-        # разрешения без «уехавшего за край» окна.
+        # The panel can be dragged by its title bar and stretched by its
+        # corner. The offset is stored relative to the screen centre, so it
+        # survives a resolution change without the window ending up off-screen.
         self.offset = [0, 0]
         self._grip = pygame.Rect(0, 0, 0, 0)
         self._title_bar = pygame.Rect(0, 0, 0, 0)
         self._move_from = None
         self._resize_from = None
-        # Высота панели: None — по содержимому. Задаётся протяжкой нижней
-        # кромки; содержимое выше высоты прокручивается.
+        # Panel height: None means "fit the content". It is set by dragging the
+        # bottom edge; content taller than the height scrolls.
         self.user_height: int | None = None
         self.scroll = 0
         self.content_height = 0
         self._max_scroll = 0
         self._resize_h_from = None
-        # Последняя позиция мыши: колесо в pygame приходит без координат, а
-        # pygame.mouse.get_pos() в click-through окне доверия не вызывает.
+        # The last mouse position: in pygame the wheel arrives without
+        # coordinates, and pygame.mouse.get_pos() in a click-through window is
+        # not to be trusted.
         self._mouse = (0, 0)
         self._edge = pygame.Rect(0, 0, 0, 0)
         self._viewport = pygame.Rect(0, 0, 0, 0)
         self._scroll_track = pygame.Rect(0, 0, 0, 0)
         self._scroll_thumb = pygame.Rect(0, 0, 0, 0)
-        # Какой список сейчас раскрыт (профиль / язык / тема). Стрелками
-        # перебирать неудобно, когда вариантов больше двух.
+        # Which list is currently expanded (profile / language / theme).
+        # Cycling with arrows is awkward once there are more than two options.
         self.open_choice: str | None = None
-        # Страница меню: основное окно или настройки за шестерёнкой.
+        # Menu page: the main window or the settings behind the gear.
         self.page = "main"
-        # Команда, для которой сейчас ждём нажатие клавиши (или None).
+        # The command we are currently waiting for a keypress for (or None).
         self.capturing: str | None = None
-        # Подписи хоткеев: команда -> «F9». Приходят из main вместе с
-        # биндингами, поэтому переназначение видно на кнопках сразу.
+        # Hotkey captions: command -> "F9". They come from main together with
+        # the bindings, so a remap shows up on the buttons immediately.
         self.hotkeys: dict = {}
         self._sections: list = []
         self._hint_rel = pygame.Rect(0, 0, 0, 0)
         self._rule_rel = pygame.Rect(0, 0, 0, 0)
         self._rule2_rel = pygame.Rect(0, 0, 0, 0)
-        # Что под курсором: "title" (можно тащить) или "grip" (растягивать).
-        # Без подсветки эти зоны невидимы и их не найти.
+        # What is under the cursor: "title" (draggable) or "grip" (resizable).
+        # Without the highlight these zones are invisible and impossible to
+        # find.
         self.hover: str | None = None
 
     @property
     def c(self) -> dict:
-        """Цвета текущей темы."""
+        """Colours of the current theme."""
         return palette(self.state.get("theme", "light"))
 
-    # -- вспомогательное ---------------------------------------------------
+    # -- helpers -----------------------------------------------------------
 
     def _u(self, base: float) -> int:
-        """Базовые единицы 1440p -> пиксели экрана."""
+        """1440p base units -> screen pixels."""
         return max(1, int(round(base * self.scale * self.user_scale)))
 
     def set_user_scale(self, value: float) -> None:
-        """Ручное растягивание панели. Шрифты приходится пересоздавать."""
+        """Manual panel stretching. The fonts have to be recreated."""
         value = min(2.0, max(0.6, round(value, 2)))
         if abs(value - self.user_scale) < 0.01:
             return
@@ -249,13 +255,13 @@ class OverlayMenu:
 
     @property
     def dragging(self) -> bool:
-        """Тащат ли сейчас ползунок — во время перетаскивания состояние
-        обновлять нельзя, иначе значение будет прыгать между тем, что
-        показывает мышь, и тем, что уже применил main."""
+        """Whether a slider is being dragged right now - while dragging the
+        state must not be updated, otherwise the value jumps between what the
+        mouse shows and what main has already applied."""
         return getattr(self, "_drag_item", None) is not None
 
     def set_hotkeys(self, mapping: dict) -> None:
-        """Подписи хоткеев: команда -> «F9». Источник — реальные биндинги."""
+        """Hotkey captions: command -> "F9". Sourced from the real bindings."""
         self.hotkeys = dict(mapping or {})
 
     def set_stats(self, hud: dict) -> None:
@@ -270,14 +276,15 @@ class OverlayMenu:
             elif k in self.state:
                 self.state[k] = v
 
-    # -- раскладка ---------------------------------------------------------
+    # -- layout ------------------------------------------------------------
 
     def layout(self, screen_w: int, screen_h: int) -> None:
-        """Пересчитать прямоугольники.
+        """Recompute the rectangles.
 
-        Считаем сверху вниз в относительных координатах, в конце узнаём
-        высоту и сдвигаем всё разом — так высота панели не может разойтись
-        с содержимым (раньше она задавалась формулой и отставала).
+        We walk top to bottom in relative coordinates, learn the height at the
+        end and shift everything at once - that way the panel height cannot
+        drift apart from the content (it used to come from a formula and lag
+        behind).
         """
         s = STRINGS.get(self.lang, STRINGS["en"])
         w = self._u(PANEL_W)
@@ -288,34 +295,34 @@ class OverlayMenu:
         inner_w = w - pad * 2
 
         items: list[Item] = []
-        # Иконки в шапке: справка и настройки. Крестика нет намеренно — он
-        # закрывал меню и стоял рядом с выходом из программы.
+        # Header icons: help and settings. There is deliberately no close
+        # cross - it hid the menu while sitting next to "quit the program".
         iw = self._u(ICON_W)
         igap = self._u(8)
         iy = self._u(TITLE_H) // 2 - iw // 2
         order = ["help", "gear"] if self.page != "settings" else ["close"]
-        # Раскладываем справа налево: правый край — последняя иконка.
+        # Laid out right to left: the right edge is the last icon.
         for idx, kind in enumerate(reversed(order)):
             ix = pad + inner_w - iw - idx * (iw + igap)
             items.append(Item("icon", kind,
                               pygame.Rect(ix, iy, iw, iw)))
         cy = self._u(TITLE_H) + self._u(SECTION_GAP)
 
-        # Блок показаний
+        # The readings block
         stat_h = self._u(STAT_LINE_H) * 2 + self._u(STAT_PAD) * 2
         self._stats_rel = pygame.Rect(pad, cy, inner_w, stat_h)
         cy += stat_h + self._u(6)
 
-        # Строка про GPU: точка состояния и модель карты. Отдельной строкой, а
-        # не ячейкой в блоке показаний — это не показание конвейера, а ответ на
-        # вопрос «а на моей карте это вообще работает».
+        # The GPU line: a status dot and the card model. A separate line rather
+        # than a cell in the readings block - this is not a pipeline reading
+        # but the answer to "does this work on my card at all".
         gpu_h = self._u(SMALL_SIZE) + self._u(8)
         self._gpu_rel = pygame.Rect(pad, cy, inner_w, gpu_h)
         cy += gpu_h + gap
 
-        # Содержимое разбито на озаглавленные блоки: восемь однотипных строк
-        # подряд глазу не за что было зацепить. Заголовки не интерактивны,
-        # поэтому живут отдельным списком, а не в items.
+        # The content is split into titled blocks: eight identical rows in a
+        # row gave the eye nothing to hold on to. The titles are not
+        # interactive, so they live in their own list rather than in items.
         self._sections: list[tuple[str, pygame.Rect]] = []
         sec_h = self._u(SMALL_SIZE) + self._u(10)
 
@@ -347,10 +354,10 @@ class OverlayMenu:
 
         def segmented(key: str, label: str, current: str, options: list,
                       labels: list | None = None) -> None:
-            """Переключатель на два-три варианта — вместо выпадающего списка.
+            """A two- or three-way switch instead of a drop-down list.
 
-            Список ради двух значений это лишний клик и лишняя механика
-            раскрытия; здесь оба варианта видны сразу.
+            A list for the sake of two values is an extra click and extra
+            expand/collapse machinery; here both options are visible at once.
             """
             nonlocal cy
             seg_w = min(inner_w - self._u(150), self._u(60) * len(options) + self._u(60))
@@ -382,8 +389,9 @@ class OverlayMenu:
                    bool(self.state.get("autostart")))
 
             section(s["sec_hotkeys"])
-            # Поля переназначения. Подписи на кнопках берутся из этих же
-            # значений, поэтому смена клавиши видна сразу во всём меню.
+            # The remapping fields. The captions on the buttons come from these
+            # same values, so a key change is visible across the whole menu at
+            # once.
             field_h = self._u(CTRL_H)
             for cmd, label in HOTKEY_ROWS:
                 items.append(Item("hotkey", cmd,
@@ -413,8 +421,7 @@ class OverlayMenu:
             section(s["sec_compare"])
             split_val = float(self.state.get("split", 0.0))
             slider("split", 0.0, 1.0, split_val, s["split"], hint=s["split_hint"],
-                   value_text=("выкл" if split_val <= 0.0 and self.lang == "ru"
-                               else "off" if split_val <= 0.0
+                   value_text=(s.get("off", "off") if split_val <= 0.0
                                else f"{split_val:.2f}"))
 
             section(s["sec_view"])
@@ -423,9 +430,9 @@ class OverlayMenu:
             segmented("theme", s["theme"], self.state.get("theme", "light"),
                       ["light", "dark"], [s["theme_light"], s["theme_dark"]])
 
-        # Подвал: действия с подписью хоткея. Раньше «Закрыть» и «Выход»
-        # выглядели одинаково безобидно, хотя одно прячет меню, а другое
-        # выгружает программу.
+        # The footer: actions with the hotkey printed underneath. "Collapse"
+        # and "Exit" used to look equally harmless, even though one hides the
+        # menu and the other unloads the program.
         cy += self._u(6)
         self._rule_rel = pygame.Rect(pad, cy, inner_w, 1)
         cy += self._u(14)
@@ -460,21 +467,21 @@ class OverlayMenu:
                                      "note": s["exit_note"], "danger": True}))
             cy += exit_h + pad
 
-        # Высота содержимого известна. Панель может быть ниже — тогда
-        # содержимое прокручивается: на 1080p полная панель занимала почти
-        # весь экран, а деться от этого было некуда.
+        # The content height is known. The panel may be shorter - then the
+        # content scrolls: at 1080p a full panel took up almost the whole
+        # screen and there was no way around it.
         content_h = cy
         title_h = self._u(TITLE_H)
         min_h = title_h + self._u(140)
-        # Выше содержимого не растягиваем: пустое место внизу выглядит
-        # сломанным, а не просторным.
+        # We never stretch past the content: empty space at the bottom looks
+        # broken, not spacious.
         h = content_h if self.user_height is None else int(self.user_height)
         h = max(min(h, content_h, max(0, screen_h - self._u(40))), min(min_h, content_h))
         self.content_height = content_h
         self._max_scroll = max(0, content_h - h)
         self.scroll = min(max(self.scroll, 0), self._max_scroll)
-        # Смещение от центра + зажим, чтобы панель нельзя было утащить
-        # за край экрана целиком.
+        # Offset from the centre plus a clamp, so the panel cannot be dragged
+        # entirely off the edge of the screen.
         x = (screen_w - w) // 2 + self.offset[0]
         y = (screen_h - h) // 2 + self.offset[1]
         x = min(max(x, -w + self._u(80)), screen_w - self._u(80))
@@ -483,12 +490,12 @@ class OverlayMenu:
         self._title_bar = pygame.Rect(x, y, w, title_h)
         grip = self._u(26)
         self._grip = pygame.Rect(x + w - grip, y + h - grip, grip, grip)
-        # Нижняя кромка тянет высоту, уголок остаётся за масштаб — поэтому
-        # зона кромки не доходит до уголка.
+        # The bottom edge drags the height while the corner stays in charge of
+        # the scale - which is why the edge zone stops short of the corner.
         edge = self._u(7)
         self._edge = pygame.Rect(x, y + h - edge, max(0, w - grip), edge)
         self._viewport = pygame.Rect(x, y + title_h, w, max(0, h - title_h))
-        # Всё содержимое живёт со сдвигом на прокрутку; заголовок — нет.
+        # All the content lives shifted by the scroll; the title bar does not.
         sy = y - self.scroll
         self._stats_rect = self._stats_rel.move(x, sy)
         self._gpu_rect = self._gpu_rel.move(x, sy)
@@ -511,18 +518,20 @@ class OverlayMenu:
             self._scroll_track = pygame.Rect(0, 0, 0, 0)
             self._scroll_thumb = pygame.Rect(0, 0, 0, 0)
         for it in items:
-            # Иконки шапки прибиты к панели, а не к содержимому: они лежат
-            # выше области прокрутки, и вместе с ней уезжали под заголовок.
+            # The header icons are pinned to the panel, not to the content:
+            # they sit above the scroll area and used to travel with it under
+            # the title bar.
             it.rect = it.rect.move(x, y if it.kind == "icon" else sy)
             if it.kind == "choice":
-                # Поле выбора считаем здесь, а не при отрисовке: раскладка
-                # раскрытого списка строится до первого draw.
+                # The select field is computed here rather than at draw time:
+                # the layout of an expanded list is built before the first
+                # draw.
                 it.extra["strip"] = pygame.Rect(
                     it.rect.x, it.rect.y + label_h, it.rect.w, it.rect.h - label_h)
         self.items = items
 
-        # Пункты раскрытого списка. Лежат поверх нижележащих строк, поэтому
-        # добавляются последними и проверяются первыми при попадании мыши.
+        # The entries of the expanded list. They lie on top of the rows below,
+        # so they are added last and checked first on a mouse hit.
         self.options: list[Item] = []
         if self.open_choice:
             src = next((i for i in items if i.key == self.open_choice), None)
@@ -539,22 +548,23 @@ class OverlayMenu:
                             extra={"label": str(opt),
                                    "selected": str(opt) == str(src.extra.get("current"))}))
 
-    # -- ввод --------------------------------------------------------------
+    # -- input -------------------------------------------------------------
 
     def handle_event(self, event) -> list[tuple]:
-        """Обработать событие pygame. Возвращает список действий для main.
+        """Handle a pygame event. Returns a list of actions for main.
 
-        Действия: ("nr",), ("param", key, value), ("profile", name),
+        Actions: ("nr",), ("param", key, value), ("profile", name),
         ("lang", code), ("theme", name), ("button", key), ("drag", dx, dy).
-        Сам модуль меняет только своё состояние отображения — всё
-        остальное решает main, у него источник правды.
+        This module changes only its own display state - everything else is
+        decided by main, which holds the source of truth.
         """
         if not self.visible:
             return []
         out: list[tuple] = []
         if self.capturing is not None and event.type == pygame.KEYDOWN:
-            # Пока ждём клавишу, клавиатура принадлежит полю. Esc — отмена,
-            # иначе меню закрылось бы вместо отмены назначения.
+            # While we wait for a key the keyboard belongs to the field. Esc
+            # cancels, otherwise the menu would close instead of cancelling the
+            # assignment.
             if event.key == pygame.K_ESCAPE:
                 self.capturing = None
                 out.append(("capture", None))
@@ -586,15 +596,15 @@ class OverlayMenu:
                         self.hover = f"{it.kind}:{it.key}"
                         break
         if event.type == pygame.MOUSEWHEEL:
-            # Прокрутка только когда курсор над панелью: иначе колесо в игре
-            # уезжало бы в меню.
+            # Scroll only while the cursor is over the panel: otherwise the
+            # wheel inside the game would end up scrolling the menu.
             if self._max_scroll > 0 and self.panel_rect.collidepoint(self._mouse):
                 self.scroll = min(max(self.scroll - event.y * self._u(48), 0),
                                   self._max_scroll)
             return out
         if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
-            # Иконки лежат в шапке, а шапка — ручка перетаскивания, которая
-            # возвращается сразу. Поэтому иконки проверяем первыми.
+            # The icons sit in the header, and the header is the drag handle,
+            # which returns immediately. So the icons are checked first.
             for it in self.items:
                 if it.kind == "icon" and it.rect.collidepoint(event.pos):
                     out.extend(self._icon_click(it.key))
@@ -603,8 +613,9 @@ class OverlayMenu:
                 self._resize_from = (event.pos, self.user_scale)
                 return out
             if self._edge.collidepoint(event.pos):
-                # Тянем высоту. Если высота ещё не задавалась, берём текущую
-                # — иначе первый же пиксель протяжки схлопнул бы панель.
+                # Dragging the height. If the height has never been set, take
+                # the current one - otherwise the very first pixel of the drag
+                # would collapse the panel.
                 base = self.user_height if self.user_height is not None \
                     else self.panel_rect.h
                 self._resize_h_from = (event.pos[1], int(base))
@@ -649,8 +660,9 @@ class OverlayMenu:
                            base[1] + event.pos[1] - start[1]]
         elif event.type == pygame.MOUSEMOTION and self._resize_from is not None:
             start, base = self._resize_from
-            # Тянем вправо-вниз — панель растёт. Шаг подобран так, чтобы
-            # проход по диагонали экрана давал примерно двукратный размер.
+            # Dragging right and down grows the panel. The step is chosen so
+            # that a pass across the screen diagonal gives roughly double the
+            # size.
             delta = ((event.pos[0] - start[0]) + (event.pos[1] - start[1])) / 900.0
             self.set_user_scale(base + delta)
         elif event.type == pygame.MOUSEMOTION and getattr(self, "_drag_item", None):
@@ -664,8 +676,9 @@ class OverlayMenu:
             self._resize_from = None
             if self._resize_h_from is not None:
                 self._resize_h_from = None
-                # Раскладка зажимает высоту содержимым и экраном — забираем
-                # зажатое значение, чтобы в конфиг не уехало сырое.
+                # The layout clamps the height by the content and the screen -
+                # we take the clamped value so nothing raw leaks into the
+                # config.
                 self.user_height = (None if self._max_scroll == 0
                                     else self.panel_rect.h)
         elif event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
@@ -673,7 +686,7 @@ class OverlayMenu:
         return out
 
     def _icon_click(self, key: str) -> list[tuple]:
-        """Шапка: справка, вход в настройки, возврат из них."""
+        """The header: help, entering settings, returning from them."""
         if key == "help":
             return [("button", "github")]
         if key == "gear":
@@ -689,8 +702,9 @@ class OverlayMenu:
         return []
 
     def _action_click(self, key: str) -> list[tuple]:
-        """Подвал. «Свернуть» прячет меню, «Выход» выгружает программу —
-        поэтому это разные действия с разными подписями, а не один крестик."""
+        """The footer. "Collapse" hides the menu, "Exit" unloads the program -
+        which is why they are different actions with different captions rather
+        than a single cross."""
         if key == "back":
             self.page = "main"
             self.scroll = 0
@@ -703,7 +717,7 @@ class OverlayMenu:
         return [("button", key)]
 
     def _pick(self, key: str, value: str) -> list[tuple]:
-        """Выбран пункт списка."""
+        """A list entry was picked."""
         if key == "profile":
             return [("profile", value)]
         if key == "lang":
@@ -716,7 +730,7 @@ class OverlayMenu:
         return []
 
     def _slide(self, item: Item, mouse_x: int) -> list[tuple]:
-        """Значение ползунка по позиции мыши, с округлением до шага 0.05."""
+        """The slider value from the mouse position, rounded to a 0.05 step."""
         track = item.extra.get("track")
         if track is None or track.w <= 0:
             return []
@@ -736,7 +750,7 @@ class OverlayMenu:
 
     @property
     def desired_cursor(self):
-        """Курсор под текущей зоной. Ставит display — он владеет pygame."""
+        """The cursor for the current zone. display sets it - it owns pygame."""
         if self.hover == "grip" or self._resize_from is not None:
             return pygame.SYSTEM_CURSOR_SIZENWSE
         if self.hover == "edge" or self._resize_h_from is not None:
@@ -749,9 +763,9 @@ class OverlayMenu:
         return pygame.SYSTEM_CURSOR_ARROW
 
     def hit(self, pos: tuple[int, int]) -> Item | None:
-        # Прокрученное содержимое рисуется с обрезкой по _viewport, поэтому
-        # и попадания за его пределами считать нельзя: строка, уехавшая под
-        # заголовок, невидима, но её прямоугольник ещё существует.
+        # Scrolled content is drawn clipped to _viewport, so hits outside it
+        # must not count either: a row that has travelled under the title bar
+        # is invisible, yet its rectangle still exists.
         for it in self.items:
             if it.kind == "icon" and it.rect.collidepoint(pos):
                 return it
@@ -768,7 +782,7 @@ class OverlayMenu:
     def inside(self, pos: tuple[int, int]) -> bool:
         return self.panel_rect.collidepoint(pos)
 
-    # -- отрисовка ---------------------------------------------------------
+    # -- drawing -----------------------------------------------------------
 
     def draw(self, surface: pygame.Surface) -> None:
         if not self.visible:
@@ -783,8 +797,8 @@ class OverlayMenu:
                          border_radius=self._u(RADIUS))
 
         if self.hover == "title" or self._move_from is not None:
-            # Заголовок — ручка перетаскивания. Подсвечиваем полосой и
-            # акцентной кромкой: иначе о ней никак не догадаться.
+            # The title bar is the drag handle. We highlight it with a strip
+            # and an accent edge: there is otherwise no way to guess it exists.
             tb = self._title_bar
             pygame.draw.rect(surface, _rgb(self.c["surface"]), tb,
                              border_top_left_radius=self._u(RADIUS),
@@ -797,30 +811,32 @@ class OverlayMenu:
                 else s["title"])
         title = self._title_font.render(head, True, _rgb(self.c["text"]))
         surface.blit(title, (r.x + pad, r.y + self._u(16)))
-        # Автор — сразу за названием: правый верхний угол занят иконками.
+        # The author right after the title: the top right corner is taken by
+        # the icons.
         brand = self._small_font.render("· @perseval_BLR", True,
                                         _rgb(self.c["muted"]))
         surface.blit(brand, (r.x + pad + title.get_width() + self._u(10),
                              r.y + self._u(22)))
 
-        # Содержимое рисуем с обрезкой по области прокрутки, иначе
-        # прокрученные строки вылезали бы за панель.
+        # The content is drawn clipped to the scroll area, otherwise scrolled
+        # rows would spill outside the panel.
         prev_clip = surface.get_clip()
         surface.set_clip(self._viewport)
         self._draw_stats(surface)
         self._draw_gpu(surface, s)
         self._draw_sections(surface)
         self._draw_rules(surface, s)
-        # Уголок растягивания: три коротких штриха, как принято у ресайза
+        # The resize corner: three short strokes, as resize handles usually go
         g = self._grip
         active = self.hover == "grip" or self._resize_from is not None
         if active:
-            # Подложка под уголком: три штриха сами по себе теряются на фоне
-            # панели, и зону не видно, пока в неё не ткнёшь.
-            # НЕ SRCALPHA: полупрозрачная подложка блендится с magenta-фоном
-            # (CHROMA_KEY) → цвет ≠ key → colorkey не вырезает → розовая
-            # плашка. Непрозрачная подложка в цвет панели вырезается вместе
-            # с фоном, а акцентная рамка остаётся.
+            # A backing under the corner: three strokes on their own get lost
+            # against the panel and the zone is invisible until you poke it.
+            # NOT SRCALPHA: a translucent backing blends with the magenta
+            # background (CHROMA_KEY) -> colour != key -> the colour key does
+            # not cut it out -> a pink slab. An opaque backing in the panel
+            # colour is cut out along with the background, and the accent
+            # border stays.
             pad = pygame.Surface(g.size)
             pygame.draw.rect(pad, _rgb(self.c["bg"]), pad.get_rect(),
                              border_bottom_right_radius=self._u(RADIUS))
@@ -842,8 +858,8 @@ class OverlayMenu:
              "segmented": self._draw_segmented,
              "action": self._draw_action,
              "hotkey": self._draw_hotkey,
-             # Иконки шапки лежат выше области прокрутки — рисуем их после
-             # снятия обрезки, иначе их срезает.
+             # The header icons sit above the scroll area - we draw them after
+             # the clip is lifted, otherwise they get cut off.
              "icon": lambda *_: None}[item.kind](surface, item, s)
         self._draw_options(surface)
         surface.set_clip(prev_clip)
@@ -853,8 +869,8 @@ class OverlayMenu:
         self._draw_scrollbar(surface)
 
     def _draw_scrollbar(self, surface) -> None:
-        """Тонкая полоса у правого края. Появляется только когда есть куда
-        прокручивать — постоянная полоса была бы шумом."""
+        """A thin strip at the right edge. It appears only when there is
+        somewhere to scroll - a permanent bar would be noise."""
         if self._max_scroll <= 0:
             return
         radius = self._scroll_thumb.w // 2
@@ -892,7 +908,7 @@ class OverlayMenu:
                 surface.blit(v, (cx + k.get_width() + self._u(6), y))
 
     def _draw_gpu(self, surface, s: dict) -> None:
-        """Точка состояния и модель карты: зелёная — NR работает, красная — нет."""
+        """Status dot and card model: green - NR works, red - it does not."""
         rect = getattr(self, "_gpu_rect", None)
         if rect is None:
             return
@@ -913,14 +929,15 @@ class OverlayMenu:
                             cy - note.get_height() // 2))
 
     def _rec_text(self) -> str:
-        """Состояние записи: длительность полезнее, чем просто «on»."""
+        """Recording state: the duration is more useful than a bare "on"."""
         if not self.state.get("recording"):
             return "off"
         secs = float(self.state.get("rec_seconds", 0.0))
         return f"{int(secs) // 60:d}:{int(secs) % 60:02d}"
 
     def _draw_hotkeys(self, surface, s: dict) -> None:
-        """Строка с хоткеями. Иначе про F9/Insert/Ctrl+Alt+Q узнать неоткуда."""
+        """The hotkey line. Otherwise there is nowhere to learn about
+        F9/Insert/Ctrl+Alt+Q."""
         rect = getattr(self, "_hotkeys_rect", None)
         if rect is None:
             return
@@ -987,7 +1004,7 @@ class OverlayMenu:
                                 _rgb(self.c["text"]))
         surface.blit(cur, (strip.x + self._u(12),
                            strip.centery - cur.get_height() // 2))
-        # Треугольник-стрелка справа: список раскрывается, а не перебирается
+        # A triangle arrow on the right: the list expands, it is not cycled
         cx = strip.right - self._u(16)
         cy = strip.centery
         size = self._u(5)
@@ -999,7 +1016,7 @@ class OverlayMenu:
         item.extra["strip"] = strip
 
     def _draw_options(self, surface) -> None:
-        """Пункты раскрытого списка — поверх остального содержимого."""
+        """The entries of the expanded list - above the rest of the content."""
         for opt in getattr(self, "options", []):
             selected = opt.extra.get("selected")
             pygame.draw.rect(surface,
@@ -1013,7 +1030,7 @@ class OverlayMenu:
                                  opt.rect.centery - label.get_height() // 2))
 
     def _draw_sections(self, surface) -> None:
-        """Заголовок блока: мелкие капсы и волосяная линия до правого края."""
+        """A block title: small caps and a hairline out to the right edge."""
         for title, rect in getattr(self, "_section_rects", []):
             img = self._small_font.render(title.upper(), True,
                                           _rgb(self.c["muted"]))
@@ -1025,7 +1042,7 @@ class OverlayMenu:
                                  (x0, ly), (rect.right, ly), 1)
 
     def _draw_rules(self, surface, s: dict) -> None:
-        """Разделители перед подвалом и перед выходом, плюс подсказка."""
+        """The dividers before the footer and before exit, plus the hint."""
         for rect in (getattr(self, "_rule_rect", None),
                      getattr(self, "_rule2_rect", None)):
             if rect is not None and rect.w > 0:
@@ -1038,7 +1055,7 @@ class OverlayMenu:
             surface.blit(img, (hint.x, hint.y))
 
     def _draw_segmented(self, surface, item: Item, s: dict) -> None:
-        """Два-три варианта рядом: выбранный залит акцентом."""
+        """Two or three options side by side: the chosen one is accent-filled."""
         label = item.extra.get("label")
         if label:
             img = self._font.render(label, True, _rgb(self.c["muted"]))
@@ -1069,12 +1086,12 @@ class OverlayMenu:
         item.extra["cells"] = cells
 
     def _draw_icon(self, surface, item: Item, s: dict) -> None:
-        """Кнопка в шапке: скруглённый квадрат, внутри знак.
+        """A header button: a rounded square with a glyph inside.
 
-        В покое — только контур, на наведении заливка и акцентный контур:
-        кружки с нарисованной шестерней выглядели самодельно, а вычерченную
-        шестерню в 30 px всё равно не разобрать — вместо неё три ползунка,
-        и по смыслу ближе к содержимому панели.
+        At rest only the outline; on hover a fill and an accent outline:
+        circles with a drawn gear looked homemade, and a properly drawn gear is
+        unreadable at 30 px anyway - so instead there are three sliders, which
+        is also closer in meaning to what the panel holds.
         """
         rect = item.rect
         hot = self.hover == f"icon:{item.key}"
@@ -1099,8 +1116,9 @@ class OverlayMenu:
             pygame.draw.line(surface, _rgb(col), (cx + d, cy - d),
                              (cx - d, cy + d), lw)
         else:
-            # Три ползунка: линия во всю ширину, на каждой — ручка на своём
-            # месте. Читается мельче гайки и рисуется без сглаживания.
+            # Three sliders: a full-width line with a knob at its own place on
+            # each. It reads smaller than a gear and draws without
+            # antialiasing.
             half = max(5, self._u(7))
             step = max(3, self._u(5))
             knobs = (0.65, 0.35, 0.55)
@@ -1115,7 +1133,7 @@ class OverlayMenu:
                                    max(2, self._u(2)), max(1, self._u(1)))
 
     def _draw_action(self, surface, item: Item, s: dict) -> None:
-        """Кнопка подвала: название, под ним хоткей, у выхода — пояснение."""
+        """A footer button: the name, the hotkey below it, and for exit a note."""
         rect = item.rect
         filled = bool(item.extra.get("filled"))
         danger = bool(item.extra.get("danger"))
@@ -1149,7 +1167,7 @@ class OverlayMenu:
                                rect.y + self._u(44)))
 
     def _draw_hotkey(self, surface, item: Item, s: dict) -> None:
-        """Строка переназначения: действие слева, поле с клавишей справа."""
+        """A remap row: the action on the left, the key field on the right."""
         label = self._small_font.render(item.extra.get("label", ""), True,
                                         _rgb(self.c["text"]))
         surface.blit(label, (item.rect.x,

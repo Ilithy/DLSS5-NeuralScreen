@@ -27,10 +27,10 @@ import time
 from ctypes import wintypes
 from typing import Dict, List
 
-# --- argtypes для user32: БЕЗ них ctypes передаёт int как 32-битный c_int.
-# HWND_TOPMOST=-1 превращается в 0xFFFFFFFF вместо 0xFFFFFFFFFFFFFFFF и
-# SetWindowPos молча FAIL (ret=0) на 64-бит Windows — topmost не применяется.
-# hwnd (64-бит) тоже обрезался бы при значениях >= 2^31.
+# --- argtypes for user32: WITHOUT them ctypes passes ints as a 32-bit c_int.
+# HWND_TOPMOST=-1 turns into 0xFFFFFFFF instead of 0xFFFFFFFFFFFFFFFF and
+# SetWindowPos silently FAILS (ret=0) on 64-bit Windows - topmost is not
+# applied. hwnd (64-bit) would also be truncated at values >= 2^31.
 user32 = ctypes.windll.user32
 user32.SetWindowPos.argtypes = [wintypes.HWND, wintypes.HWND, ctypes.c_int,
                                 ctypes.c_int, ctypes.c_int, ctypes.c_int, wintypes.UINT]
@@ -45,10 +45,11 @@ user32.SetLayeredWindowAttributes.restype = wintypes.BOOL
 user32.SetWindowDisplayAffinity.argtypes = [wintypes.HWND, wintypes.DWORD]
 user32.SetWindowDisplayAffinity.restype = wintypes.BOOL
 
-# DPI-aware ДО import pygame: SDL при загрузке фиксирует awareness процесса,
-# повторный SetProcessDpiAwarenessContext позже уже не сработает (возвращает
-# ошибку). Без этого Windows масштабирует окно: 125% → 3072x1728 вместо
-# 3840x2160, кадр не совпадает с экраном. Проверено диагностикой.
+# DPI-aware BEFORE import pygame: on load SDL freezes the process awareness,
+# and a later SetProcessDpiAwarenessContext no longer takes effect (it returns
+# an error). Without this Windows scales the window: 125% -> 3072x1728 instead
+# of 3840x2160 and the frame no longer matches the screen. Verified by
+# diagnostics.
 try:
     ctypes.windll.user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4))  # PER_MONITOR_AWARE_V2
 except Exception:
@@ -69,32 +70,31 @@ from i18n import STRINGS
 
 # --- Brand palette (DLSS5-Video-Converter) -------------------------------
 BG_COLOR = (0x0D, 0x11, 0x17)      # #0D1117 dark background
-BG_ALPHA = 235                     # HUD panel translucency (почти непрозрачный — текст не сливается)
+BG_ALPHA = 235                     # HUD panel translucency (nearly opaque, so text stays readable)
 WDA_EXCLUDEFROMCAPTURE = 0x00000011
 
-# Цвет-ключ прозрачности для HUD-режима: пиксели ровно этого цвета layered-окно
-# не рисует вовсе, сквозь них виден оверлей воркера. Взят заведомо не
-# встречающийся в палитре HUD (#0D1117 / #FFBF00 / #E6EDF3 / #8B949E).
+# Chroma key for HUD mode: pixels of exactly this colour are not drawn at all
+# by the layered window, and the worker's overlay shows through them. Picked so
+# it cannot occur in the HUD palette (#0D1117 / #FFBF00 / #E6EDF3 / #8B949E).
 CHROMA_KEY = (0xFF, 0x00, 0xFF)
 LWA_COLORKEY = 0x1
 LWA_ALPHA = 0x2
 
 FONT_NAME = "consolas"
-# Базовые размеры вёрстки заданы для 1440p. На экранах выше интерфейс
-# масштабируется, ниже — остаётся как есть: уменьшать уже некуда, текст
-# станет нечитаемым. Отсюда правило «только вверх» (см. ui_scale).
+# The base layout sizes are set for 1440p. On taller screens the interface is
+# scaled up, on shorter ones it stays as is: there is nowhere left to shrink to,
+# the text would become unreadable. Hence the "up only" rule (see ui_scale).
 FONT_SIZE = 18
 UI_BASE_HEIGHT = 1800
 ALERT_FONT_SIZE = 28
 
 
 def ui_scale_for(height: int) -> float:
-    """Множитель интерфейса по высоте экрана.
+    """Interface multiplier derived from the screen height.
 
-    Только вверх: на 1800p и ниже — 1.0, на 4K — 1.2. Пропорциональное
-    уменьшение на 1080p сделало бы шрифт девятипиксельным, поэтому вниз не
-    масштабируем. База поднята с 1440 до 1800 — на 1.5 интерфейс выходил
-    крупноват.
+    Up only: 1.0 at 1800p and below, 1.2 at 4K. Scaling proportionally down at
+    1080p would give a nine-pixel font, so we never scale down. The base was
+    raised from 1440 to 1800 - at 1.5 the interface came out too large.
     """
     return max(1.0, float(height) / UI_BASE_HEIGHT)
 
@@ -103,19 +103,19 @@ class Display:
     """Fullscreen borderless window that renders frames + branded HUD."""
 
     def __init__(self, width: int, height: int, fullscreen: bool = True, click_through: bool = True):
-        # DPI-awareness уже установлена на уровне модуля (до import pygame).
-        # Здесь повторный вызов не сработает — оставлен как fallback для
-        # случаев, когда модуль импортирован без верхнего блока.
+        # DPI awareness is already set at module level (before import pygame).
+        # Calling it again here has no effect - it is kept as a fallback for
+        # cases where the module is imported without the top block.
         try:
             ctypes.windll.user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4))
         except Exception:
             pass
-        # SDL-хинты ДО pygame.init():
-        # SDL_WINDOWS_DPI_AWARENESS=permonitorv2 — без этого Windows
-        # масштабирует окно (125% → 3072x1728 вместо 3840x2160).
-        # SDL_MOUSE_FOCUS_CLICKTHROUGH=1 — клик по окну не перехватывается SDL
-        # (окно не активируется, фокус не уводится) — клики проходят
-        # к приложениям под оверлеем.
+        # SDL hints BEFORE pygame.init():
+        # SDL_WINDOWS_DPI_AWARENESS=permonitorv2 - without it Windows scales
+        # the window (125% -> 3072x1728 instead of 3840x2160).
+        # SDL_MOUSE_FOCUS_CLICKTHROUGH=1 - a click on the window is not
+        # intercepted by SDL (the window is not activated, focus is not taken
+        # away), so clicks reach the applications underneath the overlay.
         try:
             os.environ["SDL_WINDOWS_DPI_AWARENESS"] = "permonitorv2"
         except Exception:
@@ -126,17 +126,17 @@ class Display:
             pass
         pygame.init()
         pygame.display.set_caption("NeuralScreen")
-        # Borderless windowed вместо FULLSCREEN: fullscreen-окно pygame при
-        # клике/фокусе теряет отрисовку (экран замирает, цикл крутится).
-        # Окно размером с монитор, позиция (0,0) — визуально то же самое,
-        # но стабильно и click-through работает.
+        # Borderless windowed instead of FULLSCREEN: a pygame fullscreen window
+        # loses its rendering on click/focus (the screen freezes while the loop
+        # keeps spinning). A window the size of the monitor at position (0,0)
+        # looks the same but is stable, and click-through works.
         flags = pygame.NOFRAME
         self.screen = pygame.display.set_mode((width, height), flags)
         self.width, self.height = self.screen.get_size()
         self._move_to_origin()
-        # Принудительный физический размер окна: даже если DPI-awareness
-        # не применился (окно 3072x1728 вместо 3840x2160), растягиваем
-        # окно до запрошенного размера — pygame-поверхность совпадёт.
+        # Force the physical window size: even if DPI awareness did not apply
+        # (a 3072x1728 window instead of 3840x2160), we stretch the window to
+        # the requested size so the pygame surface matches.
         try:
             hwnd = pygame.display.get_wm_info()["window"]
             ctypes.windll.user32.SetWindowPos(hwnd, 0, 0, 0, width, height, 0x0004)  # SWP_NOZORDER
@@ -145,19 +145,20 @@ class Display:
         self._set_topmost()
         self.clock = pygame.time.Clock()
         self._hud: Dict = {}
-        self._alerts: List[tuple[str, float]] = []  # (текст, expires_at)
-        # Масштаб интерфейса и производные от него размеры вёрстки.
+        self._alerts: List[tuple[str, float]] = []  # (text, expires_at)
+        # Interface scale and the layout sizes derived from it.
         self.ui_scale = ui_scale_for(self.height)
         self.font_size = max(8, int(round(FONT_SIZE * self.ui_scale)))
-        # Меню настроек живёт в этом же слое. Отдельное окно поверх игры
-        # воровало бы фокус и дралось за topmost, а тут мы уже поверх кадра
-        # и уже прозрачны по ключу.
+        # The settings menu lives in this same layer. A separate window on top
+        # of the game would steal focus and fight for topmost, whereas here we
+        # are already above the frame and already transparent by key.
         self.menu = OverlayMenu(self.ui_scale, self._load_font)
         self._font = self._load_font(size=self.font_size)
         self._alert_font = self._load_font(
             size=max(10, int(round(ALERT_FONT_SIZE * self.ui_scale))))
-        # Отключаем vsync: flip() не должен ждать vblank (иначе FPS привязан
-        # к частоте монитора и теряются кадры на медленном конвейере).
+        # Disable vsync: flip() must not wait for vblank (otherwise the FPS is
+        # tied to the monitor refresh rate and frames are lost on a slow
+        # pipeline).
         try:
             pygame.display.set_swap_interval(0)
         except Exception:
@@ -166,18 +167,18 @@ class Display:
         self._click_through = False
         if click_through:
             self._set_click_through()
-        self._lang = "ru"  # язык HUD (NR ON/NR OFF), см. set_lang()
+        self._lang = "ru"  # HUD language (NR ON/NR OFF), see set_lang()
         self._visible = True
-        # HUD-режим: кадр рисует воркер, окно показывает только HUD
+        # HUD mode: the worker draws the frame, the window shows only the HUD
         self._hud_only = False
         self._last_overlay = 0.0
         self._last_alert_count = 0
 
     def _sync_cursor(self) -> None:
-        """Курсор под зоной меню: стрелки перемещения и растягивания.
+        """Cursor over the menu area: move and resize arrows.
 
-        Ставим только при смене — set_cursor на каждом кадре заметно
-        мигает курсором.
+        Set only on change - calling set_cursor every frame makes the cursor
+        flicker noticeably.
         """
         want = (self.menu.desired_cursor if self.menu.visible
                 else pygame.SYSTEM_CURSOR_ARROW)
@@ -191,11 +192,11 @@ class Display:
 
     @property
     def theme(self) -> dict:
-        """Палитра темы меню — алерты держим в том же виде."""
+        """The menu theme palette - alerts are kept in the same look."""
         return ui_palette(self.menu.state.get("theme", "light"))
 
     def get_hwnd(self) -> int:
-        """HWND окна оверлея — родитель для нативных диалогов."""
+        """HWND of the overlay window - the parent for native dialogs."""
         try:
             return int(pygame.display.get_wm_info()["window"])
         except Exception:
@@ -207,15 +208,15 @@ class Display:
         return int(c[0:2], 16), int(c[2:4], 16), int(c[4:6], 16)
 
     def set_lang(self, lang: str) -> None:
-        """Сменить язык HUD-статуса (en/ru)."""
+        """Switch the HUD status language (en/ru)."""
         if lang in STRINGS and lang != self._lang:
             self._lang = lang
 
     def set_visible(self, visible: bool) -> None:
-        """Показать/скрыть окно (SW_SHOW/SW_HIDE).
+        """Show/hide the window (SW_SHOW/SW_HIDE).
 
-        При NR OFF окно прячется полностью — рабочий стол не тормозит
-        (нет захвата/блита/flip). При NR ON — показывается снова.
+        With NR OFF the window is hidden completely so the desktop does not
+        slow down (no capture/blit/flip). With NR ON it is shown again.
         """
         try:
             hwnd = pygame.display.get_wm_info()["window"]
@@ -228,7 +229,7 @@ class Display:
         return getattr(self, "_visible", True)
 
     def _set_topmost(self) -> None:
-        """HWND_TOPMOST — окно всегда поверх остальных (оверлей)."""
+        """HWND_TOPMOST - the window always sits above the rest (overlay)."""
         try:
             hwnd = pygame.display.get_wm_info()["window"]
             ctypes.windll.user32.SetWindowPos(hwnd, -1, 0, 0, 0, 0,
@@ -237,7 +238,7 @@ class Display:
             pass
 
     def _move_to_origin(self) -> None:
-        """Переместить окно в (0,0) — верхний левый угол монитора."""
+        """Move the window to (0,0) - the monitor's top left corner."""
         try:
             hwnd = pygame.display.get_wm_info()["window"]
             ctypes.windll.user32.SetWindowPos(hwnd, 0, 0, 0, 0, 0,
@@ -256,23 +257,24 @@ class Display:
     def _set_click_through(self) -> bool:
         """Click-through: WS_EX_TRANSPARENT | WS_EX_NOACTIVATE | WS_EX_LAYERED.
 
-        Проверено диагностикой (_work/diag_click.py, Win11 4K): WS_EX_TRANSPARENT
-        БЕЗ WS_EX_LAYERED НЕ работает — WindowFromPoint всё равно возвращает
-        оверлей, клик идёт оверлею. Рабочая комбинация (по MSDN "Layered
-        Windows"): layered-окно + WS_EX_TRANSPARENT → hit-testing игнорирует
-        форму окна и клики уходят окну под курсором.
+        Verified by diagnostics (_work/diag_click.py, Win11 4K): WS_EX_TRANSPARENT
+        WITHOUT WS_EX_LAYERED does NOT work - WindowFromPoint still returns the
+        overlay and the click goes to the overlay. The working combination (per
+        MSDN "Layered Windows"): a layered window + WS_EX_TRANSPARENT -> hit
+        testing ignores the window shape and clicks go to the window under the
+        cursor.
 
-        Порядок обязателен:
+        The order is mandatory:
           1. SetWindowLongW(GWL_EXSTYLE, ... | WS_EX_LAYERED | WS_EX_TRANSPARENT
              | WS_EX_NOACTIVATE)
-          2. SetLayeredWindowAttributes(alpha=255, LWA_ALPHA) — активирует
-             layered-режим (без вызова окно остаётся обычным, флаг LAYERED
-             в exstyle есть, но hit-testing не меняется)
-          3. SetWindowPos(SWP_FRAMECHANGED) — сбрасывает кэш стилей окна
-             (требование документации SetWindowLongW)
-        WS_EX_NOACTIVATE: окно не забирает фокус, клавиатура остаётся у
-        активного приложения. Управление — глобальные хоткеи
-        (GetAsyncKeyState в main.py).
+          2. SetLayeredWindowAttributes(alpha=255, LWA_ALPHA) - activates
+             layered mode (without the call the window stays ordinary: the
+             LAYERED flag is in exstyle but hit testing does not change)
+          3. SetWindowPos(SWP_FRAMECHANGED) - drops the window style cache
+             (required by the SetWindowLongW documentation)
+        WS_EX_NOACTIVATE: the window does not take focus, the keyboard stays
+        with the active application. Control is via global hotkeys
+        (GetAsyncKeyState in main.py).
         """
         try:
             hwnd = pygame.display.get_wm_info()["window"]
@@ -288,11 +290,11 @@ class Display:
             style = user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
             user32.SetWindowLongW(hwnd, GWL_EXSTYLE,
                                   style | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE | WS_EX_LAYERED)
-            # Активировать layered-режим: alpha=255 (непрозрачное окно,
-            # только hit-testing меняется, визуально ничего не трогаем)
+            # Activate layered mode: alpha=255 (an opaque window, only hit
+            # testing changes, visually we touch nothing)
             user32.SetLayeredWindowAttributes(hwnd, 0, 255, LWA_ALPHA)
-            # Сбросить кэш стилей — без SWP_FRAMECHANGED изменения
-            # SetWindowLongW могут не примениться
+            # Drop the style cache - without SWP_FRAMECHANGED the
+            # SetWindowLongW changes may not take effect
             user32.SetWindowPos(hwnd, 0, 0, 0, 0, 0,
                                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED)
             self._click_through = True
@@ -323,17 +325,18 @@ class Display:
     # -- public API -------------------------------------------------------
 
     def set_menu_input(self, enabled: bool) -> None:
-        """Пропускать ли ввод в наш слой (пока открыто меню).
+        """Whether input should reach our layer (while the menu is open).
 
-        Обычно окно click-through: WS_EX_TRANSPARENT отдаёт клики тому, что
-        под ним. На время меню флаг снимается — клики достаются нам, а игра
-        под оверлеем их не получает. Ровно поведение ReShade.
-        WS_EX_NOACTIVATE снимаем тоже, иначе не будет клавиатуры.
+        Normally the window is click-through: WS_EX_TRANSPARENT gives clicks to
+        whatever is underneath. While the menu is up the flag is removed - the
+        clicks are ours and the game under the overlay does not get them.
+        Exactly the ReShade behaviour. WS_EX_NOACTIVATE is removed too,
+        otherwise there is no keyboard.
         """
         try:
             hwnd = pygame.display.get_wm_info()["window"]
         except Exception as exc:
-            print(f"Display: WARNING нет hwnd для ввода в меню: {exc}")
+            print(f"Display: WARNING no hwnd for menu input: {exc}")
             return
         GWL_EXSTYLE = -20
         WS_EX_TRANSPARENT = 0x00000020
@@ -348,8 +351,9 @@ class Display:
         user32.SetWindowPos(hwnd, 0, 0, 0, 0, 0,
                             SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED)
         if enabled:
-            # Фокус нужен для клавиатуры. Мышь работает и без него — клик
-            # уходит окну под курсором, раз оно больше не прозрачное.
+            # Focus is needed for the keyboard. The mouse works without it -
+            # the click goes to the window under the cursor now that it is no
+            # longer transparent.
             try:
                 user32.SetForegroundWindow(hwnd)
                 user32.SetActiveWindow(hwnd)
@@ -358,11 +362,12 @@ class Display:
         self._click_through = not enabled
 
     def set_menu_opaque(self, opaque: bool) -> None:
-        """Убрать глобальную полупрозрачность окна, пока открыто меню.
+        """Drop the global window translucency while the menu is open.
 
-        Слой живёт с альфой BG_ALPHA, чтобы HUD не залеплял картинку. Но
-        панель меню почти чёрная, и сквозь неё просвечивает яркий кадр —
-        читается как «слишком прозрачное». На время меню ставим 255.
+        The layer lives at BG_ALPHA so the HUD does not plaster over the
+        picture. But the menu panel is nearly black and a bright frame shows
+        through it - it reads as "too transparent". While the menu is up we set
+        255.
         """
         if not self._hud_only:
             return
@@ -376,15 +381,16 @@ class Display:
         user32.SetLayeredWindowAttributes(hwnd, key, alpha, LWA_COLORKEY | LWA_ALPHA)
 
     def set_hud_only(self, enabled: bool, force: bool = False) -> None:
-        """HUD-режим: кадр рисует воркер в своём окне, тут остаётся только HUD.
+        """HUD mode: the worker draws the frame in its own window, only the HUD
+        stays here.
 
-        Фон заливается CHROMA_KEY и делается прозрачным через
-        SetLayeredWindowAttributes(LWA_COLORKEY) — сквозь него виден оверлей
-        воркера, а HUD, алерты и водяной знак рисуются поверх как раньше.
-        Выключение возвращает обычный непрозрачный режим (LWA_ALPHA).
-        force=True: переприменить атрибуты даже если режим не менялся —
-        z-order-операции (SetWindowPos/TopMost после меню настроек) могут
-        сбросить LWA_COLORKEY, а ранний return оставил бы окно непрозрачным.
+        The background is filled with CHROMA_KEY and made transparent through
+        SetLayeredWindowAttributes(LWA_COLORKEY) - the worker's overlay shows
+        through it, while the HUD, alerts and watermark are drawn on top as
+        before. Turning it off restores the ordinary opaque mode (LWA_ALPHA).
+        force=True: reapply the attributes even when the mode did not change -
+        z-order operations (SetWindowPos/TopMost after the settings menu) can
+        drop LWA_COLORKEY, and an early return would leave the window opaque.
         """
         if enabled == self._hud_only and not force:
             return
@@ -392,43 +398,44 @@ class Display:
         try:
             hwnd = pygame.display.get_wm_info()["window"]
         except Exception as exc:
-            print(f"Display: WARNING не получить hwnd для HUD-режима: {exc}")
+            print(f"Display: WARNING cannot get hwnd for HUD mode: {exc}")
             return
         if enabled:
-            # COLORREF — это 0x00BBGGRR, а не RGB
+            # COLORREF is 0x00BBGGRR, not RGB
             r, g, b = CHROMA_KEY
             key = (b << 16) | (g << 8) | r
-            # Прозрачность панели — через ГЛОБАЛЬНУЮ альфу окна (LWA_ALPHA),
-            # а НЕ через альфу пикселей панели: полупрозрачный бленд SRCALPHA
-            # с magenta-фоном дал бы цвет ≠ key и розовую плашку (colorkey
-            # не вырезает смешанный цвет). Колоркей убирает фон целиком,
-            # а непрозрачная панель (+текст) становится слегка просвечивающей
-            # за счёт глобальной альфы.
+            # The panel translucency comes from the window's GLOBAL alpha
+            # (LWA_ALPHA), NOT from the alpha of the panel pixels: a
+            # semi-transparent SRCALPHA blend with the magenta background would
+            # give a colour != key and a pink slab (the colour key does not cut
+            # out a blended colour). The colour key removes the background
+            # entirely, and the opaque panel (plus text) becomes slightly
+            # see-through through the global alpha.
             ok = user32.SetLayeredWindowAttributes(hwnd, key, BG_ALPHA, LWA_COLORKEY | LWA_ALPHA)
         else:
             ok = user32.SetLayeredWindowAttributes(hwnd, 0, 255, LWA_ALPHA)
         if not ok:
             print(f"Display: WARNING SetLayeredWindowAttributes failed "
-                  f"(HUD-режим {'вкл' if enabled else 'выкл'})")
-        self._last_overlay = 0.0  # ближайший draw_overlay перерисует немедленно
+                  f"(HUD mode {'on' if enabled else 'off'})")
+        self._last_overlay = 0.0  # the next draw_overlay redraws immediately
 
     def raise_topmost(self) -> None:
-        """Поднять окно над окном воркера.
+        """Raise the window above the worker's window.
 
-        Оба окна topmost, и внутри этой группы наверху оказывается поднятое
-        последним. Воркер создаёт своё окно позже нас, поэтому после каждого
-        поднятия его оверлея HUD нужно вернуть наверх, иначе он окажется под
-        кадром и станет невидим.
+        Both windows are topmost, and inside that group the one raised last
+        ends up on top. The worker creates its window after ours, so after
+        every raise of its overlay the HUD has to be brought back up, otherwise
+        it ends up under the frame and becomes invisible.
         """
         self._set_topmost()
 
     def refresh_colorkey(self) -> None:
-        """Переприменить LWA_COLORKEY на окне pygame (HUD-слой).
+        """Reapply LWA_COLORKEY on the pygame window (the HUD layer).
 
-        Нужно после операций, которые могут сбросить layered-атрибуты окна
-        (z-order-перестановки с tkinter-меню настроек: окно остаётся
-        непрозрачным, HUD не виден). Ничего не пересоздаёт — только
-        SetLayeredWindowAttributes, в отличие от set_hud_only(force=True).
+        Needed after operations that can drop the window's layered attributes
+        (z-order shuffling with the tkinter settings menu: the window stays
+        opaque and the HUD is not visible). Recreates nothing - only
+        SetLayeredWindowAttributes, unlike set_hud_only(force=True).
         """
         if not self._hud_only:
             return
@@ -441,20 +448,21 @@ class Display:
         user32.SetLayeredWindowAttributes(hwnd, key, BG_ALPHA, LWA_COLORKEY | LWA_ALPHA)
 
     def draw_capture_overlay(self, surface: pygame.Surface) -> None:
-        """Наложить открытое меню на кадр записи или скриншота.
+        """Bake the open menu into a recorded or screenshot frame.
 
-        Кадр снимается БЕЗ нашего pygame-слоя: окно помечено
-        WDA_EXCLUDEFROMCAPTURE, иначе DDA снимал бы собственный вывод.
-        Поэтому всё, что должно попасть в файл, рисуется здесь, поверх
-        уже полученных пикселей.
+        The frame is grabbed WITHOUT our pygame layer: the window is marked
+        WDA_EXCLUDEFROMCAPTURE, otherwise DDA would capture our own output.
+        So everything that must end up in the file is drawn here, on top of the
+        pixels already received.
 
-        Пекём только меню. HUD и водяной знак раньше запекались, но на
-        экране их нет — в файле они выглядели как чужая надпись.
+        We bake the menu only. The HUD and the watermark used to be baked too,
+        but they are not on screen - in the file they looked like someone
+        else's caption.
         """
         if not self.menu.visible:
             return
-        # Подсветка «взялся за край» — состояние курсора, в файле ей не
-        # место: она бы застыла на кадре без видимой причины.
+        # The "grabbed an edge" highlight is cursor state and has no place in
+        # the file: it would freeze on the frame for no visible reason.
         hover, self.menu.hover = self.menu.hover, None
         try:
             self.menu.set_stats(self._hud)
@@ -463,11 +471,12 @@ class Display:
             self.menu.hover = hover
 
     def draw_overlay(self, min_interval: float = 0.1) -> None:
-        """Перерисовать HUD поверх кадра, который показывает воркер.
+        """Redraw the HUD over the frame the worker is showing.
 
-        Троттлинг: заливка 4K + flip стоит ~5 мс, а HUD меняется пару раз в
-        секунду — на каждом кадре это выброшенное время. Алерты появляются
-        и исчезают вне очереди, для них перерисовка немедленная.
+        Throttling: a 4K fill plus flip costs ~5 ms while the HUD changes a
+        couple of times per second - doing it every frame is wasted time.
+        Alerts appear and disappear out of band, so for them the redraw is
+        immediate.
         """
         try:
             pygame.event.pump()
@@ -475,8 +484,8 @@ class Display:
             pass
         now = time.monotonic()
         alerts = len(self._alerts)
-        # С открытым меню троттлинг выключаем: 10 Гц хватает статике HUD,
-        # но ползунок под мышью на такой частоте дёргается.
+        # With the menu open throttling is disabled: 10 Hz is enough for a
+        # static HUD, but a slider under the mouse jitters at that rate.
         if self.menu.visible:
             min_interval = 0.0
         if now - self._last_overlay < min_interval and alerts == self._last_alert_count:
@@ -495,23 +504,24 @@ class Display:
         self._hud = dict(data)
 
     def alert(self, text: str, duration: float = 2.5) -> None:
-        """Показать всплывающий алерт по центру экрана (янтарная рамка)."""
+        """Show a pop-up alert centred on the screen (amber border)."""
         self._alerts.append((text, time.monotonic() + duration))
 
     def show(self, frame_rgba: np.ndarray) -> None:
         """Blit frame (RGBA uint8) fullscreen and draw the HUD on top.
 
-        Кадр: pygame.image.frombuffer(frame_rgba, ..., "RGBX") — zero-copy
-        (surface ссылается на numpy-буфер, без tobytes/копии 33 МБ на 4K).
-        Формат RGBX (32-бит, без альфа-канала): blit на экран быстрее, чем
-        RGBA-поверхность с SRCALPHA (не нужен альфа-блендинг). Альфа кадра
-        не используется — кадр непрозрачный (A=255).
+        The frame: pygame.image.frombuffer(frame_rgba, ..., "RGBX") is
+        zero-copy (the surface references the numpy buffer, without tobytes and
+        a 33 MB copy at 4K). The RGBX format (32-bit, no alpha channel) blits
+        to the screen faster than an RGBA surface with SRCALPHA (no alpha
+        blending needed). The frame's alpha is unused - the frame is opaque
+        (A=255).
 
-        ВАЖНО: frombuffer НЕ копирует данные — surface живёт, пока жив
-        numpy-буфер. Кадр приходит из WorkerReader отдельным массивом на
-        каждый кадр, поэтому поверхность создаётся заново (2 мс на 4K).
-        event.pump() вычитывает очередь сообщений Windows (WM_PAINT и др.) —
-        без этого окно замирает при клике/фокусе.
+        IMPORTANT: frombuffer does NOT copy the data - the surface lives as
+        long as the numpy buffer does. The frame arrives from WorkerReader as a
+        separate array per frame, so the surface is recreated each time (2 ms
+        at 4K). event.pump() drains the Windows message queue (WM_PAINT and
+        friends) - without it the window freezes on click/focus.
         """
         if frame_rgba is None:
             return
@@ -523,11 +533,11 @@ class Display:
             surface = pygame.image.frombuffer(
                 frame_rgba, (frame_rgba.shape[1], frame_rgba.shape[0]), "RGBX")
         except Exception:
-            # Фолбэк: не numpy-массив / несовместимая форма — через tobytes
+            # Fallback: not a numpy array / incompatible shape - via tobytes
             surface = pygame.image.frombuffer(
                 frame_rgba.tobytes(), (frame_rgba.shape[1], frame_rgba.shape[0]),
                 "RGBA")
-        # Один blit+flip для обоих путей (основной RGBX и фолбэк RGBA)
+        # One blit+flip for both paths (the main RGBX and the RGBA fallback)
         self.screen.blit(surface, (0, 0))
         self._draw_alerts()
         self.menu.set_stats(self._hud)
@@ -554,10 +564,11 @@ class Display:
     # -- HUD --------------------------------------------------------------
 
     def _draw_alerts(self) -> None:
-        """Всплывающий алерт: палитра меню, сверху по центру.
+        """Pop-up alert: the menu palette, top centre.
 
-        Раньше висел на трети высоты по центру тёмной плашкой с янтарной
-        рамкой — выбивался из общего вида и лез в середину кадра.
+        It used to hang a third of the way down, centred, as a dark slab with
+        an amber border - it clashed with the overall look and got into the
+        middle of the frame.
         """
         now = time.monotonic()
         self._alerts = [(text, expires) for text, expires in self._alerts if expires > now]
@@ -572,8 +583,8 @@ class Display:
         h = surf.get_height() + pad_y * 2
         rect = pygame.Rect((self.width - w) // 2, int(round(self.height * 0.045)), w, h)
         radius = int(round(10 * self.ui_scale))
-        # Панель непрозрачная: полупрозрачность смешалась бы с цветом-ключом
-        # и дала грязный оттенок (colorkey не вырезает смешанный цвет).
+        # The panel is opaque: translucency would blend with the chroma key and
+        # give a dirty tint (the colour key does not cut out a blended colour).
         pygame.draw.rect(self.screen, self._rgb(c["bg"]), rect, border_radius=radius)
         pygame.draw.rect(self.screen, self._rgb(c["border"]), rect,
                          max(1, int(round(self.ui_scale))), border_radius=radius)

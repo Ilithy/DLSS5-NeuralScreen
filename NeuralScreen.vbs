@@ -1,6 +1,6 @@
-' NeuralScreen.vbs — скрытый лаунчер (без консольных окон)
-' Запускает main.py через pythonw.exe (runtime/pythonw.exe или из PATH),
-' весь вывод уходит в NeuralScreen.log рядом с программой.
+' NeuralScreen.vbs - a hidden launcher (no console windows)
+' Runs main.py through pythonw.exe (runtime/pythonw.exe or from PATH);
+' all output goes into NeuralScreen.log next to the program.
 Option Explicit
 
 Dim fso, shell, dir, py, nvruntime, devpython
@@ -9,7 +9,7 @@ Set shell = CreateObject("WScript.Shell")
 
 dir = fso.GetParentFolderName(WScript.ScriptFullName)
 
-' --- Поиск Python: NEURALSCREEN_PYTHON -> runtime\pythonw.exe -> dev path -> PATH ---
+' --- Finding Python: NEURALSCREEN_PYTHON -> runtime\pythonw.exe -> dev path -> PATH ---
 py = shell.ExpandEnvironmentStrings("%NEURALSCREEN_PYTHON%")
 If py = "%NEURALSCREEN_PYTHON%" Then py = ""
 If py <> "" And Not fso.FileExists(py) Then py = ""
@@ -20,11 +20,11 @@ If py = "" Then
 End If
 
 If py = "" Then
-    ' fallback: pythonw из PATH (если пользователь поставил Python)
+    ' fallback: pythonw from PATH (if the user installed Python)
     py = "pythonw"
 End If
 
-' --- Проверка Python: без него запуск вслепую = тихий отказ ---
+' --- Python check: launching blind without it means a silent failure ---
 If py = "pythonw" Then
     Dim found
     found = False
@@ -45,7 +45,7 @@ If py = "pythonw" Then
     End If
 End If
 
-' --- Проверка NGX runtime (165 МБ, не хранится в git) ---
+' --- NGX runtime check (165 MB, not kept in git) ---
 If Not fso.FileExists(dir & "\native\nvngx_dlssnr.dll") Then
     MsgBox "NeuralScreen: native\nvngx_dlssnr.dll not found." & vbCrLf & _
            "Copy the NVIDIA DLSS 5 Neural Rendering runtime there." & _
@@ -53,7 +53,7 @@ If Not fso.FileExists(dir & "\native\nvngx_dlssnr.dll") Then
     WScript.Quit 1
 End If
 
-' --- Проверка воркера (артефакт сборки) ---
+' --- Worker check (a build artefact) ---
 If Not fso.FileExists(dir & "\native\nvngx.dll") Then
     MsgBox "NeuralScreen: native\nvngx.dll not found." & vbCrLf & _
            "Build it with native\build-host.bat or re-download the release archive.", _
@@ -61,5 +61,5 @@ If Not fso.FileExists(dir & "\native\nvngx.dll") Then
     WScript.Quit 1
 End If
 
-' --- Запуск без окна (window style 0), без ожидания ---
+' --- Launch with no window (window style 0), without waiting ---
 shell.Run """" & py & """ -u """ & dir & "\main.py""", 0, False

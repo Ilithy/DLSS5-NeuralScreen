@@ -1,21 +1,22 @@
-"""HotkeyController — глобальные хоткеи через RegisterHotKey.
+"""HotkeyController - global hotkeys through RegisterHotKey.
 
-Отличие от опроса GetAsyncKeyState принципиальное: система доставляет
-WM_HOTKEY только нам и НЕ передаёт нажатие активному приложению. F9 в игре
-переключает NR, и сама игра этой клавиши не видит. Опрос так не умеет — он
-лишь подсматривает состояние клавиши, а нажатие всё равно уходит игре.
+The difference from polling GetAsyncKeyState is fundamental: the system
+delivers WM_HOTKEY only to us and does NOT pass the keypress to the active
+application. F9 inside a game toggles NR and the game never sees the key.
+Polling cannot do that — it only peeks at the key state while the press still
+reaches the game.
 
-Побочный эффект того же свойства: пока NeuralScreen запущен, F8 и F9
-принадлежат ему, и другие программы (отладчики, игры) их не получат.
+The flip side of the same property: while NeuralScreen runs, F8 and F9 belong
+to it and other programs (debuggers, games) will not get them.
 
-Комбинации со стрелками и выходом сделаны на Ctrl+Alt намеренно: голые
-стрелки регистрировать нельзя — они перестали бы работать во всей системе,
-а выход по одиночной клавише слишком легко нажать случайно.
+The arrow and quit combinations are on Ctrl+Alt deliberately: bare arrows
+must not be registered — they would stop working system-wide — and quitting
+on a single key is far too easy to hit by accident.
 
-RegisterHotKey(NULL, ...) кладёт WM_HOTKEY в очередь сообщений ВЫЗВАВШЕГО
-потока, поэтому окно не нужно — только цикл сообщений в своём потоке.
-Команды уходят в ту же очередь, что и у трея: словарь команд общий
-("quit", "settings", "toggle", "scale_up", "scale_down").
+RegisterHotKey(NULL, ...) posts WM_HOTKEY to the message queue of the CALLING
+thread, so no window is needed — only a message loop in our own thread.
+Commands go into the same queue the tray uses: the command vocabulary is
+shared ("quit", "settings", "toggle", "scale_up", "scale_down").
 """
 
 from __future__ import annotations
@@ -30,7 +31,7 @@ user32 = ctypes.windll.user32
 MOD_ALT = 0x0001
 MOD_CONTROL = 0x0002
 MOD_SHIFT = 0x0004
-MOD_NOREPEAT = 0x4000  # удержание клавиши не сыплет повторами
+MOD_NOREPEAT = 0x4000  # holding the key does not spam repeats
 
 VK_F7 = 0x76
 VK_F8 = 0x77
@@ -43,14 +44,14 @@ VK_INSERT = 0x2D
 WM_HOTKEY = 0x0312
 WM_QUIT = 0x0012
 PM_NOREMOVE = 0x0000
-# Свои сообщения потоку хоткеев. RegisterHotKey/UnregisterHotKey с hWnd=None
-# привязаны к ВЫЗЫВАЮЩЕМУ потоку, поэтому снимать и ставить их можно только
-# изнутри этого же потока — из main напрямую нельзя.
+# Our own messages to the hotkey thread. RegisterHotKey/UnregisterHotKey with
+# hWnd=None are bound to the CALLING thread, so they can only be removed and
+# reinstalled from inside that same thread — never straight from main.
 MSG_SUSPEND = 0x8000 + 1
 MSG_RESUME = 0x8000 + 2
 MSG_REBIND = 0x8000 + 3
 
-# id -> (модификаторы, VK, команда, человекочитаемое имя)
+# id -> (modifiers, VK, command, human-readable name)
 DEFAULT_BINDINGS = {
     1: (MOD_NOREPEAT, VK_F9, "toggle", "F9"),
     2: (MOD_NOREPEAT, VK_F8, "settings", "F8"),
@@ -58,13 +59,13 @@ DEFAULT_BINDINGS = {
     4: (MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, VK_DOWN, "scale_down", "Ctrl+Alt+Down"),
     5: (MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, VK_Q, "quit", "Ctrl+Alt+Q"),
     6: (MOD_NOREPEAT, VK_INSERT, "record", "Insert"),
-    # Скриншот жил только кнопкой в меню, и подписать её было нечем.
-    # F7 — рядом с F8/F9 и свободна. PrtScr не берём: её перехватывает
-    # «Набросок на фрагменте», RegisterHotKey на неё может не встать.
+    # The screenshot lived only as a menu button, with no key to print on it.
+    # F7 sits next to F8/F9 and is free. Not PrtScr: Snip & Sketch takes it,
+    # and RegisterHotKey may well refuse it.
     7: (MOD_NOREPEAT, VK_F7, "screenshot_menu", "F7"),
 }
 
-# Имя клавиши -> VK (для парсинга config)
+# Key name -> VK (for parsing the config)
 _KEY_NAMES = {
     "F1": 0x70, "F2": 0x71, "F3": 0x72, "F4": 0x73, "F5": 0x74,
     "F6": 0x75, "F7": 0x76, "F8": 0x77, "F9": 0x78, "F10": 0x79,
@@ -83,9 +84,10 @@ _KEY_NAMES = {
 
 
 def parse_binding(text: str) -> tuple[int, int] | None:
-    """Разобрать строку вида 'F9', 'Ctrl+Alt+Q', 'Insert' -> (mods, vk).
+    """Parse a string like 'F9', 'Ctrl+Alt+Q', 'Insert' -> (mods, vk).
 
-    Возвращает None, если строка не распознана (тогда биндинг не меняется).
+    Returns None when the string is not recognised, in which case the binding
+    is left alone.
     """
     if not text:
         return None
@@ -109,10 +111,10 @@ def parse_binding(text: str) -> tuple[int, int] | None:
 
 
 def build_bindings(overrides: dict | None = None) -> dict:
-    """Биндинги с учётом пользовательских переопределений из config.
+    """Bindings with the user's overrides from the config applied.
 
-    overrides: {"toggle": "F9", "record": "Insert", ...} — команда -> строка.
-    Неизвестные/битые строки игнорируются (остаётся дефолт).
+    overrides: {"toggle": "F9", "record": "Insert", ...} — command -> string.
+    Unknown or malformed strings are ignored and the default stays.
     """
     bindings = {hk_id: tuple(entry) for hk_id, entry in DEFAULT_BINDINGS.items()}
     if not overrides:
@@ -130,13 +132,13 @@ def build_bindings(overrides: dict | None = None) -> dict:
 
 
 def describe(bindings: dict | None = None) -> str:
-    """Строка вида 'F9 NR, F8 настройки, ...' — для лога при старте."""
+    """A line like 'F9=toggle, F8=settings, ...' for the startup log."""
     src = bindings or DEFAULT_BINDINGS
     return ", ".join(f"{name}={cmd}" for _, (_, _, cmd, name) in sorted(src.items()))
 
 
 class HotkeyController:
-    """Регистрация глобальных хоткеев; команды кладутся в очередь."""
+    """Registers the global hotkeys; commands go into a queue."""
 
     def __init__(self, commands: queue.Queue, bindings: dict | None = None):
         self._commands = commands
@@ -147,11 +149,11 @@ class HotkeyController:
         self.failed: list[str] = []
         self._ready = threading.Event()
         self._lock = threading.Lock()
-        self._pending: dict | None = None   # биндинги для MSG_REBIND
-        self._active = False                # хоткеи сейчас зарегистрированы
+        self._pending: dict | None = None   # bindings for MSG_REBIND
+        self._active = False                # hotkeys are currently registered
 
     def start(self, timeout: float = 3.0) -> None:
-        """Запустить поток и дождаться результата регистрации."""
+        """Start the thread and wait for the registration result."""
         if self._thread is not None:
             return
         self._thread = threading.Thread(target=self._run, daemon=True, name="hotkeys")
@@ -161,8 +163,8 @@ class HotkeyController:
     def _run(self) -> None:
         self._tid = ctypes.windll.kernel32.GetCurrentThreadId()
         msg = wintypes.MSG()
-        # Очередь сообщений у потока создаётся лениво — заставляем её появиться
-        # ДО RegisterHotKey, иначе первые WM_HOTKEY могут уйти в никуда.
+        # A thread's message queue is created lazily — force it into
+        # existence BEFORE RegisterHotKey, or the first WM_HOTKEY may vanish.
         user32.PeekMessageW(ctypes.byref(msg), None, WM_HOTKEY, WM_HOTKEY, PM_NOREMOVE)
         self._register()
         self._ready.set()
@@ -184,7 +186,7 @@ class HotkeyController:
                 self._register()
         self._unregister()
 
-    # Регистрация живёт только в потоке хоткеев — см. MSG_* выше.
+    # Registration lives only in the hotkey thread — see MSG_* above.
     def _register(self) -> None:
         if self._active:
             return
@@ -194,8 +196,8 @@ class HotkeyController:
             if user32.RegisterHotKey(None, hk_id, mods, vk):
                 self.registered.append(name)
             else:
-                # Комбинацию уже занял кто-то другой — не смертельно,
-                # остальные хоткеи продолжают работать.
+                # Someone else already holds the combination — not fatal,
+                # the remaining hotkeys keep working.
                 self.failed.append(name)
         self._active = True
 
@@ -207,8 +209,8 @@ class HotkeyController:
         self._active = False
 
     def suspend(self) -> None:
-        """Снять хоткеи: пока меню ждёт нажатие клавиши, F8 должна попасть
-        в поле, а не переключить меню."""
+        """Suspend the hotkeys: while the menu waits for a key, F8 must land
+        in the field instead of toggling the menu."""
         if self._tid:
             user32.PostThreadMessageW(self._tid, MSG_SUSPEND, 0, 0)
 
@@ -217,7 +219,7 @@ class HotkeyController:
             user32.PostThreadMessageW(self._tid, MSG_RESUME, 0, 0)
 
     def rebind(self, bindings: dict) -> None:
-        """Заменить назначения на ходу, без перезапуска программы."""
+        """Replace the assignments on the fly, without restarting."""
         if not self._tid:
             return
         with self._lock:

@@ -1,41 +1,41 @@
-# Рабочая папка с диагностикой и тестами — не коммитится
+# Working folder with diagnostics and tests - not committed
 _work/
 
 # Python
 __pycache__/
 *.pyc
 
-# Сборочные артефакты воркера (собирается native/build-host.bat)
+# Worker build artefacts (built by native/build-host.bat)
 *.obj
 native/nvngx.dll
 
-# Редистрибутив NVIDIA: 165 МБ, превышает лимит файла GitHub (100 МБ).
-# Как его получить — см. README.md, раздел «Требования».
+# NVIDIA redistributable: 165 MB, over the GitHub file limit (100 MB).
+# How to get it - see README.md, the Requirements section.
 native/nvngx_dlssnr.dll
 
-# Опциональный локальный Python-рантайм рядом с программой
+# Optional local Python runtime next to the program
 runtime/
 
-# Лог программы (pythonw-запуск без консоли)
+# Program log (pythonw launch without a console)
 NeuralScreen.log
 
-# Записи с Insert
+# Recordings made with Insert
 recordings/
 
-# Релизные архивы в корне (собираются при релизе заново)
+# Release archives in the root (rebuilt at release time)
 *.zip
 
-# Скриншоты, снятые кнопкой в меню
+# Screenshots taken with the menu button
 screenshots/
 
-# Резервные копии от патч-скриптов
+# Backups left by patch scripts
 *.bak-*
 
-# Offscreen-рендеры меню для просмотра вёрстки
+# Offscreen renders of the menu, for reviewing the layout
 _menu*.png
 *.local-backup
 release-package.html
-# Dev-скрипты и личные файлы — не для репозитория
+# Dev scripts and personal files - not for the repository
 _measure_*.py
 _probe_*.py
 _render_*.py

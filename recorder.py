@@ -1,12 +1,12 @@
-"""VideoRecorder — запись кадров NR-оверлея в MP4 (AV1 NVENC).
+"""VideoRecorder - writes NR overlay frames into an MP4 (AV1 NVENC).
 
-Пишет кадры, которые Python получает от воркера (output_rgba) во время
-записи (Insert). Кадры приходят full-res RGBA8 каждые ~30 мс; PyAV
-конвертирует их в yuv420p и кодирует AV1 через NVENC.
+Records the frames Python receives from the worker (output_rgba) while
+recording is on (Insert). Frames arrive full-res RGBA8 every ~30 ms; PyAV
+converts them to yuv420p and encodes AV1 through NVENC.
 
-Запись не зависит от ShadowPlay/OBS: оверлей исключён из внешнего
-захвата (WDA_EXCLUDEFROMCAPTURE), поэтому видео пишется изнутри —
-ровно тот NR-результат, что виден на экране.
+Recording does not depend on ShadowPlay/OBS: the overlay is excluded from
+external capture (WDA_EXCLUDEFROMCAPTURE), so the video is written from the
+inside - exactly the NR result that is on screen.
 """
 
 from __future__ import annotations
@@ -22,36 +22,39 @@ import numpy as np
 
 
 class VideoRecorder:
-    """Пишет кадры в MP4 (av1_nvenc). Создаётся на старте записи, закрывается
-    по Insert/выходу. write()/close() зовутся только из main-цикла.
+    """Writes frames into an MP4 (av1_nvenc). Created when recording starts,
+    closed on Insert/exit. write()/close() are called from the main loop only.
 
-    Кодирование идёт в своём потоке. Замер на 4K показал, что синхронный
-    write() стоил 19.9 мс на кадр — перевод RGBA->yuv420p и отправка в nvenc
-    на CPU — и ронял конвейер с 56 до 21 FPS. От битрейта это не зависело:
-    время съедало цветовое преобразование, а не кодер.
+    Encoding runs in its own thread. A 4K measurement showed a synchronous
+    write() cost 19.9 ms per frame - the RGBA->yuv420p conversion and the
+    hand-off to nvenc, both on the CPU - and dropped the pipeline from 56 to
+    21 FPS. Bitrate had nothing to do with it: the time went into the colour
+    conversion, not the encoder.
 
-    Кадр отдаётся потоку по ссылке, без копии: воркер присылает каждый кадр
-    в свежем буфере (WorkerReader.recv -> np.frombuffer поверх нового bytes),
-    и main-цикл его больше не меняет — только читает для показа и скриншота.
+    The frame is handed to the thread by reference, without a copy: the worker
+    sends every frame in a fresh buffer (WorkerReader.recv -> np.frombuffer
+    over new bytes) and the main loop never mutates it - it only reads it for
+    display and screenshots.
     """
 
-    #: Сколько кадров ждёт кодировщика. Больше — больше памяти (на 4K это
-    #: 33 МБ на кадр), меньше — раньше начнём терять кадры на всплесках.
+    #: How many frames wait for the encoder. More means more memory (33 MB per
+    #: frame at 4K), less means we start dropping frames earlier on spikes.
     QUEUE_DEPTH = 4
-    #: Сколько ждать место в очереди, прежде чем выбросить кадр. Ронять
-    #: конвейер ради записи нельзя: пользователь смотрит на экран, а не в
-    #: файл. Пропуск кадра на времени не отражается — pts от часов.
+    #: How long to wait for room in the queue before dropping a frame. Stalling
+    #: the pipeline for the sake of the recording is not acceptable: the user
+    #: looks at the screen, not at the file. A dropped frame does not affect
+    #: timing - pts comes from the clock.
     PUT_TIMEOUT_S = 0.25
 
-    #: Битрейт и параметры кодировщика вынесены в атрибуты класса, чтобы их
-    #: можно было менять без правки конструктора (замеры, эксперименты).
+    #: Bitrate and encoder parameters live as class attributes so they can be
+    #: changed without touching the constructor (measurements, experiments).
     BIT_RATE = 120_000_000
     ENCODER_OPTIONS = {
-        "preset": "p6",     # p1 быстрый ... p7 качественный
+        "preset": "p6",     # p1 fast ... p7 high quality
         "tune": "hq",
-        "rc": "vbr",        # не фиксированный битрейт: на резком движении
-                            # кодер должен иметь право потратить больше
-        "cq": "16",         # целевое качество; битрейт — потолок, а не цель
+        "rc": "vbr",        # not a fixed bitrate: on fast motion the encoder
+                            # must be allowed to spend more
+        "cq": "16",         # target quality; bitrate is a ceiling, not a goal
         "maxrate": "250M",
         "bufsize": "500M",
     }
@@ -70,21 +73,20 @@ class VideoRecorder:
         self._stream.width = width
         self._stream.height = height
         self._stream.pix_fmt = "yuv420p"
-        # MP4 (mov) muxer + nvenc: постоянная time_base 1/fps, pts — счётчик.
-        # (Питфолл NUT с time_base != 1/30 не касается: пишем напрямую в MP4,
-        # без субпроцесса ffmpeg.)
+        # MP4 (mov) muxer + nvenc: constant time_base 1/fps, pts is a counter.
+        # (The NUT pitfall with time_base != 1/30 does not apply: we write
+        # straight into MP4, without an ffmpeg subprocess.)
         self._stream.time_base = Fraction(1, int(round(fps)))
-        # Цветовые метаданные ОБЯЗАТЕЛЬНЫ: без них плееры интерпретируют
-        # кадры по-разному (контраст/цвета «плавают»). Захват рабочего
-        # стола — sRGB FULL range (не limited/BT.709-tv: limited-теги при
-        # full-range данных дают «сильный контраст» — плеер растягивает
-        # 16-235 на весь 0-255).
-        # Числовые enum FFmpeg: range JPEG/full=2; colorspace BT709=1;
+        # Colour metadata is MANDATORY: without it players interpret the frames
+        # differently (contrast/colours "drift"). Desktop capture is sRGB FULL
+        # range (not limited/BT.709-tv: limited tags over full-range data give
+        # "heavy contrast" - the player stretches 16-235 across 0-255).
+        # FFmpeg numeric enums: range JPEG/full=2; colorspace BT709=1;
         # primaries BT709=1 (sRGB primaries == BT.709); transfer
-        # IEC61966_2_1 (sRGB)=13 (НЕ 14 — 14 это BT2020_10, проверено
-        # ffprobe: при 14 файл помечается bt2020-10).
-        # Имена атрибутов PyAV: color_range/colorspace/color_primaries/
-        # color_trc (НЕ color_space/color_transfer — их не существует).
+        # IEC61966_2_1 (sRGB)=13 (NOT 14 - 14 is BT2020_10, verified with
+        # ffprobe: at 14 the file is tagged bt2020-10).
+        # PyAV attribute names: color_range/colorspace/color_primaries/
+        # color_trc (NOT color_space/color_transfer - those do not exist).
         try:
             self._stream.color_range = 2        # AVCOL_RANGE_JPEG = full
             self._stream.colorspace = 1         # AVCOL_SPC_BT709
@@ -92,24 +94,19 @@ class VideoRecorder:
             self._stream.color_trc = 13         # AVCOL_TRC_IEC61966_2_1 = sRGB
         except Exception as exc:
             print(f"[record] color metadata failed: {exc}", file=sys.stderr)
-        # NVENC: битрейт 50 Мбит/с — запаса качества для интерфейса/текста
-        # (пользовательский выбор). «Рассыпание» картинки на длинных
-        # прогонах лечится НЕ только битрейтом, а коротким GOP и без
-        # B-фреймов: на переменном fps конвейера B-фреймы рассинхронизируют
-        # кадры, а длинный GOP без keyframe даёт артефакты на смене сцен.
-        # Битрейт как ПОТОЛОК при VBR с целевым качеством (cq), а не как цель:
-        # на резком движении (шутер) фиксированный битрейт заставляет кодер
-        # ронять качество, чтобы попасть в цифру. GOP короткий и без
-        # B-фреймов: на переменном fps конвейера B-фреймы рассинхронизируют
-        # кадры, а длинный GOP даёт артефакты на смене сцен.
+        # Bitrate as a CEILING under VBR with a quality target (cq), not as a
+        # goal: on fast motion (a shooter) a fixed bitrate forces the encoder to
+        # sacrifice quality to hit the number. The GOP is short and has no
+        # B-frames: at the pipeline's variable fps B-frames desynchronise the
+        # frames, and a long GOP gives artefacts on scene changes.
         try:
             self._stream.bit_rate = self.BIT_RATE
-            self._stream.gop_size = max(30, int(round(fps)) * 2)  # keyframe раз в 2 с
+            self._stream.gop_size = max(30, int(round(fps)) * 2)  # keyframe every 2 s
             self._stream.max_b_frames = 0
         except Exception as exc:
             print(f"[record] encoder params failed: {exc}", file=sys.stderr)
-        # Опции кодировщика идут строками через options — атрибутов
-        # max_bit_rate/rc_buffer_size у PyAV не существует.
+        # Encoder options are passed as strings through options - PyAV has no
+        # max_bit_rate/rc_buffer_size attributes.
         if self.ENCODER_OPTIONS:
             try:
                 self._stream.options = dict(self.ENCODER_OPTIONS)
@@ -121,7 +118,7 @@ class VideoRecorder:
         self._started = time.perf_counter()
 
     def _encode_loop(self) -> None:
-        """Единственный владелец контейнера, пока запись идёт."""
+        """The sole owner of the container while recording is running."""
         while True:
             item = self._queue.get()
             if item is None:
@@ -129,25 +126,26 @@ class VideoRecorder:
             pts, rgba = item
             try:
                 self._encode_one(pts, rgba)
-            except BaseException as exc:   # noqa: BLE001 — донесём в main
+            except BaseException as exc:   # noqa: BLE001 - report back to main
                 self._encode_error = exc
-                print(f"[record] кодирование прервано: {exc}", file=sys.stderr)
+                print(f"[record] encoding aborted: {exc}", file=sys.stderr)
                 return
 
     def write(self, rgba: np.ndarray) -> None:
-        """Поставить кадр в очередь кодировщика (RGBA8 full-res, 4 канала).
+        """Queue a frame for the encoder (RGBA8 full-res, 4 channels).
 
-        PTS строим от РЕАЛЬНОГО времени записи, а не от счётчика кадров:
-        кадры приходят с фактическим fps конвейера (~16-32), а не ровно 30,
-        и контейнер обязан отражать реальную длительность — иначе видео
-        проигрывается ускоренно. Считаем его ЗДЕСЬ, в момент прихода кадра:
-        в потоке он отражал бы момент кодирования, то есть врал бы на всю
-        длину очереди.
+        PTS is built from the REAL recording time, not from a frame counter:
+        frames arrive at the pipeline's actual fps (~16-32), not exactly 30,
+        and the container must reflect the real duration - otherwise the video
+        plays back sped up. We compute it HERE, when the frame arrives: inside
+        the thread it would reflect the moment of encoding, i.e. it would be
+        off by the whole queue depth.
         """
         if rgba.shape[0] != self.height or rgba.shape[1] != self.width:
-            # Режим дисплея сменился — кадры другой формы. Молча пропускать
-            # нельзя: запись «тихо» пишет пустоту. Исключение останавливает
-            # запись (main.py: recorder.close() + recorder = None).
+            # The display mode changed - frames have a different shape. Skipping
+            # them silently is not an option: the recording would "quietly"
+            # write nothing. The exception stops the recording (main.py:
+            # recorder.close() + recorder = None).
             raise ValueError(
                 f"display mode changed: frame {rgba.shape[1]}x{rgba.shape[0]} "
                 f"!= recorder {self.width}x{self.height}")
@@ -165,18 +163,20 @@ class VideoRecorder:
         try:
             self._queue.put((pts, rgba), timeout=self.PUT_TIMEOUT_S)
         except queue.Full:
-            # Кодировщик не успевает. Выбросить кадр честнее, чем держать
-            # main-цикл: на экране пользователь заметит, в файле — нет.
+            # The encoder cannot keep up. Dropping the frame is more honest than
+            # holding up the main loop: the user would notice on screen, not in
+            # the file.
             self.dropped += 1
-            self._frame_idx = pts - 1   # номер не занят, отдадим следующему
+            self._frame_idx = pts - 1   # number unused, hand it to the next one
 
     def _encode_one(self, pts: int, rgba: np.ndarray) -> None:
-        """Собственно кодирование — только из потока _encode_loop."""
+        """The encoding proper - only from the _encode_loop thread."""
         frame = av.VideoFrame.from_ndarray(rgba, format="rgba")
-        # Цветовые теги ОБЯЗАТЕЛЬНО на кадре, а не только на потоке:
-        # swscale при конвертации RGBA->yuv420p берёт матрицу из кадра,
-        # а плеер интерпретирует по тегам потока. Рассинхрон (кадр без
-        # тегов -> дефолт swscale, поток с тегами) и даёт «контраст».
+        # The colour tags are MANDATORY on the frame, not only on the stream:
+        # when converting RGBA->yuv420p swscale takes the matrix from the frame,
+        # while the player interprets the result by the stream tags. That
+        # mismatch (an untagged frame -> swscale default, a tagged stream) is
+        # what produces the "contrast".
         try:
             frame.color_range = 2        # AVCOL_RANGE_JPEG = full (sRGB)
             frame.colorspace = 1         # AVCOL_SPC_BT709
@@ -190,11 +190,11 @@ class VideoRecorder:
         self.written += 1
 
     def close(self) -> None:
-        """Дождаться кодировщика, дописать трейлер и закрыть контейнер.
+        """Wait for the encoder, write the trailer and close the container.
 
-        Поток останавливаем ДО работы с контейнером: он его единственный
-        владелец, пока запись идёт, и трогать контейнер из двух потоков
-        нельзя.
+        The thread is stopped BEFORE we touch the container: it is the sole
+        owner while recording runs, and the container must not be touched from
+        two threads.
         """
         if self._container is None:
             return
@@ -202,12 +202,12 @@ class VideoRecorder:
             self._queue.put(None)
             self._thread.join(timeout=30.0)
             if self._thread.is_alive():
-                print("[record] кодировщик не завершился за 30 c",
+                print("[record] encoder did not finish within 30 s",
                       file=sys.stderr)
             self._thread = None
         if self.dropped:
-            print(f"[record] кадров выброшено: {self.dropped} "
-                  f"(кодировщик не успевал)", file=sys.stderr)
+            print(f"[record] frames dropped: {self.dropped} "
+                  f"(encoder could not keep up)", file=sys.stderr)
         try:
             for packet in self._stream.encode(None):  # flush encoder
                 self._container.mux(packet)

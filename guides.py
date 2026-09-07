@@ -18,13 +18,13 @@ class TemporalGuideGenerator:
 
     def __init__(self, width: int, height: int, flow_width: int = 320,
                  emit_small: bool = False) -> None:
-        """width/height — work-разрешение NGX.
+        """width/height is the NGX work resolution.
 
-        emit_small=True: отдавать поле движения в разрешении оптического
-        потока (~320x180) вместо work-разрешения. Растяжение тогда делает
-        воркер на GPU, а с CPU снимается ~8 мс на кадр — resize и конвертация
-        6 миллионов значений. Векторы в обоих режимах в одних и тех же
-        единицах (пиксели work-разрешения), меняется только сетка.
+        emit_small=True: hand back the motion field at the optical-flow
+        resolution (~320x180) instead of the work resolution. The worker then
+        upscales it on the GPU and the CPU is spared ~8 ms per frame — a
+        resize and a conversion of 6 million values. The vectors are in the
+        same units either way (work-resolution pixels); only the grid changes.
         """
         self.width = width
         self.height = height
@@ -36,9 +36,9 @@ class TemporalGuideGenerator:
         self._zero_motion = np.zeros((self.height, self.width, 2), dtype=np.float16)
         self._zero_small = np.zeros((self.flow_height, self.flow_width, 2), dtype=np.float16)
         self._flow_f16 = np.empty((self.flow_height, self.flow_width, 2), dtype=np.float16)
-        # Буферы под растяжение поля движения. Каждый кадр это 3 М пикселей на
-        # 2 канала: без переиспользования уходило ~11.6 мс на аллокацию,
-        # умножение уже растянутого поля и astype (замерено, _work/bench_guides.py).
+        # Buffers for upscaling the motion field. Each frame is 3M pixels by
+        # 2 channels: without reuse it cost ~11.6 ms in allocation, multiplying
+        # the already-upscaled field and astype (measured, _work/bench_guides.py).
         self._flow_scaled = np.empty((self.flow_height, self.flow_width, 2), dtype=np.float32)
         self._motion_f32 = np.empty((self.height, self.width, 2), dtype=np.float32)
         self._motion_f16 = np.empty((self.height, self.width, 2), dtype=np.float16)
@@ -48,7 +48,7 @@ class TemporalGuideGenerator:
 
     @property
     def motion_width(self) -> int:
-        """Ширина поля движения, которое отдаёт process()."""
+        """Width of the motion field process() hands back."""
         return self.flow_width if self.emit_small else self.width
 
     @property
@@ -60,27 +60,27 @@ class TemporalGuideGenerator:
         return cv2.resize(gray, (self.flow_width, self.flow_height), interpolation=cv2.INTER_AREA)
 
     def zero_guide(self) -> GuideFrame:
-        """Фолбэк при устойчивом сбое process(): нулевой motion, reset=True.
+        """Fallback for a persistent process() failure: zero motion, reset=True.
 
-        Кадр продолжает идти в воркер (картинка не замирает), NGX получает
-        нулевое поле движения вместо свежего.
+        The frame keeps going to the worker (the picture does not freeze); NGX
+        gets a zero motion field instead of a fresh one.
         """
         motion = self._zero_small if self.emit_small else self._zero_motion
         return GuideFrame(motion=motion, reset=True, scene_score=1.0)
 
     def process(self, rgba: np.ndarray | None = None,
                 gray: np.ndarray | None = None) -> GuideFrame:
-        """Посчитать guides: motion/reset/scene_score.
+        """Compute the guides: motion/reset/scene_score.
 
-        Либо rgba (BGR/RGBA full-res — сам даунсэмплит), либо готовый gray
-        (flow-размер, uint8 2D) — приходит из обратного канала воркера
-        (GRAY/DDA). Приоритет: gray (уже правильного размера).
+        Either rgba (full-res BGR/RGBA — downsampled here) or a ready gray
+        frame (flow-sized, uint8 2D) coming from the worker's reverse channel
+        (GRAY/DDA). Gray wins: it is already the right size.
         """
         if gray is not None:
             current = gray.reshape(self.flow_height, self.flow_width).astype(np.uint8)
             if current.shape != (self.flow_height, self.flow_width):
                 raise ValueError(
-                    f"gray {current.shape} != ожидаемый {(self.flow_height, self.flow_width)}")
+                    f"gray {current.shape} != expected {(self.flow_height, self.flow_width)}")
         else:
             current = self._small_gray(rgba)
         pixels = self.width * self.height
@@ -113,8 +113,8 @@ class TemporalGuideGenerator:
                 np.multiply(cur_to_prev[..., 1], self.height / self.flow_height,
                             out=self._flow_scaled[..., 1])
                 if self.emit_small:
-                    # Растянет воркер на GPU — тут остаётся только перевод
-                    # 115 тысяч значений во float16.
+                    # The worker upscales it on the GPU — all that is left
+                    # here is converting 115k values to float16.
                     np.copyto(self._flow_f16, self._flow_scaled, casting="same_kind")
                     motion = self._flow_f16
                 else:
@@ -126,10 +126,10 @@ class TemporalGuideGenerator:
         expected = (self.flow_width * self.flow_height if self.emit_small else pixels)
         assert motion.size == expected * 2
         assert motion.dtype == np.float16 and motion.flags["C_CONTIGUOUS"]
-        # ИНВАРИАНТ: motion — переиспользуемый буфер (либо _motion_f16, либо
-        # кэш нулей). Следующий вызов process() его перезапишет, поэтому
-        # потребитель обязан скопировать данные до этого. Цикл main так и
-        # делает: send_frame копирует кадр в общую память сразу же.
+        # INVARIANT: motion is a reused buffer (either _motion_f16 or a
+        # cached zero field). The next process() call overwrites it, so the
+        # consumer must copy the data before then. The main loop does exactly
+        # that: send_frame copies the frame into shared memory immediately.
         return GuideFrame(
             motion=motion,
             reset=reset,
