@@ -241,17 +241,30 @@ class SharedFrameBuffer:
         self._gray_buf: np.ndarray | None = None  # (gray_bytes,) uint8
 
     def open_gray(self, w: int, h: int) -> None:
-        """Открыть gray-секцию размером w*h (создать, если не была)."""
+        """Открыть gray-секцию размером w*h (создать, если не была).
+
+        При смене размера имя секции МЕНЯЕТСЯ: воркер держит старый handle,
+        и CreateFileMapping с тем же именем вернул бы старую секцию — mmap
+        большего размера упал бы, и канал тихо умер (H2 аудита).
+        send_gray() передаёт воркеру свежее имя после open_gray().
+        """
         if self._gray_mm is not None and self.gray_w == w and self.gray_h == h:
             return
         self.close_gray()
         self.gray_w, self.gray_h = w, h
         self.gray_bytes = w * h
+        self.gray_name = f"NeuralScreenGray_{os.getpid()}_{uuid.uuid4().hex[:6]}"
         self._gray_mm = mmap.mmap(-1, self.gray_bytes, tagname=self.gray_name)
         self._gray_buf = np.ndarray((self.gray_bytes,), dtype=np.uint8, buffer=self._gray_mm)
 
     def read_gray(self) -> np.ndarray | None:
-        """Вернуть копию gray-кадра (320x180 uint8) или None, если не открыт."""
+        """Вернуть копию gray-кадра (320x180 uint8) или None, если не открыт.
+
+        Воркер пишет memcpy без разделяемого барьера — теоретически возможен
+        tear. На 320×180 это микросекунды; один разъехавшийся кадр
+        оптического потока некритичен (guides переживают, следующий кадр
+        чинится). Принятый риск — seqlock был бы overengineering'ом.
+        """
         if self._gray_buf is None:
             return None
         return self._gray_buf.copy()

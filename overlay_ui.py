@@ -521,9 +521,15 @@ class OverlayMenu:
         if active:
             # Подложка под уголком: три штриха сами по себе теряются на фоне
             # панели, и зону не видно, пока в неё не ткнёшь.
-            pad = pygame.Surface(g.size, pygame.SRCALPHA)
-            pygame.draw.rect(pad, (*_rgb(self.c["accent"]), 46),
-                             pad.get_rect(),
+            # НЕ SRCALPHA: полупрозрачная подложка блендится с magenta-фоном
+            # (CHROMA_KEY) → цвет ≠ key → colorkey не вырезает → розовая
+            # плашка. Непрозрачная подложка в цвет панели вырезается вместе
+            # с фоном, а акцентная рамка остаётся.
+            pad = pygame.Surface(g.size)
+            pygame.draw.rect(pad, _rgb(self.c["bg"]), pad.get_rect(),
+                             border_bottom_right_radius=self._u(RADIUS))
+            pygame.draw.rect(pad, _rgb(self.c["accent"]), pad.get_rect(),
+                             self._u(1),
                              border_bottom_right_radius=self._u(RADIUS))
             surface.blit(pad, g.topleft)
         color = self.c["accent"] if active else self.c["muted"]
