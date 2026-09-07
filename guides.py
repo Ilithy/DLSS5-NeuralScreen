@@ -59,6 +59,15 @@ class TemporalGuideGenerator:
         gray = cv2.cvtColor(rgba, cv2.COLOR_RGBA2GRAY)
         return cv2.resize(gray, (self.flow_width, self.flow_height), interpolation=cv2.INTER_AREA)
 
+    def zero_guide(self) -> GuideFrame:
+        """Фолбэк при устойчивом сбое process(): нулевой motion, reset=True.
+
+        Кадр продолжает идти в воркер (картинка не замирает), NGX получает
+        нулевое поле движения вместо свежего.
+        """
+        motion = self._zero_small if self.emit_small else self._zero_motion
+        return GuideFrame(motion=motion, reset=True, scene_score=1.0)
+
     def process(self, rgba: np.ndarray | None = None,
                 gray: np.ndarray | None = None) -> GuideFrame:
         """Посчитать guides: motion/reset/scene_score.

@@ -2141,7 +2141,22 @@ static bool DdaGrab(VideoState &v)
         { Log("[dda] dst UAV failed"); g_dda_dup->ReleaseFrame(); frame->Release(); res->Release(); return false; }
         Log("[dda] shared texture %ux%u ready", (UINT)fd.Width, (UINT)fd.Height);
     }
-    g_dda_ctx->CopyResource(g_dda_shared, frame);
+    // D3D11 копия с box по минимальному размеру: g_dda_shared создаётся под
+    // размер ПЕРВОГО кадра; при смене разрешения монитора CopyResource с
+    // несовпадающими размерами даёт device removed. Обрезанный кадр лучше
+    // падения (M4 аудита #2).
+    {
+        D3D11_TEXTURE2D_DESC sd{};
+        g_dda_shared->GetDesc(&sd);
+        D3D11_TEXTURE2D_DESC fd{};
+        frame->GetDesc(&fd);
+        const UINT cw = (sd.Width < fd.Width) ? sd.Width : fd.Width;
+        const UINT ch = (sd.Height < fd.Height) ? sd.Height : fd.Height;
+        if (cw == 0 || ch == 0)
+        { Log("[dda] zero copy size"); g_dda_dup->ReleaseFrame(); frame->Release(); res->Release(); return false; }
+        D3D11_BOX box = { 0, 0, 0, cw, ch, 1 };
+        g_dda_ctx->CopySubresourceRegion(g_dda_shared, 0, 0, 0, 0, frame, 0, &box);
+    }
     ID3D11DeviceContext4 *ctx4 = nullptr;
     if (g_dda_ctx->QueryInterface(__uuidof(ID3D11DeviceContext4), (void **)&ctx4) == S_OK)
     {
@@ -2207,7 +2222,24 @@ static bool DdaGrab(VideoState &v)
     D3D12_TEXTURE_COPY_LOCATION src = {}, dst = {};
     src.pResource = g_dda_dst; src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX; src.SubresourceIndex = 0;
     dst.pResource = v.color.tex; dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX; dst.SubresourceIndex = 0;
-    h.list->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+    // Копия строго по минимальному размеру: g_dda_dst фиксируется по первому
+    // кадру десктопа, v.color.tex — по work/full клиента; при смене
+    // разрешения монитора размеры разъезжаются, и копия целиком (nullptr
+    // box) даёт device removed. Обрезанный кадр на один тик лучше падения.
+    {
+        const D3D12_RESOURCE_DESC sd = g_dda_dst->GetDesc();
+        const D3D12_RESOURCE_DESC dd = v.color.tex->GetDesc();
+        const UINT cw = (UINT)((sd.Width < dd.Width) ? sd.Width : dd.Width);
+        const UINT ch = (UINT)((sd.Height < dd.Height) ? sd.Height : dd.Height);
+        if (cw != sd.Width || ch != sd.Height)
+            Log("[dda] size mismatch %llux%llu vs %llux%llu — clipped",
+                (unsigned long long)sd.Width, (unsigned long long)sd.Height,
+                (unsigned long long)dd.Width, (unsigned long long)dd.Height);
+        if (cw == 0 || ch == 0)
+        { Log("[dda] zero copy size — skip"); return false; }
+        D3D12_BOX box = { 0, 0, 0, cw, ch, 1 };
+        h.list->CopyTextureRegion(&dst, 0, 0, 0, &src, &box);
+    }
     D3D12_RESOURCE_BARRIER to_uav = Transition(g_dda_dst, D3D12_RESOURCE_STATE_COPY_SOURCE,
                                                D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     D3D12_RESOURCE_BARRIER to_nps = Transition(v.color.tex, D3D12_RESOURCE_STATE_COPY_DEST,
@@ -2576,9 +2608,12 @@ static int ReadVideoMessage(VideoState &v, VideoFrameHeader &fh, std::vector<BYT
         if (no_color && !g_dda_active)
         {
             // Клиент думает, что DDA активен, а захват умер (recreate не
-            // удался). Пробуем переоткрыть один раз; не вышло — выходим:
-            // клиент перезапустит воркера и пошлёт DDA1 заново. Иначе
-            // прочитаем из пайпа цвет, которого нет — «truncated frame».
+            // удался). Пробуем переоткрыть один раз; не вышло или размеры
+            // нулевые (DDA никогда не был активен — рассинхрон протокола) —
+            // выходим: клиент перезапустит воркера и пошлёт DDA1 заново.
+            // Иначе прочитаем из пайпа цвет, которого нет — «truncated frame».
+            if (g_dda_w == 0 || g_dda_h == 0)
+            { Log("[dda] NO_COLOR without DDA sizes — protocol desync"); return 0; }
             if (!OpenDda(g_dda_w, g_dda_h) || !g_dda_active) return 0;
         }
         const size_t cw = v.upscale ? v.full_w : v.w;

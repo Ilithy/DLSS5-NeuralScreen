@@ -905,6 +905,7 @@ def main() -> int:
     display: Display | None = None
     tray: TrayController | None = None
     hotkeys: HotkeyController | None = None
+    recorder: VideoRecorder | None = None
     try:
         # Воркер и guides работают на work-разрешении (NGX feature создаётся
         # по размерам заголовка; guides.assert требует совпадения размеров)
@@ -1052,6 +1053,7 @@ def main() -> int:
         # выключаем NR (пауза) и алертим, чтобы не крутить цикл рестартов.
         MAX_CONSECUTIVE_RESTARTS = 3
         consecutive_restarts = 0
+        guide_fails = 0
 
         def _recreate_capture() -> None:
             """Пересоздать захват (свежая DDA-сессия) после сбоя/смены режима."""
@@ -1298,6 +1300,7 @@ def main() -> int:
                 data["open_menu_on_start"] = startup_menu
                 data["split"] = round(split_pos, 2)
                 data["theme"] = display.menu.state.get("theme", "light")
+                data["lang"] = lang
                 data["menu_offset"] = [int(display.menu.offset[0]),
                                        int(display.menu.offset[1])]
                 args.config.write_text(
@@ -1595,10 +1598,20 @@ def main() -> int:
             except Exception as guide_exc:
                 # guides — не критичен: ValueError/TypeError/cv2.error (форма
                 # gray-кадра, деление на ноль) не должны валить процесс.
-                # Пропускаем кадр — воркер получит следующий.
+                # Пропускаем кадр — воркер получит следующий. Но устойчивая
+                # ошибка (несовместимый gray-канал, битая форма) зациклит
+                # main на 100% CPU — после 5 сбоев подряд уходим на нулевой
+                # motion-фолбэк: кадр продолжит идти, картинка не замрёт.
                 print(f"[main] guides.process упал ({guide_exc}) — кадр пропущен",
                       file=sys.stderr)
-                continue
+                guide_fails += 1
+                if guide_fails >= 5:
+                    print(f"[main] guides.process нестабилен — нулевой motion "
+                          f"(кадры продолжают идти)", file=sys.stderr)
+                    guide_fails = 0
+                    guide = guides.zero_guide()
+                else:
+                    continue
             try:
                 check_worker(worker, worker_logs)
                 t0 = time.perf_counter()
@@ -1757,9 +1770,14 @@ def main() -> int:
                     pass
                 display = Display(width, height, fullscreen=bool(cfg["fullscreen"]))
                 display.set_lang(lang)
-                # Меню создаётся вместе с окном — возвращаем ему размер и
-                # положение, иначе после запуска игры оно прыгает в центр.
+                # Меню создаётся вместе с окном — возвращаем ему размер,
+                # положение, тему и язык, иначе после запуска игры оно
+                # прыгает в центр, светлеет и переходит на en.
                 display.menu.set_user_scale(float(cfg.get("menu_scale", 1.0)))
+                saved_theme = cfg.get("theme")
+                if isinstance(saved_theme, str) and saved_theme in ("light", "dark"):
+                    display.menu.set_state({"theme": saved_theme})
+                display.menu.set_state({"lang": lang})
                 saved = cfg.get("menu_offset")
                 if isinstance(saved, (list, tuple)) and len(saved) == 2:
                     display.menu.offset = [int(saved[0]), int(saved[1])]

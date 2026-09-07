@@ -1,6 +1,6 @@
 """Автопроверки NeuralScreen v1.1 — статичная часть (без GUI).
 
-Запуск:  runtime\\python.exe _work\\autocheck.py
+Запуск:  runtime\\python.exe autocheck.py
 GUI-часть (меню, запись) прогоняется отдельно через computer_use — см. конец вывода.
 
 Каждая проверка: PASS / FAIL / SKIP + причина. Выход: 0 = все PASS, 1 = есть FAIL.
@@ -64,10 +64,21 @@ def zip_integrity():
         dll = z.read("native/nvngx.dll")
         if b"NS_ARCH_SPOOF" not in dll:
             return False, "nvngx.dll в архиве без хука"
-        # конфиг в архиве — дефолтный, не персональный
+        # конфиг в архиве — дефолтный, не персональный: могут утечь
+        # menu_offset/menu_scale/theme/lang (персональные значения пишутся
+        # в конфиг легально, поэтому проверяем ВСЕ такие поля)
         cfg = json.loads(z.read("config.json"))
-        if cfg.get("menu_offset") != [0, 0] or cfg.get("menu_scale") != 1.0:
-            return False, f"в архиве персональный config: {cfg.get('menu_offset')}"
+        leak = []
+        if cfg.get("menu_offset") != [0, 0]:
+            leak.append(f"menu_offset={cfg.get('menu_offset')}")
+        if cfg.get("menu_scale") != 1.0:
+            leak.append(f"menu_scale={cfg.get('menu_scale')}")
+        if cfg.get("theme") not in (None, "light"):
+            leak.append(f"theme={cfg.get('theme')}")
+        if cfg.get("lang") not in (None, "en"):
+            leak.append(f"lang={cfg.get('lang')}")
+        if leak:
+            return False, "в архиве персональный config: " + ", ".join(leak)
     return True, f"{zpath.stat().st_size} байт, все файлы, хук, дефолтный config"
 
 
@@ -216,7 +227,7 @@ def main():
     print("ИТОГ: все проверки PASS")
     if "--gui" not in sys.argv:
         print()
-        print("GUI-часть:  runtime\\python.exe _work\\autocheck.py --gui")
+        print("GUI-часть:  runtime\\python.exe autocheck.py --gui")
     return 0
 
 

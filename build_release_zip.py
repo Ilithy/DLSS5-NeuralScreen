@@ -2,6 +2,11 @@
 import os
 import subprocess
 import zipfile
+from pathlib import Path
+
+# Скрипт обязан работать из любого каталога: все пути относительны git.
+BASE = Path(__file__).resolve().parent
+os.chdir(BASE)
 
 files = subprocess.check_output(["git", "ls-files"], text=True).splitlines()
 extra = [
@@ -59,6 +64,10 @@ def _skip(path: str) -> bool:
     norm = path.replace("\\", "/")
     if any(norm == p or norm.startswith(p) for p in TK_SKIP):
         return True
+    # .pyc/__pycache__ — мёртвый груз (~13 МБ в zip): pythonw собирает их
+    # на лету, дистрибутиву они не нужны.
+    if norm.endswith(".pyc") or "/__pycache__/" in norm:
+        return True
     return _drop_sitepackage(norm)
 
 
@@ -84,15 +93,19 @@ with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as z:
         if not os.path.isfile(f):
             print("MISSING:", f)
             continue
-        # config.json — из git, а не с диска: на диске лежат персональные
-        # menu_offset/menu_scale разработчика, в архив они не должны попадать.
+        # config.json — ТОЛЬКО из git HEAD, а не с диска: на диске лежат
+        # персональные menu_offset/menu_scale/theme разработчика, в архив
+        # они не должны попадать. Сравнение с worktree НЕ используется:
+        # застейдженный персональный конфиг (git add) сделал бы diff
+        # чистым, и личные значения утекли бы в zip (R1 аудита #2).
         if f == "config.json":
-            r = subprocess.run(["git", "diff", "--quiet", "--", "config.json"])
-            if r.returncode != 0:
-                data = subprocess.check_output(
-                    ["git", "show", "HEAD:config.json"])
+            try:
+                data = subprocess.check_output(["git", "show", "HEAD:config.json"])
                 z.writestr(f, data)
-                continue
+            except subprocess.CalledProcessError:
+                # config.json ещё ни разу не коммитился — берём с диска.
+                z.write(f, f)
+            continue
         z.write(f, f)
 print("entries:", len(uniq))
 print("size:", os.path.getsize(out))

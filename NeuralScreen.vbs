@@ -20,11 +20,6 @@ If py = "" Then
 End If
 
 If py = "" Then
-    devpython = "D:\YouTube-DTF\dlss5\video-tools\merserk-0.1\bin\python-3.13.15-embed-amd64\pythonw.exe"
-    If fso.FileExists(devpython) Then py = devpython
-End If
-
-If py = "" Then
     ' fallback: pythonw из PATH (если пользователь поставил Python)
     py = "pythonw"
 End If
