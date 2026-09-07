@@ -271,30 +271,34 @@ static bool ArchApplyPatch()
 static int __cdecl ArchInfoHook(void *gpu, NvArchInfo *info)
 {
     if (info == nullptr) return -1;              // NVAPI_ERROR
+    const unsigned want = info->version;
+    // Find the handle in the cache; an unknown handle gets the primary
+    // card's answer - it is almost always the same GPU reached through
+    // another API path (NvAPI_GPU_GetHandleFromDXGI etc.), and an honest
+    // error here would kill CreateFeature for no reason.
+    int idx = -1;
     for (int i = 0; i < g_arch_count; ++i)
+        if (g_arch_handles[i] == gpu) { idx = i; break; }
+    if (idx < 0) idx = 0;
+    // Keep the structure version the caller asked for: V1 and V2 differ
+    // only in that field, the size is the same.
+    *info = g_arch_cache[idx];
+    info->version = want;
+    // Spoof ONLY the primary card (idx 0): on multi-GPU machines the
+    // secondary NVIDIA card (and any non-NVIDIA iGPU reached through other
+    // APIs) must keep its real architecture, or NGX may try to create the
+    // feature on the wrong adapter.
+    const unsigned group = info->architecture & 0xFFFFFFF0u;
+    if (idx == 0 && (group == NV_ARCH_TURING || group == NV_ARCH_AMPERE
+        || group == NV_ARCH_ADA))
     {
-        if (g_arch_handles[i] != gpu) continue;
-        // Keep the structure version the caller asked for: V1 and V2 differ
-        // only in that field, the size is the same.
-        const unsigned want = info->version;
-        *info = g_arch_cache[i];
-        info->version = want;
-        const unsigned group = info->architecture & 0xFFFFFFF0u;
-        if (group == NV_ARCH_TURING || group == NV_ARCH_AMPERE
-            || group == NV_ARCH_ADA)
-        {
-            // Lie consistently: implementation/revision were taken from a
-            // live RTX 5070 Ti - the check may look at more than the group.
-            info->architecture   = NV_ARCH_BLACKWELL;
-            info->implementation = 0x3u;
-            info->revision       = 0xA1u;
-        }
-        return 0;                                 // NVAPI_OK
+        // Lie consistently: implementation/revision were taken from a
+        // live RTX 5070 Ti - the check may look at more than the group.
+        info->architecture   = NV_ARCH_BLACKWELL;
+        info->implementation = 0x3u;
+        info->revision       = 0xA1u;
     }
-    // A handle that was not there during enumeration. We cannot call the real
-    // function - its prologue is ours, and lifting it on the fly would bring
-    // back that very race. An honest error beats a made-up answer.
-    return -1;
+    return 0;                                     // NVAPI_OK
 }
 
 static bool ArchSpoofRequested()
@@ -2031,6 +2035,7 @@ static IDXGIOutputDuplication *g_dda_dup = nullptr;
 static ID3D11Texture2D        *g_dda_shared = nullptr;
 static HANDLE                  g_dda_nt = nullptr;
 static ID3D12Resource         *g_dda_d12 = nullptr;
+static ID3D12Resource         *g_dda_dst = nullptr;       // swizzled RGBA into color
 static ID3D12Fence            *g_dda_signal = nullptr;   // shared, D3D11 side signals
 static ID3D11Fence            *g_dda_signal11 = nullptr;
 static HANDLE                  g_dda_fence_ev = nullptr;  // event wait for the D3D11 copy
@@ -2067,6 +2072,11 @@ static void CloseDda()
     if (g_dda_signal) { g_dda_signal->Release(); g_dda_signal = nullptr; }
     if (g_dda_signal11) { g_dda_signal11->Release(); g_dda_signal11 = nullptr; }
     if (g_dda_fence_ev) { CloseHandle(g_dda_fence_ev); g_dda_fence_ev = nullptr; }
+    // The swizzle destination is created together with the shared texture
+    // (inside the same "first frame" block); it must die with the chain,
+    // otherwise a resolution change would keep the old-sized dst and the
+    // swizzle would copy into a stale resource.
+    if (g_dda_dst) { g_dda_dst->Release(); g_dda_dst = nullptr; }
 }
 
 // Compute pipeline to swizzle BGRA->RGBA (the DDA frame and v.color are both
@@ -2074,7 +2084,6 @@ static void CloseDda()
 static ID3D12RootSignature  *g_dda_rs = nullptr;
 static ID3D12PipelineState  *g_dda_pso = nullptr;
 static ID3D12DescriptorHeap *g_dda_heap = nullptr;
-static ID3D12Resource       *g_dda_dst = nullptr;       // swizzled RGBA into color
 static const char kDdaSwizzleHlsl[] =
     "Texture2D<float4>   gSrc : register(t0);\n"
     "RWTexture2D<float4> gDst : register(u0);\n"
@@ -2220,9 +2229,12 @@ static bool EnsureGrayPipeline()
 
 // Open the reverse client mapping (GRAY). w/h is the luminance size (320x180).
 // --- OUTS: the section for the returned pixels ---------------------------
+// Layout: [0..8) uint64 seqlock (odd while writing, even when done),
+//         [8..8+size) the RGBA8 frame.
 static HANDLE g_out_file;
 static BYTE  *g_out_map;
 static size_t g_out_bytes;
+static uint64_t g_out_seq;
 
 static void CloseOut()
 {
@@ -2237,10 +2249,24 @@ static bool OpenOut(const VideoOutCmd &oc)
     if (oc.width == 0 || oc.height == 0) { Log("[outs] off"); return true; }
     char name[64] = {};
     memcpy(name, oc.name, sizeof(name) - 1);
-    const size_t need = static_cast<size_t>(oc.width) * oc.height * 4;
+    const size_t need = static_cast<size_t>(oc.width) * oc.height * 4 + 8; // + seqlock
     g_out_file = OpenFileMappingA(FILE_MAP_WRITE, FALSE, name);
     if (g_out_file == nullptr)
     { Log("[outs] OpenFileMapping('%s') failed %lu", name, GetLastError()); return false; }
+    // The client created the section; check its size BEFORE mapping: a
+    // section smaller than the frame would make MapViewOfFile fail with a
+    // confusing error, and a larger one is fine (we map exactly `need`).
+    // (audit #3, O5)
+    {
+        LARGE_INTEGER sz{};
+        if (!GetFileSizeEx(g_out_file, &sz) || sz.QuadPart < (LONGLONG)need)
+        {
+            Log("[outs] section '%s' is %lld bytes, need %zu - ignoring",
+                name, sz.QuadPart, need);
+            CloseHandle(g_out_file); g_out_file = nullptr;
+            return false;
+        }
+    }
     g_out_map = static_cast<BYTE *>(MapViewOfFile(g_out_file, FILE_MAP_WRITE, 0, 0, need));
     if (g_out_map == nullptr)
     {
@@ -2253,14 +2279,23 @@ static bool OpenOut(const VideoOutCmd &oc)
     return true;
 }
 
-// Deliver the pixels: into the section when it is agreed and the frame fits,
-// otherwise the old way - inline through the pipe.
+// Deliver the pixels: into the section when it is agreed and the frame fits
+// EXACTLY (a mismatched size would leave stale bytes in the tail - the client
+// copies the whole slot), otherwise the old way - inline through the pipe.
+// The seqlock in the first 8 bytes lets the client detect a torn frame:
+// odd while we write, even when done.
 static bool DeliverPixels(const std::vector<BYTE> &output, uint32_t index,
                           int64_t pts)
 {
-    if (g_out_map != nullptr && !output.empty() && output.size() <= g_out_bytes)
+    if (g_out_map != nullptr && !output.empty()
+        && output.size() + 8 == g_out_bytes)
     {
-        memcpy(g_out_map, output.data(), output.size());
+        uint64_t seq = ++g_out_seq;
+        if ((seq & 1) == 0) ++seq;          // make it odd: writing
+        memcpy(g_out_map, &seq, sizeof(seq));
+        memcpy(g_out_map + 8, output.data(), output.size());
+        ++seq;                              // even: done
+        memcpy(g_out_map, &seq, sizeof(seq));
         VideoResultHeader out = { OUT_MAGIC, index, 1u, OUT_BYTES_IN_SHM,
                                   g_last_eval_result, pts };
         return WriteExact(stdout, &out, sizeof(out));
@@ -2491,17 +2526,30 @@ static bool DdaGrab(VideoState &v)
     // A D3D11 copy with a box of the minimum size: g_dda_shared is created for
     // the size of the FIRST frame; when the monitor resolution changes,
     // CopyResource with mismatched sizes gives device removed. A cropped frame
-    // beats a crash (M4 of audit #2).
+    // beats a crash (M4 of audit #2). When the sizes differ we recreate the
+    // whole DDA chain instead of copying a cropped frame: a cropped copy would
+    // leave stale pixels in the tail of the texture, and NGX would evaluate
+    // the full texture - garbage in the lower/right part of the frame (M2 of
+    // audit #3).
     {
         D3D11_TEXTURE2D_DESC sd{};
         g_dda_shared->GetDesc(&sd);
         D3D11_TEXTURE2D_DESC fd{};
         frame->GetDesc(&fd);
-        const UINT cw = (sd.Width < fd.Width) ? sd.Width : fd.Width;
-        const UINT ch = (sd.Height < fd.Height) ? sd.Height : fd.Height;
-        if (cw == 0 || ch == 0)
-        { Log("[dda] zero copy size"); g_dda_dup->ReleaseFrame(); frame->Release(); res->Release(); return false; }
-        D3D11_BOX box = { 0, 0, 0, cw, ch, 1 };
+        if (sd.Width != fd.Width || sd.Height != fd.Height)
+        {
+            Log("[dda] monitor resolution changed %ux%u -> %ux%u - recreating",
+                (UINT)sd.Width, (UINT)sd.Height, (UINT)fd.Width, (UINT)fd.Height);
+            g_dda_dup->ReleaseFrame();
+            frame->Release(); res->Release();
+            // Recreate the whole chain: shared texture, NT handle, D3D12
+            // resource, dst UAV, fences. OpenDda starts with CloseDda, which
+            // releases all of them; the next DdaGrab re-creates them at the
+            // NEW size (fd.Width/fd.Height - the frame that just arrived).
+            OpenDda(fd.Width, fd.Height);
+            return false;
+        }
+        D3D11_BOX box = { 0, 0, 0, sd.Width, sd.Height, 1 };
         g_dda_ctx->CopySubresourceRegion(g_dda_shared, 0, 0, 0, 0, frame, 0, &box);
     }
     ID3D11DeviceContext4 *ctx4 = nullptr;

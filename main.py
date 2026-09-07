@@ -290,24 +290,39 @@ class SharedFrameBuffer:
 
         The name changes on every open - just like gray: the worker holds the
         old handle and CreateFileMapping with the same name would return the
-        old section, at its old size.
+        old section, at its old size. The first 8 bytes are a seqlock written
+        by the worker (odd while writing, even when done).
         """
         if self._out_mm is not None and self.out_w == w and self.out_h == h:
             return
         self.close_out()
         self.out_w, self.out_h = w, h
-        self.out_bytes = w * h * 4
+        self.out_bytes = w * h * 4 + 8  # + seqlock
         self.out_name = f"NeuralScreenOut_{os.getpid()}_{uuid.uuid4().hex[:6]}"
         self._out_mm = mmap.mmap(-1, self.out_bytes, tagname=self.out_name)
-        self._out_buf = np.ndarray((h, w, 4), dtype=np.uint8, buffer=self._out_mm)
+        self._out_buf = np.ndarray((h, w, 4), dtype=np.uint8, buffer=self._out_mm, offset=8)
 
     def read_out(self) -> np.ndarray | None:
-        """A copy of the frame from the section. The copy is mandatory: there
-        is one slot, the worker overwrites it with the next frame, and the
-        frame outlives that - it goes into the encoder queue."""
+        """A copy of the frame from the section, guarded by the seqlock.
+
+        The copy is mandatory: there is one slot, the worker overwrites it
+        with the next frame, and the frame outlives that - it goes into the
+        encoder queue. The seqlock (first 8 bytes) detects a torn frame: if
+        the worker is mid-write (odd) or the sequence changed while we
+        copied, we retry a few times and then fall back to None (the caller
+        skips the frame).
+        """
         if self._out_buf is None:
             return None
-        return self._out_buf.copy()
+        for _ in range(4):
+            seq1 = int.from_bytes(self._out_mm[0:8], "little")
+            if seq1 & 1:
+                continue  # worker is writing - not ready yet
+            buf = self._out_buf.copy()
+            seq2 = int.from_bytes(self._out_mm[0:8], "little")
+            if seq1 == seq2:
+                return buf
+        return None  # torn after retries - caller skips the frame
 
     def close_out(self) -> None:
         if self._out_buf is not None:
@@ -744,11 +759,17 @@ class WorkerReader:
                         # here, in the reader thread: main is waiting for the
                         # frame anyway, and this way the copy does not pile
                         # onto its thread along with everything else.
-                        frame = self._shm.read_out() if self._shm else None
-                        if frame is None:
+                        if self._shm is None or self._shm._out_buf is None:
                             raise RuntimeError(
                                 "the worker said the pixels are in shared "
                                 "memory, but the section is not open")
+                        frame = self._shm.read_out()
+                        if frame is None:
+                            # A torn frame (seqlock retries exhausted): skip
+                            # it, but keep the protocol paired - main treats
+                            # None as "frame not ready" and moves on.
+                            self._queue.put((out_index, None))
+                            continue
                         self._queue.put((out_index, frame))
                         continue
                     if byte_count != self._width * self._height * 4:
@@ -1845,6 +1866,7 @@ def main() -> int:
                 # it lands on the same resolution, so the slider puts "the whole
                 # screen" there instead of a dead stretch.
                 "work_scale_cap": _work_scale_cap(),
+                "work_scale_min": WORK_SCALE_MIN,
                 "nr_small": nr_small,
                 "screen_size": f"{width}x{height}",
                 "profile": cfg["profile"],

@@ -222,6 +222,16 @@ class LoopbackCapture:
             chunks, self._chunks = self._chunks, []
         return chunks[0] if len(chunks) == 1 else np.concatenate(chunks, axis=0)
 
+    def discard(self) -> None:
+        """Drop everything captured so far (the endpoint spin-up).
+
+        The samples that arrive between client.Start() and the recorder's
+        clock are earlier than the video PTS=0; keeping them would make the
+        audio track lead the picture (audit #3, D2).
+        """
+        with self._lock:
+            self._chunks.clear()
+
     def close(self) -> None:
         self._stop.set()
         if self._thread is not None:

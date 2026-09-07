@@ -46,6 +46,10 @@ DROP_PACKAGES = {
     "psutil",
     # the end user has no use for a package manager
     "pip",
+    # setuptools and its distutils shim: nothing in the project imports
+    # pkg_resources or setuptools (checked with grep over every module).
+    # ~2.8 MB of dead weight in the archive (audit #3, N2).
+    "setuptools", "pkg_resources", "_distutils_hack", "distutils-precedence.pth",
 }
 SP = "runtime/Lib/site-packages/"
 

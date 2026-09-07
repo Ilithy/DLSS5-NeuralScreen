@@ -69,18 +69,22 @@ def zip_integrity():
         if b"NS_ARCH_SPOOF" not in dll:
             return False, "nvngx.dll in the archive has no hook"
         # the config in the archive is the default one, not a personal one:
-        # menu_offset/menu_scale/theme/lang could leak (personal values are
-        # written into the config legitimately, so we check ALL such fields)
+        # personal values are written into the config legitimately, so we
+        # check ALL such fields against the committed HEAD config
         cfg = json.loads(z.read("config.json"))
+        try:
+            head_cfg = json.loads(subprocess.check_output(
+                ["git", "show", "HEAD:config.json"]))
+        except Exception:
+            head_cfg = {}
         leak = []
-        if cfg.get("menu_offset") != [0, 0]:
-            leak.append(f"menu_offset={cfg.get('menu_offset')}")
-        if cfg.get("menu_scale") != 1.0:
-            leak.append(f"menu_scale={cfg.get('menu_scale')}")
-        if cfg.get("theme") not in (None, "light"):
-            leak.append(f"theme={cfg.get('theme')}")
-        if cfg.get("lang") not in (None, "en"):
-            leak.append(f"lang={cfg.get('lang')}")
+        for key in ("menu_offset", "menu_scale", "theme", "lang",
+                    "open_menu_on_start", "split", "menu_height",
+                    "hotkeys", "work_scale", "nr_small", "record_audio"):
+            if key not in head_cfg:
+                continue
+            if cfg.get(key) != head_cfg[key]:
+                leak.append(f"{key}={cfg.get(key)!r} != HEAD {head_cfg[key]!r}")
         if leak:
             return False, "a personal config in the archive: " + ", ".join(leak)
     return True, f"{zpath.stat().st_size} bytes, all files, the hook, a default config"

@@ -442,7 +442,11 @@ class OverlayMenu:
                 value_text = f"{shown} · {s['nr_res_full']}" if shown else s["nr_res_full"]
             else:
                 value_text = str(self.state.get("work_size") or f"{pos:.2f}")
-            slider("nr_res", 0.30, cap + 0.05, pos, s["nr_res"],
+            # The lower bound follows WORK_SCALE_MIN (0.1), not a hardcoded
+            # 0.30: a config value below the slider range would put the knob
+            # at the bottom while the label shows a different resolution.
+            lo = float(self.state.get("work_scale_min", 0.1))
+            slider("nr_res", lo, cap + 0.05, pos, s["nr_res"],
                    hint=s["nr_res_hint"], value_text=value_text)
 
             section(s["sec_compare"])
@@ -624,7 +628,15 @@ class OverlayMenu:
                         break
         if event.type == pygame.MOUSEWHEEL:
             # Scroll only while the cursor is over the panel: otherwise the
-            # wheel inside the game would end up scrolling the menu.
+            # wheel inside the game would end up scrolling the menu. The
+            # cached position is refreshed on MOUSEMOTION; when the menu was
+            # just opened by a hotkey the cache may still be (0,0) - fall
+            # back to the real cursor position once.
+            if self._mouse == (0, 0):
+                try:
+                    self._mouse = pygame.mouse.get_pos()
+                except Exception:
+                    pass
             if self._max_scroll > 0 and self.panel_rect.collidepoint(self._mouse):
                 self.scroll = min(max(self.scroll - event.y * self._u(48), 0),
                                   self._max_scroll)
@@ -777,6 +789,21 @@ class OverlayMenu:
             self.state["nr_small"] = value <= cap + 1e-6
             if self.state["nr_small"]:
                 self.state["work_scale"] = value
+                # The label shows the work resolution; recompute it here so it
+                # follows the knob while dragging (main confirms on the way
+                # back). The formula mirrors _work_size in main.py.
+                try:
+                    sw, sh = (int(x) for x in
+                              str(self.state.get("screen_size", "0x0")).split("x"))
+                    w = max(64, int(round(sw * value / 2) * 2))
+                    h = max(64, int(round(sh * value / 2) * 2))
+                    if w > 2560 or h > 1440:
+                        k = min(2560 / w, 1440 / h)
+                        w = max(64, int(round(w * k / 2) * 2))
+                        h = max(64, int(round(h * k / 2) * 2))
+                    self.state["work_size"] = f"{w}x{h}"
+                except Exception:
+                    pass
             return [("nr_res", value)]
         params = dict(self.state.get("params") or {})
         params[item.key] = value
@@ -857,7 +884,7 @@ class OverlayMenu:
         # rows would spill outside the panel.
         prev_clip = surface.get_clip()
         surface.set_clip(self._viewport)
-        self._draw_stats(surface)
+        self._draw_stats(surface, s)
         self._draw_gpu(surface, s)
         self._draw_sections(surface)
         self._draw_rules(surface, s)
@@ -917,7 +944,7 @@ class OverlayMenu:
         pygame.draw.rect(surface, _rgb(color), self._scroll_thumb,
                          border_radius=radius)
 
-    def _draw_stats(self, surface, *_):
+    def _draw_stats(self, surface, s: dict) -> None:
         st = self.stats or {}
         rect = self._stats_rect
         pygame.draw.rect(surface, _rgb(self.c["surface"]), rect,
@@ -928,7 +955,7 @@ class OverlayMenu:
              ("RES", str(st.get("resolution", "—"))),
              ("WORK", str(self.state.get("work_size", "—")))),
             (("FRAMES", str(st.get("frames", "—"))),
-             ("REC", self._rec_text()),
+             ("REC", self._rec_text(s)),
              ("PROFILE", str(self.state.get("profile", "—")).split(" /")[0])),
         )
         pad = self._u(STAT_PAD)
@@ -957,16 +984,28 @@ class OverlayMenu:
         hint = (s["gpu_wait"] if ok is None
                 else s["gpu_ok"] if ok else s["gpu_no"])
         name = self._small_font.render(text, True, _rgb(self.c["text"]))
+        # The name and the hint share one line: a long card name (laptop
+        # GPUs, "GeForce RTX ... Laptop GPU") would overlap the hint. Clip
+        # the name to the space left after the hint, with an ellipsis.
+        note = self._small_font.render(hint, True, _rgb(color))
+        avail = rect.right - (rect.x + r * 2 + self._u(8)) - note.get_width() - self._u(8)
+        if avail < self._u(24):
+            avail = self._u(24)  # never let the name vanish entirely
+        if name.get_width() > avail:
+            clip = self._small_font.render(text + "…", True, _rgb(self.c["text"]))
+            while clip.get_width() > avail and len(text) > 1:
+                text = text[:-1]
+                clip = self._small_font.render(text + "…", True, _rgb(self.c["text"]))
+            name = clip
         surface.blit(name, (rect.x + r * 2 + self._u(8),
                             cy - name.get_height() // 2))
-        note = self._small_font.render(hint, True, _rgb(color))
         surface.blit(note, (rect.right - note.get_width(),
                             cy - note.get_height() // 2))
 
-    def _rec_text(self) -> str:
+    def _rec_text(self, s: dict) -> str:
         """Recording state: the duration is more useful than a bare "on"."""
         if not self.state.get("recording"):
-            return "off"
+            return s.get("off", "off")
         secs = float(self.state.get("rec_seconds", 0.0))
         return f"{int(secs) // 60:d}:{int(secs) % 60:02d}"
 

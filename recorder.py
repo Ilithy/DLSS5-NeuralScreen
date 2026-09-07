@@ -155,6 +155,11 @@ class VideoRecorder:
                       file=sys.stderr)
                 cap.close()
                 return
+            # The endpoint may have captured a few samples while spinning up
+            # (client.Start() -> the recorder's clock). They are earlier than
+            # the video PTS=0 - drop them so the audio does not lead the
+            # picture (audit #3, D2).
+            cap.discard()
             self._astream = self._container.add_stream("aac", rate=cap.sample_rate)
             self._astream.bit_rate = self.AUDIO_BIT_RATE
             # The stream time base is one sample, so a pts is simply the index
@@ -333,12 +338,26 @@ class VideoRecorder:
             self._queue.put(None)
             self._thread.join(timeout=30.0)
             if self._thread.is_alive():
-                print("[record] encoder did not finish within 30 s",
-                      file=sys.stderr)
+                # The encoder is stuck (NVENC stall, driver hang). Touching
+                # the container from here while the thread is still inside
+                # mux() would be undefined behaviour - leave the container
+                # alone and report the loss instead of corrupting the file.
+                print("[record] encoder did not finish within 30 s - "
+                      "the file is left without a trailer", file=sys.stderr)
+                self._container = None
+                self._thread = None
+                return
             self._thread = None
         if self.dropped:
             print(f"[record] frames dropped: {self.dropped} "
                   f"(encoder could not keep up)", file=sys.stderr)
+        if self._encode_error is not None:
+            # The encoder thread died on the last frame(s): the error was
+            # never surfaced through write() (nobody called it after the
+            # failure). Report it here instead of silently writing a
+            # truncated file.
+            print(f"[record] encoder error: {self._encode_error}",
+                  file=sys.stderr)
         # The encoder thread is gone, so the container is ours again: take the
         # tail of the audio and flush both encoders.
         self._close_audio()

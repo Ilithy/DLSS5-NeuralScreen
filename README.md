@@ -56,7 +56,7 @@ menu.
 | **Insert** | start / stop recording, with sound |
 | **Ctrl+Alt+Q** | quit |
 
-Every key can be reassigned in the menu, under the gear icon.
+Every key can be reassigned in the menu, under the sliders icon.
 
 While the menu is open it takes the mouse and keyboard, so it works on top of a
 game. Closed, clicks go straight through it as if it were not there.
@@ -88,7 +88,7 @@ The settings worth touching:
   screen and pick a step.
 
 Everything else — which monitor, whether the menu opens on launch, starting
-with Windows, key assignments — is behind the gear.
+with Windows, key assignments — is behind the sliders icon.
 
 ## Recording and screenshots
 
@@ -116,7 +116,7 @@ games have.
 of its slider.
 
 **A key does nothing.** Something else on the machine has claimed it. Reassign
-it in the menu under the gear.
+it in the menu under the sliders icon.
 
 ## Under the hood
 
