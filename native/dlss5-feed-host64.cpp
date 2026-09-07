@@ -385,6 +385,44 @@ static bool InitDirectNr(const wchar_t *data_path)
     // creating the feature, but we patch the prologue in advance, while none
     // of its threads exist in the process yet.
     SetupArchSpoof();
+    // NS_NGX_CORE=<path to the driver's nvngx.dll>: load NGX Core before the
+    // feature DLL.
+    //
+    // This process has to be named nvngx.dll or Init_Ext answers
+    // FAIL_PlatformError - which is why the worker is a separate process at
+    // all. The suspicion is that nvngx_dlssnr.dll does not care about the
+    // process name as such, it only wants a module called nvngx.dll present:
+    // in a game that is the real NGX Core, and here it is our own image, which
+    // is listed under its own file name. If preloading the real core lets a
+    // differently named process through, Neural Rendering can run inside a
+    // game process and the naming constraint disappears.
+    wchar_t core[MAX_PATH] = {};
+    if (GetEnvironmentVariableW(L"NS_NGX_CORE", core, MAX_PATH) > 0)
+    {
+        const HMODULE m = LoadLibraryW(core);
+        Log("[pure] NGX core preload -> %s (err=%lu)",
+            m != nullptr ? "loaded" : "FAILED", m != nullptr ? 0UL : GetLastError());
+    }
+    // NS_NGX_VIA_CORE=1: create and evaluate feature 18 through NGX Core
+    // instead of calling the feature DLL directly.
+    //
+    // The direct path is the only reason this process must be named
+    // nvngx.dll. NGX Core itself initialises from any process name (measured:
+    // "[host] NVSDK_NGX_D3D12_Init -> Success" out of nsprobe.exe), so if the
+    // core will hand us feature 18, the naming constraint is gone - and with
+    // it the reason the worker has to be a separate process at all.
+    char via[8] = {};
+    const DWORD via_got = GetEnvironmentVariableA("NS_NGX_VIA_CORE", via, sizeof(via));
+    if (via_got > 0 && via_got < sizeof(via) && via[0] == '1')
+    {
+        // The SDK declares the parameter block non-const where our pointers
+        // take it const; the call itself is identical.
+        g_nr_create = reinterpret_cast<PFN_NR_Create>(&NVSDK_NGX_D3D12_CreateFeature);
+        g_nr_evaluate = reinterpret_cast<PFN_NR_Evaluate>(&NVSDK_NGX_D3D12_EvaluateFeature);
+        g_nr_release = reinterpret_cast<PFN_NR_Release>(&NVSDK_NGX_D3D12_ReleaseFeature);
+        Log("[pure] NS_NGX_VIA_CORE=1: feature 18 goes through NGX Core");
+        return true;
+    }
     g_nr_module = LoadLibraryW(L"nvngx_dlssnr.dll");
     if (!g_nr_module) { Log("[pure] LoadLibrary(nvngx_dlssnr.dll) failed %lu", GetLastError()); return false; }
     g_nr_init_ext = reinterpret_cast<PFN_NR_InitExt>(GetProcAddress(g_nr_module, "NVSDK_NGX_D3D12_Init_Ext"));
