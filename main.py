@@ -76,7 +76,8 @@ import pygame  # HUD-наложение на записываемый кадр (
 from capture import ScreenCapture, list_monitors
 from display import Display
 from guides import TemporalGuideGenerator
-from hotkeys import HotkeyController, build_bindings, describe as describe_hotkeys
+from hotkeys import (HotkeyController, build_bindings,
+                     describe as describe_hotkeys, parse_binding)
 from recorder import VideoRecorder
 from gpuinfo import describe as gpu_describe, probe as gpu_probe
 from i18n import STRINGS as UI_STRINGS
@@ -867,6 +868,11 @@ def restart_worker(worker: subprocess.Popen, params: dict, width: int, height: i
     return start_worker(params, width, height, warmup, full_w, full_h, shm)
 
 
+def hotkey_labels(bindings: dict) -> dict:
+    """Биндинги -> {команда: «F9»} для подписей на кнопках меню."""
+    return {cmd: name for _mods, _vk, cmd, name in bindings.values()}
+
+
 def _autostart_enabled() -> bool:
     """Автозапуск сейчас включён? (HKCU Run, значение NeuralScreen)."""
     import winreg
@@ -1027,6 +1033,9 @@ def main() -> int:
         if hotkeys.failed:
             print(f"[main] Хоткеи заняты другой программой: {', '.join(hotkeys.failed)}",
                   file=sys.stderr)
+        # Подписи на кнопках меню — из тех же биндингов, что зарегистрированы.
+        # Строго после build_bindings: раньше их просто нет.
+        display.menu.set_hotkeys(hotkey_labels(hotkey_bindings))
 
         # Настройки живут в оверлейном меню (F8). Отдельного окна больше
         # нет: оно было вторым интерфейсом с теми же полями, воровало фокус
@@ -1332,6 +1341,7 @@ def main() -> int:
             display = Display(width, height, fullscreen=bool(cfg["fullscreen"]))
             display.set_lang(lang)
             display.menu.set_user_scale(float(cfg.get("menu_scale", 1.0)))
+            display.menu.set_hotkeys(hotkey_labels(hotkey_bindings))
             saved_theme = cfg.get("theme")
             if isinstance(saved_theme, str) and saved_theme in ("light", "dark"):
                 display.menu.set_state({"theme": saved_theme})
@@ -1595,6 +1605,22 @@ def main() -> int:
             except queue.Empty:
                 pass
 
+        def _save_hotkeys(mapping: dict) -> None:
+            """Записать назначения в config.json.
+
+            Отдельно от _save_menu_layout: тот зовётся на закрытии меню, а
+            клавишу пользователь ждёт увидеть сохранённой сразу.
+            """
+            try:
+                data = json.loads(args.config.read_text(encoding="utf-8"))
+                data["hotkeys"] = dict(mapping)
+                args.config.write_text(
+                    json.dumps(data, ensure_ascii=False, indent=2) + "\n",
+                    encoding="utf-8")
+            except Exception as exc:
+                print(f"[main] Не удалось сохранить хоткеи: {exc}",
+                      file=sys.stderr)
+
         def _menu_payload() -> dict:
             """Текущее состояние для меню — один источник правды."""
             _refresh_gpu_ok()
@@ -1625,7 +1651,7 @@ def main() -> int:
             Меню ничего не меняет само: оно сообщает, чего хочет пользователь,
             а решение принимается здесь, там же где живут params и cfg.
             """
-            nonlocal lang, running, startup_menu, split_pos
+            nonlocal lang, running, startup_menu, split_pos, hotkey_bindings
             kind = action[0]
             if kind == "nr":
                 tray_commands.put("toggle")
@@ -1660,6 +1686,30 @@ def main() -> int:
                     display.set_lang(lang)
                     display.menu.set_state({"lang": lang})
                     print(f"[main] Язык интерфейса -> {lang}")
+            elif kind == "capture":
+                # Пока меню ждёт нажатие, глобальные хоткеи надо снять: иначе
+                # F8 переключит меню вместо того, чтобы попасть в поле.
+                if action[1]:
+                    hotkeys.suspend()
+                else:
+                    hotkeys.resume()
+            elif kind == "hotkey":
+                cmd, text = action[1], action[2]
+                parsed = parse_binding(text)
+                if parsed is None:
+                    print(f"[main] Не понял комбинацию {text!r}", file=sys.stderr)
+                    display.alert(UI_STRINGS[lang]["hotkey_bad"])
+                else:
+                    over = cfg.get("hotkeys")
+                    over = dict(over) if isinstance(over, dict) else {}
+                    over[cmd] = text
+                    cfg["hotkeys"] = over
+                    hotkey_bindings = build_bindings(over)
+                    hotkeys.rebind(hotkey_bindings)
+                    display.menu.set_hotkeys(hotkey_labels(hotkey_bindings))
+                    _save_hotkeys(over)
+                    print(f"[main] {cmd} -> {text}")
+                    display.alert(UI_STRINGS[lang]["settings_applied"])
             elif kind == "theme":
                 # Меню уже применило тему к себе (overlay_ui), здесь только
                 # запоминаем для config.json — _save_menu_layout() вызывается
@@ -2049,6 +2099,7 @@ def main() -> int:
                 # положение, тему и язык, иначе после запуска игры оно
                 # прыгает в центр, светлеет и переходит на en.
                 display.menu.set_user_scale(float(cfg.get("menu_scale", 1.0)))
+                display.menu.set_hotkeys(hotkey_labels(hotkey_bindings))
                 saved_theme = cfg.get("theme")
                 if isinstance(saved_theme, str) and saved_theme in ("light", "dark"):
                     display.menu.set_state({"theme": saved_theme})

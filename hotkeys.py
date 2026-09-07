@@ -43,6 +43,12 @@ VK_INSERT = 0x2D
 WM_HOTKEY = 0x0312
 WM_QUIT = 0x0012
 PM_NOREMOVE = 0x0000
+# Свои сообщения потоку хоткеев. RegisterHotKey/UnregisterHotKey с hWnd=None
+# привязаны к ВЫЗЫВАЮЩЕМУ потоку, поэтому снимать и ставить их можно только
+# изнутри этого же потока — из main напрямую нельзя.
+MSG_SUSPEND = 0x8000 + 1
+MSG_RESUME = 0x8000 + 2
+MSG_REBIND = 0x8000 + 3
 
 # id -> (модификаторы, VK, команда, человекочитаемое имя)
 DEFAULT_BINDINGS = {
@@ -140,6 +146,9 @@ class HotkeyController:
         self.registered: list[str] = []
         self.failed: list[str] = []
         self._ready = threading.Event()
+        self._lock = threading.Lock()
+        self._pending: dict | None = None   # биндинги для MSG_REBIND
+        self._active = False                # хоткеи сейчас зарегистрированы
 
     def start(self, timeout: float = 3.0) -> None:
         """Запустить поток и дождаться результата регистрации."""
@@ -155,6 +164,32 @@ class HotkeyController:
         # Очередь сообщений у потока создаётся лениво — заставляем её появиться
         # ДО RegisterHotKey, иначе первые WM_HOTKEY могут уйти в никуда.
         user32.PeekMessageW(ctypes.byref(msg), None, WM_HOTKEY, WM_HOTKEY, PM_NOREMOVE)
+        self._register()
+        self._ready.set()
+        while user32.GetMessageW(ctypes.byref(msg), None, 0, 0) > 0:
+            if msg.message == WM_HOTKEY:
+                binding = self._bindings.get(msg.wParam)
+                if binding is not None:
+                    self._commands.put(binding[2])
+            elif msg.message == MSG_SUSPEND:
+                self._unregister()
+            elif msg.message == MSG_RESUME:
+                self._register()
+            elif msg.message == MSG_REBIND:
+                self._unregister()
+                with self._lock:
+                    if self._pending is not None:
+                        self._bindings = self._pending
+                        self._pending = None
+                self._register()
+        self._unregister()
+
+    # Регистрация живёт только в потоке хоткеев — см. MSG_* выше.
+    def _register(self) -> None:
+        if self._active:
+            return
+        self.registered = []
+        self.failed = []
         for hk_id, (mods, vk, _cmd, name) in self._bindings.items():
             if user32.RegisterHotKey(None, hk_id, mods, vk):
                 self.registered.append(name)
@@ -162,14 +197,32 @@ class HotkeyController:
                 # Комбинацию уже занял кто-то другой — не смертельно,
                 # остальные хоткеи продолжают работать.
                 self.failed.append(name)
-        self._ready.set()
-        while user32.GetMessageW(ctypes.byref(msg), None, 0, 0) > 0:
-            if msg.message == WM_HOTKEY:
-                binding = self._bindings.get(msg.wParam)
-                if binding is not None:
-                    self._commands.put(binding[2])
+        self._active = True
+
+    def _unregister(self) -> None:
+        if not self._active:
+            return
         for hk_id in self._bindings:
             user32.UnregisterHotKey(None, hk_id)
+        self._active = False
+
+    def suspend(self) -> None:
+        """Снять хоткеи: пока меню ждёт нажатие клавиши, F8 должна попасть
+        в поле, а не переключить меню."""
+        if self._tid:
+            user32.PostThreadMessageW(self._tid, MSG_SUSPEND, 0, 0)
+
+    def resume(self) -> None:
+        if self._tid:
+            user32.PostThreadMessageW(self._tid, MSG_RESUME, 0, 0)
+
+    def rebind(self, bindings: dict) -> None:
+        """Заменить назначения на ходу, без перезапуска программы."""
+        if not self._tid:
+            return
+        with self._lock:
+            self._pending = {k: tuple(v) for k, v in bindings.items()}
+        user32.PostThreadMessageW(self._tid, MSG_REBIND, 0, 0)
 
     def stop(self) -> None:
         if self._tid:

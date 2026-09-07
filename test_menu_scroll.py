@@ -104,7 +104,10 @@ def main() -> int:
     # 4. Прокрученная за верх строка не принимает клик
     menu.scroll = menu._max_scroll
     menu.draw(surf)
-    above = [i for i in menu.items if i.rect.bottom < menu._viewport.top]
+    # Иконки шапки лежат выше области прокрутки НАМЕРЕННО и кликабельны —
+    # они не часть прокручиваемого содержимого.
+    above = [i for i in menu.items
+             if i.rect.bottom < menu._viewport.top and i.kind != "icon"]
     print(f"строк уехало под заголовок: {len(above)}")
     if above:
         target = above[0]
@@ -121,6 +124,17 @@ def main() -> int:
         failures.append("в видимой области не осталось ни одной строки")
     elif menu.hit(inside[0].rect.center) is None:
         failures.append("видимая строка не принимает клик")
+
+    # 5b. Иконка шапки кликается, хотя лежит вне области прокрутки
+    icons = [i for i in menu.items if i.kind == "icon"]
+    if not icons:
+        failures.append("в шапке нет иконок")
+    else:
+        got = menu.hit(icons[0].rect.center)
+        print(f"иконка {icons[0].key}: клик "
+              f"{'проходит' if got is not None else 'НЕ проходит'}")
+        if got is None:
+            failures.append("иконка шапки не принимает клик")
 
     # 6. Высоту не растянуть выше содержимого
     menu.user_height = menu.content_height * 3
