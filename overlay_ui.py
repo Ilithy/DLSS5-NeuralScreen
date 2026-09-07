@@ -107,6 +107,7 @@ KNOB_R = 9
 BTN_H = 42
 BTN_PAD = 18
 BTN_GAP = 10
+ICON_W = 30        # кнопка в шапке: квадрат со скруглением, не кружок
 ACTION_H = 46      # кнопка действия: название + подпись хоткея под ним
 EXIT_H = 64        # выход: ещё и пояснение третьей строкой
 STAT_LINE_H = 24
@@ -289,14 +290,15 @@ class OverlayMenu:
         items: list[Item] = []
         # Иконки в шапке: справка и настройки. Крестика нет намеренно — он
         # закрывал меню и стоял рядом с выходом из программы.
-        ir = self._u(15)
-        icons = [("gear", pad + inner_w - ir), ("help", pad + inner_w - ir - self._u(38))]
-        if self.page == "settings":
-            icons = [("close", pad + inner_w - ir)]
-        for kind, ix in icons:
+        iw = self._u(ICON_W)
+        igap = self._u(8)
+        iy = self._u(TITLE_H) // 2 - iw // 2
+        order = ["help", "gear"] if self.page != "settings" else ["close"]
+        # Раскладываем справа налево: правый край — последняя иконка.
+        for idx, kind in enumerate(reversed(order)):
+            ix = pad + inner_w - iw - idx * (iw + igap)
             items.append(Item("icon", kind,
-                              pygame.Rect(ix - ir, self._u(18) - ir, ir * 2, ir * 2),
-                              extra={"r": ir}))
+                              pygame.Rect(ix, iy, iw, iw)))
         cy = self._u(TITLE_H) + self._u(SECTION_GAP)
 
         # Блок показаний
@@ -1067,12 +1069,25 @@ class OverlayMenu:
         item.extra["cells"] = cells
 
     def _draw_icon(self, surface, item: Item, s: dict) -> None:
-        """Круглая иконка в шапке: справка, настройки, закрыть страницу."""
-        r = item.extra.get("r", self._u(15))
-        cx, cy = item.rect.centerx, item.rect.centery
+        """Кнопка в шапке: скруглённый квадрат, внутри знак.
+
+        В покое — только контур, на наведении заливка и акцентный контур:
+        кружки с нарисованной шестерней выглядели самодельно, а вычерченную
+        шестерню в 30 px всё равно не разобрать — вместо неё три ползунка,
+        и по смыслу ближе к содержимому панели.
+        """
+        rect = item.rect
         hot = self.hover == f"icon:{item.key}"
-        pygame.draw.circle(surface, _rgb(self.c["surface"]), (cx, cy), r)
+        radius = self._u(8)
+        if hot:
+            pygame.draw.rect(surface, _rgb(self.c["surface"]), rect,
+                             border_radius=radius)
         col = self.c["accent"] if hot else self.c["muted"]
+        pygame.draw.rect(surface,
+                         _rgb(self.c["accent"] if hot else self.c["border"]),
+                         rect, max(1, self._u(1)), border_radius=radius)
+        cx, cy = rect.centerx, rect.centery
+        lw = max(2, self._u(2))
         if item.key == "help":
             img = self._font.render("?", True, _rgb(col))
             surface.blit(img, (cx - img.get_width() // 2,
@@ -1080,20 +1095,24 @@ class OverlayMenu:
         elif item.key == "close":
             d = max(3, self._u(5))
             pygame.draw.line(surface, _rgb(col), (cx - d, cy - d),
-                             (cx + d, cy + d), max(2, self._u(2)))
+                             (cx + d, cy + d), lw)
             pygame.draw.line(surface, _rgb(col), (cx + d, cy - d),
-                             (cx - d, cy + d), max(2, self._u(2)))
+                             (cx - d, cy + d), lw)
         else:
-            inner = max(4, self._u(7))
-            pygame.draw.circle(surface, _rgb(col), (cx, cy), inner,
-                               max(2, self._u(2)))
-            for i in range(8):
-                a = i * math.pi / 4
-                x1, y1 = cx + inner * math.cos(a), cy + inner * math.sin(a)
-                x2 = cx + (inner + self._u(3)) * math.cos(a)
-                y2 = cy + (inner + self._u(3)) * math.sin(a)
-                pygame.draw.line(surface, _rgb(col), (int(x1), int(y1)),
-                                 (int(x2), int(y2)), max(2, self._u(3)))
+            # Три ползунка: линия во всю ширину, на каждой — ручка на своём
+            # месте. Читается мельче гайки и рисуется без сглаживания.
+            half = max(5, self._u(7))
+            step = max(3, self._u(5))
+            knobs = (0.65, 0.35, 0.55)
+            for i, kx in enumerate(knobs):
+                ly = cy + (i - 1) * step
+                pygame.draw.line(surface, _rgb(col), (cx - half, ly),
+                                 (cx + half, ly), max(1, self._u(1)))
+                px = int(cx - half + 2 * half * kx)
+                pygame.draw.circle(surface, _rgb(self.c["bg"]), (px, ly),
+                                   max(2, self._u(2)))
+                pygame.draw.circle(surface, _rgb(col), (px, ly),
+                                   max(2, self._u(2)), max(1, self._u(1)))
 
     def _draw_action(self, surface, item: Item, s: dict) -> None:
         """Кнопка подвала: название, под ним хоткей, у выхода — пояснение."""
