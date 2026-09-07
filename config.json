@@ -19,5 +19,6 @@
     0,
     0
   ],
-  "open_menu_on_start": true
+  "open_menu_on_start": true,
+  "split": 0.0
 }

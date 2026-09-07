@@ -40,6 +40,10 @@ STATE = {
     "recording": False,
     "rec_seconds": 0.0,
     "open_on_start": True,
+    "split": 0.0,
+    # Индикатор поддержки: показываем рабочее состояние, оно и типично
+    "gpu_text": "RTX 5070 Ti · Blackwell",
+    "gpu_ok": True,
 }
 STATS = {"fps": 55.1, "status": "NR ON", "resolution": "3840x2160", "frames": 8214}
 

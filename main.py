@@ -78,6 +78,7 @@ from display import Display
 from guides import TemporalGuideGenerator
 from hotkeys import HotkeyController, describe as describe_hotkeys
 from recorder import VideoRecorder
+from gpuinfo import describe as gpu_describe, probe as gpu_probe
 from i18n import STRINGS as UI_STRINGS
 
 # Страница проекта: README, хоткеи, требования. Открывается кнопкой в меню.
@@ -911,6 +912,14 @@ def main() -> int:
         startup_menu = bool(cfg.get("open_menu_on_start", True))
         # Шторка «до/после»: доля кадра слева, которую воркер оставляет сырой.
         split_pos = min(1.0, max(0.0, float(cfg.get("split", 0.0))))
+        # Какая карта и работает ли на ней NR. Модель спрашиваем у nvapi, а
+        # факт поддержки берём не из архитектуры, а из ответа воркера: он
+        # единственный знает, создалась ли feature 18.
+        gpu_info = gpu_probe()
+        gpu_text = gpu_describe(gpu_info)
+        gpu_ok: bool | None = None
+        print(f"[main] GPU: {gpu_text} (группа 0x{gpu_info['arch_group']:X}, "
+              f"официальная поддержка {'да' if gpu_info['official'] else 'нет'})")
         startup_pending = True
         # Размер и положение меню — как их оставил пользователь.
         display.menu.set_user_scale(float(cfg.get("menu_scale", 1.0)))
@@ -1270,8 +1279,29 @@ def main() -> int:
             except Exception as exc:
                 print(f"[main] Не удалось сохранить вид меню: {exc}", file=sys.stderr)
 
+        def _refresh_gpu_ok() -> None:
+            """Работает ли NR — по ответу воркера, а не по архитектуре.
+
+            Наверняка это знает только воркер: он зовёт CreateFeature и
+            получает код NGX. Архитектура говорит лишь о том, что обещает
+            NVIDIA. Решённый ответ не пересматриваем — рестарты воркера
+            добавляют строки, но вердикт от этого не меняется.
+            """
+            nonlocal gpu_ok
+            if gpu_ok is not None:
+                return
+            for line in reversed(worker_logs[-80:]):
+                if "feature 18 ready" in line:
+                    gpu_ok = True
+                    return
+                if ("feature 18 create failed" in line
+                        or "Unsupported GPU architecture" in line):
+                    gpu_ok = False
+                    return
+
         def _menu_payload() -> dict:
             """Текущее состояние для меню — один источник правды."""
+            _refresh_gpu_ok()
             return {
                 "nr": not paused,
                 "work_scale": work_scale,
@@ -1286,6 +1316,8 @@ def main() -> int:
                 "rec_seconds": (recorder.duration_ms / 1000.0) if recorder else 0.0,
                 "open_on_start": startup_menu,
                 "split": split_pos,
+                "gpu_text": gpu_text,
+                "gpu_ok": gpu_ok,
             }
 
         def _apply_menu_action(action: tuple) -> None:

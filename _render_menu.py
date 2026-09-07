@@ -45,6 +45,8 @@ menu.set_state({
     "theme": __import__('os').environ.get('MENU_THEME', 'light'),
     "open_on_start": True,
     "split": 0.35,
+    "gpu_text": "RTX 5070 Ti · Blackwell",
+    "gpu_ok": True,
 })
 menu.set_stats({"fps": 54.3, "status": "NR ВКЛ",
                 "resolution": "3840x2160", "frames": 12345})

@@ -185,8 +185,177 @@ static PFN_NR_Release g_nr_release;
 static uint32_t g_create_result;
 static uint32_t g_eval_count;
 
+
+// ---------------------------------------------------------------------------
+// Подмена архитектуры GPU для feature 18 (NS_ARCH_SPOOF=1)
+//
+// nvngx_dlssnr.dll отказывается создавать feature на всём, что старше
+// Blackwell: внутри лежит проверка с сообщением
+// "DLSSNR: Unsupported GPU architecture 0x%x, minimum required 0x%x".
+// При этом скомпилированные ядра в ней есть под Turing (sm_75), Ampere
+// (sm_86), Ada (sm_89) и Blackwell (sm_120) -- по всем пятнадцати fatbin'ам,
+// без пропусков. Значит отказ -- это политика, а не отсутствие кода.
+//
+// Архитектуру библиотека узнаёт через nvapi: грузит nvapi64.dll, берёт её
+// единственный экспорт nvapi_QueryInterface и запрашивает по id
+// NvAPI_GPU_GetArchInfo. Подменять nvapi64.dll своей копией рядом с воркером
+// бесполезно: драйвер D3D12 успевает загрузить настоящую из System32 раньше,
+// и имя оказывается занято (проверено по списку модулей процесса). Поэтому
+// патчим прямо в памяти своего процесса.
+//
+// Патч ставится с сохранением байтов: перед вызовом настоящей функции пролог
+// восстанавливается, после -- возвращается на место. Так не нужен трамплин
+// (для него пришлось бы разбирать длины инструкций), и любой хендл GPU
+// обслуживается настоящим кодом, а не нашими догадками.
+//
+// Ничего из файлов NVIDIA не меняется: правка живёт только в памяти и только
+// когда пользователь сам включил NS_ARCH_SPOOF=1. На Blackwell не делается
+// вообще ничего.
+// ---------------------------------------------------------------------------
+static constexpr unsigned NVAPI_ID_INITIALIZE = 0x0150E828u;
+static constexpr unsigned NVAPI_ID_ENUM_GPUS  = 0xE5AC921Fu;
+static constexpr unsigned NVAPI_ID_GET_ARCH   = 0xD8265D24u;
+
+static constexpr unsigned NV_ARCH_TURING    = 0x170u;
+static constexpr unsigned NV_ARCH_AMPERE    = 0x180u;
+static constexpr unsigned NV_ARCH_ADA       = 0x190u;
+static constexpr unsigned NV_ARCH_BLACKWELL = 0x1B0u;
+
+struct NvArchInfo
+{
+    unsigned version, architecture, implementation, revision;
+};
+
+using PFN_NvQueryInterface = void *(__cdecl *)(unsigned);
+using PFN_NvGetArchInfo = int (__cdecl *)(void *, NvArchInfo *);
+
+static PFN_NvGetArchInfo g_arch_real;
+static BYTE              g_arch_saved[12];
+static bool              g_arch_patched;
+static CRITICAL_SECTION  g_arch_lock;
+static bool              g_arch_lock_ready;
+static unsigned          g_arch_real_group;   // что было на самом деле
+
+static int __cdecl ArchInfoHook(void *gpu, NvArchInfo *info);
+
+static bool WriteCode(void *at, const void *src, size_t bytes)
+{
+    DWORD old = 0;
+    if (!VirtualProtect(at, bytes, PAGE_EXECUTE_READWRITE, &old)) return false;
+    memcpy(at, src, bytes);
+    DWORD tmp = 0;
+    VirtualProtect(at, bytes, old, &tmp);
+    FlushInstructionCache(GetCurrentProcess(), at, bytes);
+    return true;
+}
+
+// mov rax, imm64 ; jmp rax
+static bool ArchApplyPatch()
+{
+    BYTE code[12] = { 0x48, 0xB8 };
+    void *dst = reinterpret_cast<void *>(&ArchInfoHook);
+    memcpy(code + 2, &dst, sizeof(dst));
+    code[10] = 0xFF; code[11] = 0xE0;
+    if (!WriteCode(reinterpret_cast<void *>(g_arch_real), code, sizeof(code)))
+        return false;
+    g_arch_patched = true;
+    return true;
+}
+
+static void ArchRemovePatch()
+{
+    if (WriteCode(reinterpret_cast<void *>(g_arch_real), g_arch_saved,
+                  sizeof(g_arch_saved)))
+        g_arch_patched = false;
+}
+
+static int __cdecl ArchInfoHook(void *gpu, NvArchInfo *info)
+{
+    int rc = -1;   // NVAPI_ERROR
+    if (g_arch_lock_ready) EnterCriticalSection(&g_arch_lock);
+    if (g_arch_real != nullptr)
+    {
+        ArchRemovePatch();
+        rc = g_arch_real(gpu, info);
+        ArchApplyPatch();
+    }
+    if (g_arch_lock_ready) LeaveCriticalSection(&g_arch_lock);
+    if (rc != 0 || info == nullptr) return rc;
+    const unsigned group = info->architecture & 0xFFFFFFF0u;
+    if (group != NV_ARCH_TURING && group != NV_ARCH_AMPERE && group != NV_ARCH_ADA)
+        return rc;
+    // Врём согласованно: значения implementation/revision сняты с живой
+    // RTX 5070 Ti, потому что проверка может смотреть не только на группу.
+    info->architecture   = NV_ARCH_BLACKWELL;
+    info->implementation = 0x3u;
+    info->revision       = 0xA1u;
+    return rc;
+}
+
+static bool ArchSpoofRequested()
+{
+    char buf[8] = {};
+    const DWORD got = GetEnvironmentVariableA("NS_ARCH_SPOOF", buf, sizeof(buf));
+    return got > 0 && got < sizeof(buf) && buf[0] == '1';
+}
+
+// Возвращает: 0 — не требовалось, 1 — поставлен, -1 — не удалось.
+static int SetupArchSpoof()
+{
+    if (!ArchSpoofRequested()) return 0;
+    HMODULE nvapi = LoadLibraryW(L"nvapi64.dll");
+    if (nvapi == nullptr)
+    { Log("[arch] nvapi64.dll не загрузилась, err=%lu", GetLastError()); return -1; }
+    auto qi = reinterpret_cast<PFN_NvQueryInterface>(
+        GetProcAddress(nvapi, "nvapi_QueryInterface"));
+    if (qi == nullptr) { Log("[arch] нет nvapi_QueryInterface"); return -1; }
+
+    auto init = reinterpret_cast<int (__cdecl *)()>(qi(NVAPI_ID_INITIALIZE));
+    auto enum_gpus = reinterpret_cast<int (__cdecl *)(void **, unsigned *)>(
+        qi(NVAPI_ID_ENUM_GPUS));
+    auto get_arch = reinterpret_cast<PFN_NvGetArchInfo>(qi(NVAPI_ID_GET_ARCH));
+    if (init == nullptr || enum_gpus == nullptr || get_arch == nullptr)
+    { Log("[arch] функции nvapi не разрешились по id"); return -1; }
+    if (init() != 0) { Log("[arch] NvAPI_Initialize не прошёл"); return -1; }
+
+    void *handles[64] = {};
+    unsigned count = 0;
+    if (enum_gpus(handles, &count) != 0 || count == 0)
+    { Log("[arch] список GPU не получен"); return -1; }
+
+    NvArchInfo info = {};
+    info.version = static_cast<unsigned>(sizeof(NvArchInfo)) | (2u << 16);
+    if (get_arch(handles[0], &info) != 0)
+    {
+        info.version = static_cast<unsigned>(sizeof(NvArchInfo)) | (1u << 16);
+        if (get_arch(handles[0], &info) != 0)
+        { Log("[arch] GetArchInfo не ответил"); return -1; }
+    }
+    g_arch_real_group = info.architecture & 0xFFFFFFF0u;
+    if (g_arch_real_group >= NV_ARCH_BLACKWELL)
+    {
+        Log("[arch] архитектура 0x%X и так поддерживается — подмена не нужна",
+            info.architecture);
+        return 0;
+    }
+
+    if (!g_arch_lock_ready)
+    { InitializeCriticalSection(&g_arch_lock); g_arch_lock_ready = true; }
+    g_arch_real = get_arch;
+    memcpy(g_arch_saved, reinterpret_cast<const void *>(get_arch),
+           sizeof(g_arch_saved));
+    if (!ArchApplyPatch())
+    { Log("[arch] не удалось поставить патч, err=%lu", GetLastError()); return -1; }
+    Log("[arch] подмена включена: 0x%X -> 0x%X (NS_ARCH_SPOOF=1)",
+        info.architecture, NV_ARCH_BLACKWELL);
+    return 1;
+}
+
 static bool InitDirectNr(const wchar_t *data_path)
 {
+    // До загрузки библиотеки NVIDIA: она спрашивает архитектуру при создании
+    // feature, но пролог правим заранее, пока в процессе нет её потоков.
+    SetupArchSpoof();
     g_nr_module = LoadLibraryW(L"nvngx_dlssnr.dll");
     if (!g_nr_module) { Log("[pure] LoadLibrary(nvngx_dlssnr.dll) failed %lu", GetLastError()); return false; }
     g_nr_init_ext = reinterpret_cast<PFN_NR_InitExt>(GetProcAddress(g_nr_module, "NVSDK_NGX_D3D12_Init_Ext"));

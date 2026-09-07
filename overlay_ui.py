@@ -34,6 +34,7 @@ THEMES = {
         "text": "#191919",
         "muted": "#79776F",
         "accent": "#D97757",   # глиняный акцент
+        "ok": "#5E8C61",       # зелёный индикатора поддержки
         "danger": "#BC4C2E",
     },
     "dark": {
@@ -43,6 +44,7 @@ THEMES = {
         "text": "#F5F4EF",
         "muted": "#A3A099",
         "accent": "#D97757",
+        "ok": "#7FB07F",
         "danger": "#E06C4F",
     },
 }
@@ -118,6 +120,10 @@ class OverlayMenu:
             "rec_seconds": 0.0,
             "open_on_start": True,
             "split": 0.0,
+            # Что за карта и работает ли на ней NR. gpu_ok: True/False/None
+            # (None — воркер ещё не ответил).
+            "gpu_text": "",
+            "gpu_ok": None,
         }
         # Показания конвейера: то же, что в HUD. Меню задумано как одно
         # место, где видно и настройки, и что происходит.
@@ -212,7 +218,14 @@ class OverlayMenu:
         # Блок показаний
         stat_h = self._u(STAT_LINE_H) * 2 + self._u(STAT_PAD) * 2
         self._stats_rel = pygame.Rect(pad, cy, inner_w, stat_h)
-        cy += stat_h + gap
+        cy += stat_h + self._u(6)
+
+        # Строка про GPU: точка состояния и модель карты. Отдельной строкой, а
+        # не ячейкой в блоке показаний — это не показание конвейера, а ответ на
+        # вопрос «а на моей карте это вообще работает».
+        gpu_h = self._u(SMALL_SIZE) + self._u(8)
+        self._gpu_rel = pygame.Rect(pad, cy, inner_w, gpu_h)
+        cy += gpu_h + gap
 
         # NR вкл/выкл — одна строка
         items.append(Item("toggle", "nr", pygame.Rect(pad, cy, inner_w, ctrl_h),
@@ -321,6 +334,7 @@ class OverlayMenu:
         grip = self._u(26)
         self._grip = pygame.Rect(x + w - grip, y + h - grip, grip, grip)
         self._stats_rect = self._stats_rel.move(x, y)
+        self._gpu_rect = self._gpu_rel.move(x, y)
         self._hotkeys_rect = self._hotkeys_rel.move(x, y)
         for it in items:
             it.rect = it.rect.move(x, y)
@@ -499,6 +513,7 @@ class OverlayMenu:
                              r.y + self._u(22)))
 
         self._draw_stats(surface)
+        self._draw_gpu(surface, s)
         self._draw_hotkeys(surface, s)
         # Уголок растягивания: три коротких штриха, как принято у ресайза
         g = self._grip
@@ -549,6 +564,27 @@ class OverlayMenu:
                 v = self._small_font.render(value, True, _rgb(self.c["accent"]))
                 surface.blit(k, (cx, y))
                 surface.blit(v, (cx + k.get_width() + self._u(6), y))
+
+    def _draw_gpu(self, surface, s: dict) -> None:
+        """Точка состояния и модель карты: зелёная — NR работает, красная — нет."""
+        rect = getattr(self, "_gpu_rect", None)
+        if rect is None:
+            return
+        ok = self.state.get("gpu_ok")
+        color = (self.c["muted"] if ok is None
+                 else self.c["ok"] if ok else self.c["danger"])
+        r = max(3, self._u(5))
+        cy = rect.y + rect.h // 2
+        pygame.draw.circle(surface, _rgb(color), (rect.x + r, cy), r)
+        text = self.state.get("gpu_text") or "—"
+        hint = (s["gpu_wait"] if ok is None
+                else s["gpu_ok"] if ok else s["gpu_no"])
+        name = self._small_font.render(text, True, _rgb(self.c["text"]))
+        surface.blit(name, (rect.x + r * 2 + self._u(8),
+                            cy - name.get_height() // 2))
+        note = self._small_font.render(hint, True, _rgb(color))
+        surface.blit(note, (rect.right - note.get_width(),
+                            cy - note.get_height() // 2))
 
     def _rec_text(self) -> str:
         """Состояние записи: длительность полезнее, чем просто «on»."""

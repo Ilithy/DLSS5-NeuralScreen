@@ -13,23 +13,28 @@ overlay. RTX 50-series only.
 </table>
 
 Everything is in one menu inside the overlay: `F8` opens it, and while it is
-open the overlay takes mouse and keyboard, so it works on top of a game.
+open the overlay takes mouse and keyboard, so it works on top of a game. The
+dot next to the GPU name is green when Neural Rendering actually runs on this
+card, red when it does not.
 
 ```
 desktop capture -> motion guides -> NGX worker (D3D12) -> overlay on top of the screen
   worker DDA        cv2 DIS 320x180    native/nvngx.dll        worker window + menu layer
 ```
 
-> **v1.0.0.** The whole pipeline lives on the GPU — capture, neural pass and
+> **v1.1.** The whole pipeline lives on the GPU — capture, neural pass and
 > presentation all happen inside the worker; Python only computes
-> optical-flow guides (0.1–0.2 ms/frame). RTX 5070 Ti, 4K desktop, work
-> 1920×1080: **55 FPS with NR on, 121–133 FPS in bypass**.
+> optical-flow guides (0.1 ms/frame). RTX 5070 Ti, 2560×1600 desktop, work at
+> the 2304×1440 cap: **102 FPS with NR on**. Of the 9.8 ms frame, 8.0 ms is
+> GPU time inside the NGX evaluate — measured with D3D12 timestamps on the
+> queue, so the rest of the pipeline costs 1.8 ms.
 
 ## Requirements
 
 - **Windows 11** (Desktop Duplication API + `WDA_EXCLUDEFROMCAPTURE`)
-- **NVIDIA RTX 50-series** with DLSS 5 Neural Rendering support. Developed and
-  tested on RTX 5070 Ti, driver 616.56
+- **NVIDIA RTX 50-series** for the officially supported path. Developed and
+  tested on RTX 5070 Ti, driver 616.56. For 20/30/40-series see
+  "Older GPUs" below — the kernels are there, the gate is a policy check.
 - The release archive bundles a **portable Python runtime** (embedded
   CPython 3.13 + PyAV + OpenCV + pygame) — no Python installation needed.
 - **`native/nvngx_dlssnr.dll`** — NVIDIA runtime (165 MB). Not in the repo
@@ -73,8 +78,10 @@ window (there used to be one; it was a second interface over the same
 values, it stole focus from games, and it dragged the whole tcl/tk runtime
 along). It holds: live counters (FPS, resolution, work size, frames,
 recording time), NR on/off, profile (Faithful / Natural / Strong / Extreme),
-the four NR parameters, language (ru/en), light/dark theme, "open menu on
-launch", and the buttons Screenshot / Help / Record / Exit / Close.
+the four NR parameters, the before/after wipe, language (ru/en), light/dark
+theme, "open menu on launch", and the buttons Screenshot / Help / Record /
+Exit / Close. A status line shows the GPU, its architecture and whether
+Neural Rendering works on it.
 
 Drag it by the title bar, resize it by the bottom-right corner — both are
 highlighted when you point at them, and both are remembered in
@@ -249,6 +256,52 @@ Re-confirmed with D3D12 timestamps on the queue, i.e. GPU time inside
 3.32 MPix** (2560×1600 desktop, RTX 5070 Ti). Nine times the input pixels,
 the same time — the model works at its own fixed internal resolution. End to
 end: 102 FPS at both `0.65` and `1.00`.
+
+## Before / after wipe
+
+The **Before / after wipe** slider leaves the left share of the frame
+unprocessed, so the raw capture and the NGX result sit side by side with an
+accent-coloured divider between them. 0 turns it off.
+
+It happens in the worker, on the GPU: one `CopyTextureRegion` of the left
+strip of the input over the output, then the divider through
+`ClearUnorderedAccessViewFloat` with a rect. Both run before Present and
+before pixels are handed back, so the wipe lands in recordings and
+screenshots by itself. The position rides in the top 16 bits of the frame
+header's flag field, so moving the slider does not recreate the worker.
+
+## Older GPUs (20/30/40-series)
+
+`nvngx_dlssnr.dll` refuses to create the feature on anything below Blackwell.
+Its own version resource says `NGXGpuArchitecture = NVSDK_NGX_GPU_Arch_Blackwell2`,
+and it carries the message
+
+```
+DLSSNR: Unsupported GPU architecture 0x%x, minimum required 0x%x
+```
+
+But the compiled kernels for older cards **are in the file**. Parsing its
+fatbin headers: all fifteen fatbins carry `sm_75` (Turing), `sm_86` (Ampere),
+`sm_89` (Ada) and `sm_120` (Blackwell), with no gaps. So the refusal is a
+policy check, not missing code.
+
+The library learns the architecture through nvapi — it loads `nvapi64.dll`,
+takes its single export `nvapi_QueryInterface` and asks for
+`NvAPI_GPU_GetArchInfo` by id. Setting `NS_ARCH_SPOOF=1` makes the worker
+patch that one function in **its own process memory** at startup: the prologue
+is saved, replaced with a jump to our handler, and restored around every real
+call, so any GPU handle is still served by NVIDIA's own code — only the
+returned architecture is rewritten to Blackwell. Nothing in NVIDIA's files is
+modified, and on a 50-series card the hook disables itself and does nothing.
+
+Off by default. **Untested on real 20/30/40-series hardware** — the only card
+here is a 5070 Ti, where the hook is a no-op by design. The menu's GPU dot
+tells you the truth either way: it goes green only when the worker actually
+created feature 18, not when the architecture merely looks right.
+
+This likely conflicts with the license terms of NVIDIA's redistributable. It
+defeats no copy protection and modifies no files, but enabling it is your
+call.
 
 ## Limitations (read before buying/recording)
 
