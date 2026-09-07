@@ -81,9 +81,18 @@ for f in files + extra:
 out = "neuralscreen-v1.1.0-full.zip"
 with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as z:
     for f in uniq:
-        if os.path.isfile(f):
-            z.write(f, f)
-        else:
+        if not os.path.isfile(f):
             print("MISSING:", f)
+            continue
+        # config.json — из git, а не с диска: на диске лежат персональные
+        # menu_offset/menu_scale разработчика, в архив они не должны попадать.
+        if f == "config.json":
+            r = subprocess.run(["git", "diff", "--quiet", "--", "config.json"])
+            if r.returncode != 0:
+                data = subprocess.check_output(
+                    ["git", "show", "HEAD:config.json"])
+                z.writestr(f, data)
+                continue
+        z.write(f, f)
 print("entries:", len(uniq))
 print("size:", os.path.getsize(out))
