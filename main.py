@@ -349,10 +349,13 @@ def _drain_stderr(worker, logs: list[str], stop: threading.Event) -> None:
                 break
             line = raw.decode("utf-8", "replace").rstrip()
             logs.append(line)
-            # Замеры фаз воркера — в общий лог, но только когда профилировщик
-            # включён (NS_PHASE=1): иначе они оседают в буфере и видны только
-            # когда что-то упало.
-            if "[phase]" in line and os.environ.get("NS_PHASE") == "1":
+            # Лог воркера — в общий лог, но только когда включён профилировщик
+            # (NS_PHASE=1): иначе он оседает в буфере и виден лишь когда
+            # что-то упало. Кроме замеров фаз пропускаем и [pure]/[host]:
+            # там код результата NGX и выбранный пресет модели, без них не
+            # понять, что вообще создалось.
+            if os.environ.get("NS_PHASE") == "1" and (
+                    "[phase]" in line or "[pure]" in line or "[host]" in line):
                 print(line)
     except Exception:
         pass

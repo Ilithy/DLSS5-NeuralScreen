@@ -548,6 +548,23 @@ static bool InitNgx()
     return InitDirectNr(data_path);
 }
 
+// Модель NR выбирается подсказкой при создании feature. Стояла 0 (default) и
+// никогда не проверялась; у родственного Ray Reconstruction под номерами лежат
+// разные трансформерные модели с разной ценой. Значение берём из NS_NR_PRESET,
+// чтобы перебирать без пересборки.
+static UINT NrPresetHint()
+{
+    static int cached = -1;
+    if (cached < 0)
+    {
+        char buf[16] = {};
+        const DWORD got = GetEnvironmentVariableA("NS_NR_PRESET", buf, sizeof(buf));
+        cached = (got > 0 && got < sizeof(buf)) ? atoi(buf) : 0;
+        if (cached < 0) cached = 0;
+    }
+    return static_cast<UINT>(cached);
+}
+
 static bool CreateFeature(UINT w, UINT h_, int flags, NVSDK_NGX_Result *out_r, UINT full_w = 0, UINT full_h = 0)
 {
     (void)flags;
@@ -567,7 +584,7 @@ static bool CreateFeature(UINT w, UINT h_, int flags, NVSDK_NGX_Result *out_r, U
     h.params->Set("DLSSNR.Upscaling", upscale ? 1u : 0u);
     h.params->Set("DLSSNR.Scale", upscale ? static_cast<float>(w) / static_cast<float>(full_w) : 1.0f);
     h.params->Set("DLSSNR.ScalingRatio", upscale ? static_cast<float>(w) / static_cast<float>(full_w) : 1.0f);
-    h.params->Set("DLSSNR.Hint.Render.Preset", 0u);
+    h.params->Set("DLSSNR.Hint.Render.Preset", NrPresetHint());
     h.params->Set("DLSS.Feature.Create.Flags", 0u);
 
     if (!BeginCommands()) return false;
@@ -589,8 +606,8 @@ static bool CreateFeature(UINT w, UINT h_, int flags, NVSDK_NGX_Result *out_r, U
     if (!WaitFenceValue(h.fence, v, 30000)) { Log("[pure] feature create did not complete"); return false; }
     if (NVSDK_NGX_FAILED(rf) || h.feature == nullptr)
     { Log("[pure] direct feature 18 create failed 0x%08X (%s)", rf, NgxResultName(rf)); h.feature = nullptr; return false; }
-    Log("[pure] direct feature 18 ready: %ux%u%s result=0x%08X", w, h_,
-        upscale ? " (upscaling full->work->full)" : "", rf);
+    Log("[pure] direct feature 18 ready: %ux%u%s preset=%u result=0x%08X", w, h_,
+        upscale ? " (upscaling full->work->full)" : "", NrPresetHint(), rf);
     return true;
 }
 
