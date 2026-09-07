@@ -34,3 +34,4 @@ screenshots/
 # Offscreen-рендеры меню для просмотра вёрстки
 _menu*.png
 *.local-backup
+release-package.html
