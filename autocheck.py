@@ -1,4 +1,4 @@
-"""NeuralScreen v1.1 self-checks - the static part (no GUI).
+"""NeuralScreen v1.2 self-checks - the static part (no GUI).
 
 Run:  runtime\\python.exe autocheck.py
 The GUI part (menu, recording) is run separately - see the end of the output.
@@ -46,13 +46,14 @@ def fresh_worker():
 
 
 def zip_integrity():
-    zpath = ROOT / "neuralscreen-v1.1.0-full.zip"
+    zpath = ROOT / "neuralscreen-v1.2.0-full.zip"
     if not zpath.exists():
-        return False, "no neuralscreen-v1.1.0-full.zip"
+        return False, "no neuralscreen-v1.2.0-full.zip"
     required = [
         "main.py", "gpuinfo.py", "overlay_ui.py", "i18n.py", "recorder.py",
         "display.py", "guides.py", "hotkeys.py", "tray.py", "capture.py",
         "audio.py", "NeuralScreen.exe",
+        "docs/TECHNICAL.md", "docs/TECHNICAL.ru.md",
         "README.md", "README.ru.md", "NeuralScreen.vbs", "NeuralScreen.bat",
         "native/nvngx.dll", "native/nvngx_dlssnr.dll",
         "runtime/pythonw.exe", "docs/menu-light.png", "docs/menu-dark.png",
@@ -117,20 +118,45 @@ def spoof_default_on():
 
 
 def readme_consistency():
-    """README EN/RU agree on the key v1.1 facts.
+    """The four docs line up: two short READMEs, two technical ones.
 
-    The Russian needles below are the content of README.ru.md, which is a
-    translation and stays in Russian on purpose.
+    The READMEs are for someone installing the program, so the check that
+    matters is that they stayed short and that every image and link in them
+    resolves. The measurements live in the technical docs, and the one fact
+    those must not lose is the spoof default - it decides whether a 20/30/40
+    card works at all.
     """
-    en = (ROOT / "README.md").read_text(encoding="utf-8")
-    ru = (ROOT / "README.ru.md").read_text(encoding="utf-8")
-    for needle in ["NS_ARCH_SPOOF=0", "On by default", "Включено по умолчанию",
-                   "102 FPS", "2304×1440"]:
-        if needle not in en and needle not in ru:
-            return False, f"'{needle}' is in neither README"
-    if "On by default" not in en or "Включено по умолчанию" not in ru:
-        return False, "the spoof status differs between the READMEs"
-    return True, "EN/RU agree"
+    import re
+
+    docs = {
+        "README.md": (ROOT / "README.md").read_text(encoding="utf-8"),
+        "README.ru.md": (ROOT / "README.ru.md").read_text(encoding="utf-8"),
+        "docs/TECHNICAL.md": (ROOT / "docs" / "TECHNICAL.md").read_text(encoding="utf-8"),
+        "docs/TECHNICAL.ru.md": (ROOT / "docs" / "TECHNICAL.ru.md").read_text(encoding="utf-8"),
+    }
+    for name in ("README.md", "README.ru.md"):
+        n = len(docs[name].splitlines())
+        if n > 200:
+            return False, f"{name} is {n} lines - it drifted back into a manual"
+    # The Russian needle is the content of a translated doc and stays Russian.
+    if "On by default" not in docs["docs/TECHNICAL.md"]:
+        return False, "TECHNICAL.md lost the spoof default"
+    if "Включено по умолчанию" not in docs["docs/TECHNICAL.ru.md"]:
+        return False, "TECHNICAL.ru.md lost the spoof default"
+
+    # Every relative link and image must resolve, in both directions.
+    for name, text in docs.items():
+        base = (ROOT / name).parent
+        for target in re.findall(r"]\(([^)#][^)]*)\)", text):
+            if target.startswith(("http://", "https://", "mailto:")):
+                continue
+            if not (base / target).exists():
+                return False, f"{name} points at a missing {target}"
+        for src in re.findall(r'<img src="([^"]+)"', text):
+            if not (base / src).exists():
+                return False, f"{name} shows a missing {src}"
+    return True, (f"READMEs {len(docs['README.md'].splitlines())}/"
+                  f"{len(docs['README.ru.md'].splitlines())} lines, links resolve")
 
 
 def git_clean():
@@ -144,9 +170,9 @@ def git_clean():
 
 
 def release_notes_short():
-    """The v1.1.0 release notes are concise (the EN part is under 2 KB)."""
+    """The v1.2.0 release notes are concise (the EN part is under 2 KB)."""
     r = subprocess.run(
-        ["gh", "release", "view", "v1.1.0", "-R", "perseval-BLR/DLSS5-NeuralScreen",
+        ["gh", "release", "view", "v1.2.0", "-R", "perseval-BLR/DLSS5-NeuralScreen",
          "--json", "body", "--jq", ".body"],
         capture_output=True, text=True, timeout=60)
     if r.returncode != 0:

@@ -1,4 +1,4 @@
-"""Build the NeuralScreen v1.1.0 release archive: git files + artifacts + runtime."""
+"""Build the NeuralScreen v1.2.0 release archive: git files + artifacts + runtime."""
 import os
 import subprocess
 import zipfile
@@ -89,7 +89,7 @@ for f in files + extra:
     seen.add(norm)
     uniq.append(norm)
 
-out = "neuralscreen-v1.1.0-full.zip"
+out = "neuralscreen-v1.2.0-full.zip"
 with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as z:
     for f in uniq:
         if not os.path.isfile(f):
