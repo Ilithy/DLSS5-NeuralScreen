@@ -40,7 +40,10 @@ def main() -> int:
     out = Path(tempfile.gettempdir()) / "ns-test-recorder.mp4"
     out.unlink(missing_ok=True)
 
-    rec = VideoRecorder(str(out), W, H, fps=FPS)
+    # audio=False on purpose: this test is about the video encode thread, and
+    # a loopback that is missing or busy would muddy its timings.
+    # The audio track has its own test - test_recorder_audio.py.
+    rec = VideoRecorder(str(out), W, H, fps=FPS, audio=False)
     worst = 0.0
     try:
         for i in range(FRAMES):

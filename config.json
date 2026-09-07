@@ -20,5 +20,6 @@
     0
   ],
   "open_menu_on_start": true,
-  "split": 0.0
+  "split": 0.0,
+  "record_audio": true
 }

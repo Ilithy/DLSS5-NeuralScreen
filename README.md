@@ -63,7 +63,7 @@ desktop capture -> motion guides -> NGX worker (D3D12) -> overlay on top of the 
 | `F9` | NR on/off. **Off is a bypass**: the overlay stays on screen showing the raw capture (no neural effect), and the desktop runs faster. Everything hides only on real exit. |
 | `F8` | open/close the menu. While it is open the overlay takes mouse and keyboard, so the menu works on top of a game; closed, it is click-through again and the desktop behaves normally. |
 | `F7` | screenshot — opens a native "Save As" dialog (JPEG 100%). The dialog runs in its own thread, so the pipeline does not stop while you pick a name |
-| `Insert` | start/stop video recording (MP4, AV1 NVENC, 60 fps, ~64 Mbps). Also a **Record** button in the menu |
+| `Insert` | start/stop recording (MP4: AV1 NVENC 60 fps ~64 Mbps + AAC system audio). Also a **Record** button in the menu |
 | `Ctrl+Alt+↑` / `Ctrl+Alt+↓` | processing scale ±0.05 |
 | `Ctrl+Alt+Q` | quit |
 
@@ -164,6 +164,17 @@ instead.
   caption.
 - Recording works in both NR ON and NR OFF (bypass) modes; the file duration
   matches real time (PTS is built from the wall clock).
+- **System audio is recorded as a second track**: WASAPI loopback ("what you
+  hear") from the default playback device, AAC 192 kbit/s stereo at the
+  endpoint's own rate. No virtual cable, no microphone. Turn it off with
+  `"record_audio": false` in `config.json`. A machine without a playback
+  endpoint still records video — the sound is best-effort and never stops the
+  recording.
+
+  While nothing is playing at all, WASAPI loopback hands back no data rather
+  than silence, so quiet stretches are padded from the same clock the video
+  uses. Without that the audio track would simply be shorter than the video
+  and everything after a pause would be out of sync.
 
 ### What recording costs, and why it is not the bitrate
 
@@ -419,8 +430,8 @@ call.
    (`WDA_EXCLUDEFROMCAPTURE`) to prevent the DDA pipeline from feeding on
    itself. NVIDIA App may even refuse to record the desktop while
    NeuralScreen runs ("Python prevents desktop recording"). Use the built-in
-   **Insert** recording instead — it captures the actual NR frame, with the
-   menu on it if the menu is open.
+   **Insert** recording instead — it captures the actual NR frame with the
+   system audio, and with the menu on it if the menu is open.
 3. **Work resolution is capped at 2560×1440** (NGX feature 18 constraint).
 4. **End-to-end latency is 40–60 ms** — inherent to capture → NGX → present
    chains; visible when dragging windows.

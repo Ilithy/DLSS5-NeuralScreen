@@ -1190,6 +1190,10 @@ def main() -> int:
         want_dda = bool(cfg.get("capture_in_worker", True))  # DDA: the worker takes the colour
         # The result pixels come back through shared memory, not the pipe.
         want_out_shm = bool(cfg.get("pixels_in_shm", True))
+        # System audio ("what you hear") as a second track in the recording.
+        # A config flag rather than a menu item: it is a decision made once,
+        # not something to reach for while the overlay is up.
+        record_audio = bool(cfg.get("record_audio", True))
         out_shm = False
         out_attempted = False
         motion_small = False  # the worker upscales the motion field itself
@@ -1990,7 +1994,8 @@ def main() -> int:
                             stamp = f"{stamp}-{time.time() % 1 * 1000:03.0f}"
                             path = str(rec_dir / f"neuralscreen-{stamp}.mp4")
                             try:
-                                recorder = VideoRecorder(path, width, height, fps=60)
+                                recorder = VideoRecorder(path, width, height, fps=60,
+                                                         audio=record_audio)
                             except Exception as exc:
                                 print(f"[main] recording did not start: {exc}", file=sys.stderr)
                                 display.alert(f"REC ERROR: {exc}")

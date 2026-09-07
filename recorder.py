@@ -1,8 +1,12 @@
-"""VideoRecorder - writes NR overlay frames into an MP4 (AV1 NVENC).
+"""VideoRecorder - writes NR overlay frames into an MP4 (AV1 NVENC + AAC).
 
 Records the frames Python receives from the worker (output_rgba) while
 recording is on (Insert). Frames arrive full-res RGBA8 every ~30 ms; PyAV
 converts them to yuv420p and encodes AV1 through NVENC.
+
+System audio comes from WASAPI loopback (audio.LoopbackCapture) as a second
+track. It is best-effort: a machine without a playback endpoint still records
+video, it just gets no sound.
 
 Recording does not depend on ShadowPlay/OBS: the overlay is excluded from
 external capture (WDA_EXCLUDEFROMCAPTURE), so the video is written from the
@@ -19,6 +23,8 @@ from fractions import Fraction
 
 import av
 import numpy as np
+
+from audio import LoopbackCapture
 
 
 class VideoRecorder:
@@ -59,7 +65,20 @@ class VideoRecorder:
         "bufsize": "500M",
     }
 
-    def __init__(self, path: str, width: int, height: int, fps: float = 60.0):
+    #: Audio bitrate. 192 kbit/s of AAC is transparent enough for game sound and
+    #: speech, and next to a 120 Mbit/s video track its size does not matter.
+    AUDIO_BIT_RATE = 192_000
+    #: How far the audio track may fall behind the clock before we pad it with
+    #: silence, and how much lag we leave after padding. WASAPI loopback hands
+    #: back nothing at all while the device is idle, so without padding a quiet
+    #: passage would shorten the track and pull everything after it out of sync.
+    #: The remaining lag is deliberate: real samples that are merely late must
+    #: not land after silence we already wrote for their slot.
+    AUDIO_GAP_S = 0.20
+    AUDIO_LAG_S = 0.10
+
+    def __init__(self, path: str, width: int, height: int, fps: float = 60.0,
+                 audio: bool = True):
         self.path = path
         self.width = width
         self.height = height
@@ -113,23 +132,135 @@ class VideoRecorder:
             except Exception as exc:
                 print(f"[record] encoder options failed: {exc}",
                       file=sys.stderr)
+        # --- audio: a second track from WASAPI loopback --------------------
+        # Set up before the clock starts so that samples captured while the
+        # endpoint spins up still belong at the beginning of the track.
+        self._audio: LoopbackCapture | None = None
+        self._astream = None
+        self._fifo: av.AudioFifo | None = None
+        self._audio_samples = 0      # frames handed to the fifo, our audio clock
+        self.audio_padded = 0        # frames of silence inserted into gaps
+        if audio:
+            self._open_audio()
         self._frame_idx = 0
         self.written = 0
         self._started = time.perf_counter()
 
+    def _open_audio(self) -> None:
+        """Start the loopback and add the AAC track. Failure is not fatal."""
+        cap = LoopbackCapture()
+        try:
+            if not cap.start():
+                print(f"[record] no audio: {cap.error or 'endpoint unavailable'}",
+                      file=sys.stderr)
+                cap.close()
+                return
+            self._astream = self._container.add_stream("aac", rate=cap.sample_rate)
+            self._astream.bit_rate = self.AUDIO_BIT_RATE
+            # The stream time base is one sample, so a pts is simply the index
+            # of the sample - no rounding anywhere between the clock and the
+            # container.
+            self._astream.time_base = Fraction(1, cap.sample_rate)
+            # AAC encodes fixed 1024-sample frames while the loopback hands out
+            # whatever the device period gives. The fifo does the regrouping.
+            self._fifo = av.AudioFifo()
+            self._audio = cap
+            print(f"[record] audio: WASAPI loopback {cap.sample_rate} Hz stereo")
+        except Exception as exc:                      # noqa: BLE001
+            print(f"[record] audio track not created: {exc}", file=sys.stderr)
+            cap.close()
+            self._audio = None
+            self._astream = None
+            self._fifo = None
+
     def _encode_loop(self) -> None:
-        """The sole owner of the container while recording is running."""
+        """The sole owner of the container while recording is running.
+
+        Audio is pumped from here rather than from the main loop for the same
+        reason video is: the container must be touched from one thread only.
+        The wait on the video queue is bounded so that audio keeps flowing even
+        while the pipeline is between frames.
+        """
         while True:
-            item = self._queue.get()
+            try:
+                item = self._queue.get(timeout=0.05)
+            except queue.Empty:
+                self._pump_audio()
+                continue
             if item is None:
+                self._pump_audio()
                 return
             pts, rgba = item
             try:
+                self._pump_audio()
                 self._encode_one(pts, rgba)
             except BaseException as exc:   # noqa: BLE001 - report back to main
                 self._encode_error = exc
                 print(f"[record] encoding aborted: {exc}", file=sys.stderr)
                 return
+
+    def _pump_audio(self) -> None:
+        """Move captured samples into the container; pad gaps with silence.
+
+        Audio failures never stop the recording: the video is the point, the
+        sound is a bonus. On an error the track simply stops growing.
+        """
+        if self._audio is None or self._fifo is None:
+            return
+        try:
+            chunk = self._audio.read()
+            if chunk is not None and len(chunk):
+                self._push_audio(chunk)
+            self._pad_audio()
+            self._drain_fifo()
+        except Exception as exc:                      # noqa: BLE001
+            print(f"[record] audio stopped: {exc}", file=sys.stderr)
+            try:
+                self._audio.close()
+            except Exception:
+                pass
+            self._audio = None
+
+    def _push_audio(self, chunk: np.ndarray) -> None:
+        """Append float32 (n, 2) to the fifo with a pts of its sample index."""
+        # 'fltp' is planar: PyAV wants (channels, samples), and contiguous -
+        # a transposed view is neither.
+        planar = np.ascontiguousarray(chunk.T)
+        frame = av.AudioFrame.from_ndarray(planar, format="fltp", layout="stereo")
+        frame.sample_rate = self._audio.sample_rate
+        frame.time_base = self._astream.time_base
+        frame.pts = self._audio_samples
+        self._audio_samples += planar.shape[1]
+        self._fifo.write(frame)
+
+    def _pad_audio(self) -> None:
+        """Insert silence when the track has fallen behind the wall clock.
+
+        Only when the gap is real (AUDIO_GAP_S), and never all the way up to
+        the clock: samples that are merely late must still have room ahead of
+        them, otherwise they would be written after silence covering their own
+        slot and the track would drift forward.
+        """
+        rate = self._audio.sample_rate
+        elapsed = time.perf_counter() - self._started
+        deficit = int(elapsed * rate) - self._audio_samples
+        if deficit < int(self.AUDIO_GAP_S * rate):
+            return
+        need = deficit - int(self.AUDIO_LAG_S * rate)
+        if need <= 0:
+            return
+        self._push_audio(np.zeros((need, 2), dtype=np.float32))
+        self.audio_padded += need
+
+    def _drain_fifo(self, flush: bool = False) -> None:
+        """Encode whole AAC frames out of the fifo and mux them."""
+        size = self._astream.codec_context.frame_size or 1024
+        while True:
+            frame = self._fifo.read(size, partial=flush)
+            if frame is None:
+                return
+            for packet in self._astream.encode(frame):
+                self._container.mux(packet)
 
     def write(self, rgba: np.ndarray) -> None:
         """Queue a frame for the encoder (RGBA8 full-res, 4 channels).
@@ -208,6 +339,9 @@ class VideoRecorder:
         if self.dropped:
             print(f"[record] frames dropped: {self.dropped} "
                   f"(encoder could not keep up)", file=sys.stderr)
+        # The encoder thread is gone, so the container is ours again: take the
+        # tail of the audio and flush both encoders.
+        self._close_audio()
         try:
             for packet in self._stream.encode(None):  # flush encoder
                 self._container.mux(packet)
@@ -215,6 +349,32 @@ class VideoRecorder:
         except Exception as exc:
             print(f"[record] close failed: {exc}", file=sys.stderr)
         self._container = None
+
+    def _close_audio(self) -> None:
+        """Stop the capture, write what is left and flush the AAC encoder.
+
+        Keyed on the stream, not on the capture: a loopback that died mid-way
+        sets _audio to None, and the frames already encoded still have to be
+        flushed - otherwise the tail of the track is lost along with it.
+        """
+        if self._astream is None:
+            return
+        try:
+            if self._audio is not None:
+                self._pump_audio()      # whatever arrived after the last frame
+                self._audio.close()
+                self._audio = None
+            self._drain_fifo(flush=True)
+            for packet in self._astream.encode(None):
+                self._container.mux(packet)
+            secs = self._audio_samples / max(1, self._astream.rate)
+            padded = self.audio_padded / max(1, self._astream.rate)
+            print(f"[record] audio: {secs:.1f} s written"
+                  + (f", {padded:.1f} s of it silence in gaps" if padded > 0.05 else ""))
+        except Exception as exc:                      # noqa: BLE001
+            print(f"[record] audio flush failed: {exc}", file=sys.stderr)
+        finally:
+            self._audio = None
 
     @property
     def duration_ms(self) -> float:
