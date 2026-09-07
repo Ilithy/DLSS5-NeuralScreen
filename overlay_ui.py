@@ -157,6 +157,12 @@ class OverlayMenu:
         self.state: dict = {
             "nr": True,
             "work_scale": 1.0,
+            # The scale at which the work size hits the 2560x1440 cap. Sent by
+            # main because only it knows the screen size; without it the top of
+            # the slider would be dead on a 4K desktop, where anything above
+            # 0.67 lands on the same capped resolution.
+            "work_scale_max": 1.0,
+            "nr_small": False,
             "profile": "",
             "profiles": [],
             "params": {},
@@ -417,6 +423,14 @@ class OverlayMenu:
                 lo = SKIN_MIN if key == "skin_structure" else PARAM_MIN
                 val = float(params.get(key, 0.0))
                 slider(key, lo, PARAM_MAX, val, s[key], value_text=f"{val:.2f}")
+
+            section(s["sec_speed"])
+            toggle("nr_small", s["nr_small"], bool(self.state.get("nr_small")))
+            ws = float(self.state.get("work_scale", 1.0))
+            ws_max = float(self.state.get("work_scale_max", 1.0))
+            slider("work_scale", 0.30, max(0.35, ws_max), ws, s["work_scale"],
+                   hint=s["work_scale_hint"],
+                   value_text=str(self.state.get("work_size") or f"{ws:.2f}"))
 
             section(s["sec_compare"])
             split_val = float(self.state.get("split", 0.0))
@@ -743,6 +757,9 @@ class OverlayMenu:
         if item.key == "split":
             self.state["split"] = value
             return [("split", value)]
+        if item.key == "work_scale":
+            self.state["work_scale"] = value
+            return [("work_scale", value)]
         params = dict(self.state.get("params") or {})
         params[item.key] = value
         self.state["params"] = params

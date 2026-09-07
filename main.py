@@ -1054,6 +1054,14 @@ def main() -> int:
     monitor = int(cfg["monitor"])
     warmup = int(cfg["warmup"])
     work_scale = float(cfg["work_scale"])
+    # The worker reads NS_NR_SMALL once, at startup: with it on, Neural
+    # Rendering runs at the work resolution and the result is scaled back up
+    # instead of the network chewing the whole screen. Off by default - it is
+    # faster but softer, and an update must not change how the picture looks
+    # without being asked. Toggling it later restarts the worker, which is why
+    # it lives in the environment rather than in the frame protocol.
+    nr_small = bool(cfg.get("nr_small", False))
+    os.environ["NS_NR_SMALL"] = "1" if nr_small else "0"
     lang = str(cfg["lang"])
 
     # The output resolution comes FROM THE REAL MONITOR, not from a stale
@@ -1351,7 +1359,8 @@ def main() -> int:
                           file=sys.stderr)
                 return None
 
-        def _do_restart(new_scale: float, new_profile: str, new_params: dict) -> None:
+        def _do_restart(new_scale: float, new_profile: str, new_params: dict,
+                        full: bool = False) -> None:
             """Change work_scale/profile/parameters WITHOUT recreating pygame or the capture.
 
             The main path is RNSZ: the worker recreates the NGX feature inside
@@ -1388,7 +1397,7 @@ def main() -> int:
             display.alert(UI_STRINGS[lang]["settings_applied"])
 
             applied = False
-            if worker.poll() is None:
+            if worker.poll() is None and not full:
                 try:
                     t_rnsz = time.perf_counter()
                     send_resize(worker, params, new_w, new_h, RESTART_WARMUP,
@@ -1708,6 +1717,8 @@ def main() -> int:
                                        else int(display.menu.user_height))
                 data["open_menu_on_start"] = startup_menu
                 data["split"] = round(split_pos, 2)
+                data["nr_small"] = bool(nr_small)
+                data["work_scale"] = round(work_scale, 2)
                 data["theme"] = display.menu.state.get("theme", "light")
                 data["lang"] = lang
                 data["menu_offset"] = [int(display.menu.offset[0]),
@@ -1808,6 +1819,11 @@ def main() -> int:
             return {
                 "nr": not paused,
                 "work_scale": work_scale,
+                # Above this the work size just hits the 2560x1440 cap, so the
+                # slider would have a dead top end.
+                "work_scale_max": min(1.0, WORK_MAX_W / max(1, width),
+                                      WORK_MAX_H / max(1, height)),
+                "nr_small": nr_small,
                 "profile": cfg["profile"],
                 "profiles": list(PROFILES),
                 "params": {k: params[k] for k in
@@ -1833,9 +1849,22 @@ def main() -> int:
             wants and the decision is taken here, where params and cfg live.
             """
             nonlocal lang, running, startup_menu, split_pos, hotkey_bindings
+            nonlocal nr_small
             kind = action[0]
             if kind == "nr":
                 tray_commands.put("toggle")
+            elif kind == "work_scale":
+                request_apply(float(action[1]), cfg["profile"], params)
+            elif kind == "toggle" and action[1] == "nr_small":
+                # The worker picks the mode up at startup, so this one cannot go
+                # through RNSZ - it needs a fresh process.
+                nr_small = not nr_small
+                os.environ["NS_NR_SMALL"] = "1" if nr_small else "0"
+                cfg["nr_small"] = nr_small
+                _save_menu_layout()
+                print(f"[main] reduced-resolution processing: "
+                      f"{'on' if nr_small else 'off'} - restarting the worker")
+                _do_restart(work_scale, cfg["profile"], params, full=True)
             elif kind == "split":
                 # No need to recreate the worker: the wipe position rides in
                 # every frame's header.

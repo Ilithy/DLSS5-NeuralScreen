@@ -1159,6 +1159,23 @@ struct VideoState
     UINT out_rows = 0;
     UINT64 out_row_size = 0;
     bool inputs_ready = false;
+
+    // NS_NR_SMALL=1: run Neural Rendering on a smaller frame than the screen.
+    //
+    // The network is same-resolution - it enhances, it does not upscale - so
+    // its cost tracks the pixels it is handed: 1.50 ms fixed + 1.51 ms per
+    // megapixel on a 5070 Ti (measured). Handing it the full screen, which is
+    // what "upscaling" mode really does, is why work_scale never bought
+    // anything.
+    //
+    // Here colour is scaled down into nr_in, the network runs there, and
+    // nr_out is scaled back up into output. Everything downstream of output -
+    // the present, the wipe, the recording, the bypass - keeps seeing full-res
+    // textures and needs no changes at all.
+    bool nr_small = false;
+    UINT nr_w = 0, nr_h = 0;
+    ID3D12Resource *nr_in = nullptr;    // NON_PIXEL_SHADER_RESOURCE at rest
+    ID3D12Resource *nr_out = nullptr;   // UNORDERED_ACCESS at rest
 };
 
 static VideoHeader g_video_options = {};
@@ -1494,11 +1511,35 @@ static bool CreateVideoTex(VideoTex &v, UINT w, UINT hgt, DXGI_FORMAT fmt, UINT 
         reinterpret_cast<void **>(&v.upload)));
 }
 
+// Defined below with the rest of the scaling pipeline; needed here because the
+// working textures cannot be created without it.
+static bool EnsureScalePipeline();
+
+// NS_NR_SMALL=1: run the network at the work resolution instead of the screen
+// resolution. Off by default while the picture is being compared side by side.
+static bool NrSmallRequested()
+{
+    static int cached = -1;
+    if (cached < 0)
+    {
+        char buf[8] = {};
+        const DWORD got = GetEnvironmentVariableA("NS_NR_SMALL", buf, sizeof(buf));
+        cached = (got > 0 && got < sizeof(buf) && buf[0] == '1') ? 1 : 0;
+    }
+    return cached == 1;
+}
+
 static bool CreateVideoResources(VideoState &v, UINT w, UINT hgt, UINT full_w = 0, UINT full_h = 0)
 {
     v.w = w; v.hgt = hgt;
     v.full_w = full_w; v.full_h = full_h;
     v.upscale = (full_w > 0 && full_h > 0 && (full_w != w || full_h != hgt));
+    // Only worth doing when the work resolution is actually smaller: at
+    // work == full there is nothing to scale and the two extra passes would
+    // be pure loss.
+    v.nr_small = v.upscale && NrSmallRequested();
+    v.nr_w = v.nr_small ? w : 0;
+    v.nr_h = v.nr_small ? hgt : 0;
     const UINT cw = v.upscale ? full_w : w;   // color texture: full-res in upscale mode
     const UINT ch = v.upscale ? full_h : hgt;
     if (!CreateVideoTex(v.color, cw, ch, DXGI_FORMAT_R8G8B8A8_UNORM, cw * 4) ||
@@ -1518,6 +1559,38 @@ static bool CreateVideoResources(VideoState &v, UINT w, UINT hgt, UINT full_w = 
     if (FAILED(h.dev->CreateCommittedResource(&def, D3D12_HEAP_FLAG_NONE, &td,
         D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr, __uuidof(ID3D12Resource),
         reinterpret_cast<void **>(&v.output)))) return false;
+
+    if (v.nr_small)
+    {
+        // The scaling pipeline is normally brought up by MOTS; here it is
+        // needed whether or not the client ever negotiated a motion size.
+        if (!EnsureScalePipeline()) { v.nr_small = false; }
+        else
+        {
+            D3D12_RESOURCE_DESC nd = td;
+            nd.Width = v.nr_w; nd.Height = v.nr_h;
+            const bool ok =
+                SUCCEEDED(h.dev->CreateCommittedResource(
+                    &def, D3D12_HEAP_FLAG_NONE, &nd,
+                    D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, nullptr,
+                    __uuidof(ID3D12Resource), reinterpret_cast<void **>(&v.nr_in))) &&
+                SUCCEEDED(h.dev->CreateCommittedResource(
+                    &def, D3D12_HEAP_FLAG_NONE, &nd,
+                    D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr,
+                    __uuidof(ID3D12Resource), reinterpret_cast<void **>(&v.nr_out)));
+            if (!ok)
+            {
+                Log("[nr] %ux%u working textures failed - staying at full resolution",
+                    v.nr_w, v.nr_h);
+                if (v.nr_in != nullptr) { v.nr_in->Release(); v.nr_in = nullptr; }
+                if (v.nr_out != nullptr) { v.nr_out->Release(); v.nr_out = nullptr; }
+                v.nr_small = false;
+            }
+            else
+                Log("[nr] network runs at %ux%u, scaled back to %ux%u",
+                    v.nr_w, v.nr_h, cw, ch);
+        }
+    }
 
     UINT64 total = 0;
     h.dev->GetCopyableFootprints(&td, 0, 1, 0, &v.out_fp, &v.out_rows, &v.out_row_size, &total);
@@ -1603,6 +1676,37 @@ static const char kScaleHlsl[] =
     "    gDst[id.xy] = lerp(lerp(v00, v10, f.x), lerp(v01, v11, f.x), f.y);\n"
     "}\n";
 
+// The same scaler for four-channel colour (RGBA8). Kept as a separate shader
+// rather than one generic float4 pass over both: the motion field is
+// R16G16_FLOAT, and a typed UAV has to match the resource format exactly.
+//
+// Used to run Neural Rendering on a smaller frame than the screen. The network
+// is same-resolution - it enhances, it does not upscale - so its cost tracks
+// the pixel count it is handed: measured 1.50 ms fixed + 1.51 ms per megapixel
+// on a 5070 Ti. Feeding it the work resolution and scaling the result back is
+// therefore worth about half the frame time at 4K.
+static const char kScaleHlsl4[] =
+    "Texture2D<float4>   gSrc : register(t0);\n"
+    "RWTexture2D<float4> gDst : register(u0);\n"
+    "cbuffer Sizes : register(b0) { uint gDstW; uint gDstH; uint gSrcW; uint gSrcH; };\n"
+    "[numthreads(8, 8, 1)]\n"
+    "void CSMain(uint3 id : SV_DispatchThreadID)\n"
+    "{\n"
+    "    if (id.x >= gDstW || id.y >= gDstH) return;\n"
+    "    float2 src = (float2(id.xy) + 0.5f) * float2(gSrcW, gSrcH)\n"
+    "                 / float2(gDstW, gDstH) - 0.5f;\n"
+    "    float2 f  = frac(src);\n"
+    "    int2   p0 = int2(floor(src));\n"
+    "    int2   hi = int2(gSrcW - 1, gSrcH - 1);\n"
+    "    int2   a  = clamp(p0,              int2(0, 0), hi);\n"
+    "    int2   b  = clamp(p0 + int2(1, 1), int2(0, 0), hi);\n"
+    "    float4 v00 = gSrc[int2(a.x, a.y)];\n"
+    "    float4 v10 = gSrc[int2(b.x, a.y)];\n"
+    "    float4 v01 = gSrc[int2(a.x, b.y)];\n"
+    "    float4 v11 = gSrc[int2(b.x, b.y)];\n"
+    "    gDst[id.xy] = lerp(lerp(v00, v10, f.x), lerp(v01, v11, f.x), f.y);\n"
+    "}\n";
+
 typedef HRESULT(WINAPI *PFN_D3DCompile_)(LPCVOID, SIZE_T, LPCSTR, const void *, void *,
                                          LPCSTR, LPCSTR, UINT, UINT, ID3DBlob **, ID3DBlob **);
 typedef HRESULT(WINAPI *PFN_D3D12SerializeRootSignature_)(const D3D12_ROOT_SIGNATURE_DESC *,
@@ -1614,6 +1718,12 @@ static ID3D12PipelineState  *g_scale_pso;
 static ID3D12DescriptorHeap *g_scale_heap;
 static ID3D12Resource       *g_scale_src_bound;   // which resources already have descriptors
 static ID3D12Resource       *g_scale_dst_bound;
+static ID3D12PipelineState  *g_scale4_pso;        // the RGBA8 variant, for colour
+static ID3D12DescriptorHeap *g_scale4_heap;
+static ID3D12Resource       *g_scale4_src_bound;   // slot 0: the downscale pair
+static ID3D12Resource       *g_scale4_dst_bound;
+static ID3D12Resource       *g_scale4_src_bound2;  // slot 1: the upscale pair
+static ID3D12Resource       *g_scale4_dst_bound2;
 static VideoTex              g_motion_small;      // motion field at flow resolution
 static UINT                  g_motion_w, g_motion_h;  // 0 = motion arrives at work resolution
 
@@ -1724,7 +1834,31 @@ static bool EnsureScalePipeline()
                                      reinterpret_cast<void **>(&g_scale_heap));
     if (FAILED(hr)) { Log("[scale] CreateDescriptorHeap failed 0x%08X", hr); return false; }
 
-    Log("[scale] compute pipeline ready (bilinear, clamp)");
+    // The colour variant. Same root signature - the layout does not depend on
+    // the texture format - so only the shader and a heap of its own are new.
+    ID3DBlob *code4 = nullptr;
+    hr = compile(kScaleHlsl4, sizeof(kScaleHlsl4) - 1, "scale4.hlsl", nullptr, nullptr,
+                 "CSMain", "cs_5_0", 0, 0, &code4, &errors);
+    if (FAILED(hr) || code4 == nullptr)
+    {
+        Log("[scale] colour shader compile failed 0x%08X: %s", hr,
+            errors ? static_cast<const char *>(errors->GetBufferPointer()) : "(no log)");
+        if (errors) errors->Release();
+        return false;
+    }
+    if (errors) errors->Release();
+    pd.CS.pShaderBytecode = code4->GetBufferPointer();
+    pd.CS.BytecodeLength = code4->GetBufferSize();
+    hr = h.dev->CreateComputePipelineState(&pd, __uuidof(ID3D12PipelineState),
+                                           reinterpret_cast<void **>(&g_scale4_pso));
+    code4->Release();
+    if (FAILED(hr)) { Log("[scale] colour pipeline failed 0x%08X", hr); return false; }
+    hd.NumDescriptors = 4;   // two SRV/UAV pairs: one to scale down, one up
+    hr = h.dev->CreateDescriptorHeap(&hd, __uuidof(ID3D12DescriptorHeap),
+                                     reinterpret_cast<void **>(&g_scale4_heap));
+    if (FAILED(hr)) { Log("[scale] colour descriptor heap failed 0x%08X", hr); return false; }
+
+    Log("[scale] compute pipeline ready (bilinear, clamp; motion and colour)");
     return true;
 }
 
@@ -1751,6 +1885,67 @@ static void BindScaleDescriptors(ID3D12Resource *src, ID3D12Resource *dst)
 
     g_scale_src_bound = src;
     g_scale_dst_bound = dst;
+}
+
+// Same idea for the colour pairs, on their own heap.
+//
+// Two slots, not one, and this is not an optimisation: a shader-visible
+// descriptor heap is read by the GPU when the dispatch runs, not when it is
+// recorded. The downscale and the upscale are recorded into the same command
+// list, so writing both pairs into the same two descriptors means the first
+// dispatch executes against the second pair's descriptors. That showed up as
+// a completely blank frame - the network was fed a texture nothing had ever
+// written to.
+static void BindScale4Descriptors(ID3D12Resource *src, ID3D12Resource *dst, UINT slot)
+{
+    ID3D12Resource **bound_src = (slot == 0) ? &g_scale4_src_bound : &g_scale4_src_bound2;
+    ID3D12Resource **bound_dst = (slot == 0) ? &g_scale4_dst_bound : &g_scale4_dst_bound2;
+    if (src == *bound_src && dst == *bound_dst) return;
+    const UINT stride = h.dev->GetDescriptorHandleIncrementSize(
+        D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+    D3D12_CPU_DESCRIPTOR_HANDLE cpu = g_scale4_heap->GetCPUDescriptorHandleForHeapStart();
+    cpu.ptr += static_cast<SIZE_T>(slot) * 2 * stride;
+
+    D3D12_SHADER_RESOURCE_VIEW_DESC sd = {};
+    sd.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    sd.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+    sd.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    sd.Texture2D.MipLevels = 1;
+    h.dev->CreateShaderResourceView(src, &sd, cpu);
+
+    D3D12_UNORDERED_ACCESS_VIEW_DESC ud = {};
+    ud.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    ud.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
+    cpu.ptr += stride;
+    h.dev->CreateUnorderedAccessView(dst, nullptr, &ud, cpu);
+
+    *bound_src = src;
+    *bound_dst = dst;
+}
+
+// Bilinear-scale one RGBA8 texture into another, inside an already open
+// command list. Barriers are the caller's: only it knows what these resources
+// were doing before and after, and guessing here would mean transitioning
+// twice on every frame.
+//
+// src must be in NON_PIXEL_SHADER_RESOURCE, dst in UNORDERED_ACCESS. slot
+// picks which descriptor pair to use - two dispatches in one list need two.
+static void ScaleColorInto(ID3D12Resource *src, UINT sw, UINT sh,
+                           ID3D12Resource *dst, UINT dw, UINT dh, UINT slot)
+{
+    BindScale4Descriptors(src, dst, slot);
+    const UINT stride = h.dev->GetDescriptorHandleIncrementSize(
+        D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+    ID3D12DescriptorHeap *heaps[] = { g_scale4_heap };
+    h.list->SetDescriptorHeaps(1, heaps);
+    h.list->SetComputeRootSignature(g_scale_rs);
+    h.list->SetPipelineState(g_scale4_pso);
+    const UINT sizes[4] = { dw, dh, sw, sh };
+    h.list->SetComputeRoot32BitConstants(0, 4, sizes, 0);
+    D3D12_GPU_DESCRIPTOR_HANDLE gpu = g_scale4_heap->GetGPUDescriptorHandleForHeapStart();
+    gpu.ptr += static_cast<UINT64>(slot) * 2 * stride;
+    h.list->SetComputeRootDescriptorTable(1, gpu);
+    h.list->Dispatch((dw + 7) / 8, (dh + 7) / 8, 1);
 }
 
 // Open the "motion arrives downscaled" path. 0x0 closes it.
@@ -2533,19 +2728,40 @@ static void ReadEvalGpuTime()
 static bool EvaluateVideo(VideoState &v, int reset)
 {
     if (!BeginCommands()) return false;
-    const bool ts = PhaseEnabled() && EnsureTimestamps();
-    if (ts) h.list->EndQuery(g_ts_heap, D3D12_QUERY_TYPE_TIMESTAMP, 0);
     const UINT cw = v.upscale ? v.full_w : v.w;
     const UINT ch = v.upscale ? v.full_h : v.hgt;
+    // What the network is actually handed. In nr_small mode that is the work
+    // resolution, and colour has to be scaled down into nr_in first.
+    const UINT nw = v.nr_small ? v.nr_w : cw;
+    const UINT nh = v.nr_small ? v.nr_h : ch;
+    if (v.nr_small)
+    {
+        D3D12_RESOURCE_BARRIER to_uav = Transition(
+            v.nr_in, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+            D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        h.list->ResourceBarrier(1, &to_uav);
+        ScaleColorInto(v.color.tex, cw, ch, v.nr_in, nw, nh, 0);
+        D3D12_RESOURCE_BARRIER to_srv = Transition(
+            v.nr_in, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+            D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        h.list->ResourceBarrier(1, &to_srv);
+    }
+    // The timestamps go around the network alone: the scaling passes are our
+    // own cost, and folding them into "eval on GPU" would make the number
+    // incomparable with every measurement taken so far.
+    const bool ts = PhaseEnabled() && EnsureTimestamps();
+    if (ts) h.list->EndQuery(g_ts_heap, D3D12_QUERY_TYPE_TIMESTAMP, 0);
+    ID3D12Resource *nr_color = v.nr_small ? v.nr_in : v.color.tex;
+    ID3D12Resource *nr_result = v.nr_small ? v.nr_out : v.output;
     h.params->Reset();
-    h.params->Set("DLSSNR.Color", v.color.tex); h.params->Set("DLSSNR.Output", v.output);
+    h.params->Set("DLSSNR.Color", nr_color); h.params->Set("DLSSNR.Output", nr_result);
     h.params->Set("DLSSNR.MVec", v.mv.tex);
     h.params->Set("DLSSNR.ColorSubrectBaseX", 0u); h.params->Set("DLSSNR.ColorSubrectBaseY", 0u);
-    h.params->Set("DLSSNR.ColorSubrectWidth", cw); h.params->Set("DLSSNR.ColorSubrectHeight", ch);
+    h.params->Set("DLSSNR.ColorSubrectWidth", nw); h.params->Set("DLSSNR.ColorSubrectHeight", nh);
     h.params->Set("DLSSNR.MVecSubrectBaseX", 0u); h.params->Set("DLSSNR.MVecSubrectBaseY", 0u);
     h.params->Set("DLSSNR.MVecSubrectWidth", v.w); h.params->Set("DLSSNR.MVecSubrectHeight", v.hgt);
     h.params->Set("DLSSNR.OutputSubrectBaseX", 0u); h.params->Set("DLSSNR.OutputSubrectBaseY", 0u);
-    h.params->Set("DLSSNR.OutputSubrectWidth", cw); h.params->Set("DLSSNR.OutputSubrectHeight", ch);
+    h.params->Set("DLSSNR.OutputSubrectWidth", nw); h.params->Set("DLSSNR.OutputSubrectHeight", nh);
     h.params->Set("DLSSNR.MVecScaleX", 1.0f); h.params->Set("DLSSNR.MVecScaleY", 1.0f);
     h.params->Set("DLSSNR.Enabled", 1u); h.params->Set("DLSSNR.Reset", reset);
     h.params->Set("DLSSNR.Intensity", g_video_options.intensity);
@@ -2562,12 +2778,25 @@ static bool EvaluateVideo(VideoState &v, int reset)
     __except (EXCEPTION_EXECUTE_HANDLER) { code = GetExceptionCode(); }
     g_last_eval_result = static_cast<uint32_t>(result);
     if (code != 0) { AbortCommands(); Log("[pure] direct evaluate exception 0x%08X", code); return false; }
-    if (ts)
+    if (ts) h.list->EndQuery(g_ts_heap, D3D12_QUERY_TYPE_TIMESTAMP, 1);
+    if (v.nr_small)
     {
-        h.list->EndQuery(g_ts_heap, D3D12_QUERY_TYPE_TIMESTAMP, 1);
+        // The result is work-sized; stretch it into the full-res output the
+        // rest of the pipeline expects. output stays UNORDERED_ACCESS, which
+        // is exactly what the compute pass writes to.
+        D3D12_RESOURCE_BARRIER to_srv = Transition(
+            v.nr_out, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+            D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        h.list->ResourceBarrier(1, &to_srv);
+        ScaleColorInto(v.nr_out, nw, nh, v.output, cw, ch, 1);
+        D3D12_RESOURCE_BARRIER back = Transition(
+            v.nr_out, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+            D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        h.list->ResourceBarrier(1, &back);
+    }
+    if (ts)
         h.list->ResolveQueryData(g_ts_heap, D3D12_QUERY_TYPE_TIMESTAMP, 0, 2,
                                  g_ts_readback, 0);
-    }
     const UINT64 fence = EndCommands();
     if (NVSDK_NGX_FAILED(result)) { Log("[pure] direct evaluate failed 0x%08X (%s)", result, NgxResultName(result)); return false; }
     ++g_eval_count;
@@ -2858,6 +3087,13 @@ static void ReleaseVideoTextures(VideoState &v)
     if (v.mv.upload != nullptr) { v.mv.upload->Release(); v.mv.upload = nullptr; }
     if (v.output != nullptr) { v.output->Release(); v.output = nullptr; }
     if (v.readback != nullptr) { v.readback->Release(); v.readback = nullptr; }
+    // The descriptors point at these resources; after a release they must be
+    // reissued or the next frame samples freed memory.
+    g_scale4_src_bound = g_scale4_dst_bound = nullptr;
+    g_scale4_src_bound2 = g_scale4_dst_bound2 = nullptr;
+    if (v.nr_in != nullptr) { v.nr_in->Release(); v.nr_in = nullptr; }
+    if (v.nr_out != nullptr) { v.nr_out->Release(); v.nr_out = nullptr; }
+    v.nr_small = false;
     v.inputs_ready = false;
 }
 
@@ -2986,8 +3222,12 @@ static int RunVideo()
     int flags = NVSDK_NGX_DLSS_Feature_Flags_MVLowRes | NVSDK_NGX_DLSS_Feature_Flags_AutoExposure |
                 NVSDK_NGX_DLSS_Feature_Flags_DepthInverted;
     NVSDK_NGX_Result create_result = NVSDK_NGX_Result_Fail;
+    // In nr_small mode the feature is created at the work resolution and told
+    // nothing about the screen: it is handed a work-sized frame and returns a
+    // work-sized one, and the scaling on both sides is ours.
     if (!CreateFeature(vh.width, vh.height, flags, &create_result,
-                       upscale ? vh.full_w : 0, upscale ? vh.full_h : 0)) return 4;
+                       (v.nr_small || !upscale) ? 0 : vh.full_w,
+                       (v.nr_small || !upscale) ? 0 : vh.full_h)) return 4;
 
     VideoFrameHeader fh = {};
     std::vector<BYTE> color, mv, output;
@@ -3067,7 +3307,9 @@ static int RunVideo()
                 if (!WriteExact(stdout, &bad, sizeof(bad))) return 3;
             }
             NVSDK_NGX_Result rr = NVSDK_NGX_Result_Fail;
-            if (!CreateFeature(rc.width, rc.height, flags, &rr, rup ? rc.full_w : 0, rup ? rc.full_h : 0))
+            if (!CreateFeature(rc.width, rc.height, flags, &rr,
+                               (v.nr_small || !rup) ? 0 : rc.full_w,
+                               (v.nr_small || !rup) ? 0 : rc.full_h))
             {
                 Log("[video] RNSZ: feature create failed at %ux%u", rc.width, rc.height);
                 VideoResizeAck bad = { RESIZE_ACK_MAGIC, 0u, static_cast<uint32_t>(rr), 0u, fh.pts };

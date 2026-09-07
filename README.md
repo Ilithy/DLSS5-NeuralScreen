@@ -99,6 +99,8 @@ sections:
 - **processing** — NR on/off with its key, profile (Faithful / Natural /
   Strong / Extreme) and the four NR parameters
 - **comparison** — the before/after wipe
+- **speed** — process at a reduced resolution, and the resolution
+  the network runs at. Off by default: faster, softer — see Performance
 - **appearance** — language and theme as two-way switches rather than
   dropdowns; a dropdown for two values is an extra click for nothing
 
@@ -216,7 +218,8 @@ not.
 | `width`, `height` | output resolution (**actual monitor resolution is used automatically when config is stale**) |
 | `fullscreen` | borderless fullscreen window |
 | `warmup` | NGX warmup frames at start |
-| `work_scale` | 0.25–1.0, NGX processing resolution relative to output. **Higher is free** — see Performance |
+| `work_scale` | 0.25–1.0, the resolution the network runs at, relative to the screen. Only has an effect with `nr_small` on |
+| `nr_small` | process at a reduced resolution and scale the result back up: faster, softer. Default `false` |
 | `profile` | `Faithful`, `Natural`, `Strong / Cinematic`, `Extreme / Overdrive` |
 | `intensity`, `local_tone`, `local_structure`, `skin_structure` | `null` = take from profile |
 | `lang` | `ru` / `en` |
@@ -363,11 +366,50 @@ fixed internal resolution". That was wrong, and wrong in an instructive way:
 it came from varying only `work_scale` at a single desktop resolution, which
 by construction cannot see a dependence on the frame size.
 
-Consequences: on a 4K desktop the floor is 15.7 ms of NGX per frame, i.e.
-about 57 FPS worker-side and 47 end to end, and no amount of plumbing work
-gets near a 144 Hz panel. On 2560×1600 the same floor is 8.0 ms. If you want
-more frames, lower the **desktop** resolution — the work slider will not do
-it.
+Consequences: in this mode a 4K desktop pays a floor of 15.7 ms of NGX per
+frame, about 47 FPS end to end, and no amount of plumbing gets near a 144 Hz
+panel. On 2560×1600 the same floor is 8.0 ms.
+
+### Processing at a reduced resolution
+
+That floor is not a law, though. The network is **same-resolution — it
+enhances, it does not upscale**, so its cost tracks the pixel count it is
+handed, and "upscaling" mode hands it the whole screen. Measured in isolation
+by feeding the worker different frame sizes directly:
+
+```
+work          MPix   eval GPU
+1280x720      0.92    2.90 ms
+1920x1080     2.07    4.60 ms
+2560x1440     3.69    7.10 ms
+```
+
+Fit: `eval = 1.50 ms + 1.51 ms/MPix`, which also predicts the two numbers
+above (14.0 ms at 4K, 7.7 ms at 2560×1600) and matches what the
+[neural-upstream](https://github.com/matiasLombo/neural-upstream) add-on
+measures for the same network in games.
+
+So **Process at reduced resolution** (menu → speed, `"nr_small"` in
+`config.json`) scales the frame down to the work resolution, runs the network
+there, and scales the result back up. On a 4K desktop, work at the 2560×1440
+cap:
+
+```
+                 eval GPU    FPS
+full screen       16.05     42.9
+reduced            7.25     65.3
+```
+
+**Off by default**, and deliberately so: it is 52% faster and visibly softer,
+because a plain bilinear upscale gives back none of the detail the network
+just added. In a game the add-on above gets away with the same trick because
+the game's own DLSS Super Resolution does the upscaling; on a desktop there is
+no such thing. Turn it on, look at your own screen, decide.
+
+With it on, **Work scale** finally does something — it is the resolution the
+network actually sees. With it off the slider is inert, which is exactly what
+the measurements at the top of this section were showing all along.
+
 
 ## Before / after wipe
 

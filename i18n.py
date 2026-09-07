@@ -1,26 +1,29 @@
-"""Строки интерфейса и фирменная палитра — общие для всех окон.
+"""Interface strings and the brand palette - shared by every window.
 
-Вынесено из settings_ui, потому что то же самое нужно оверлейному меню,
-а settings_ui тянет tkinter. Единственный источник правды: правки строк и
-цветов делаются здесь.
+Split out of settings_ui because the overlay menu needs exactly the same
+things and settings_ui drags tkinter along. The single source of truth: string
+and colour edits happen here.
+
+The Russian below is the localization itself, which is the one place in the
+project where Russian belongs.
 """
 
 from __future__ import annotations
 
-# --- Фирменная палитра ---------------------------------------------------
-BG = "#0D1117"            # тёмный фон
-PANEL = "#161B22"         # поля ввода / комбобоксы
-BORDER = "#30363D"        # разделители, рамки
-ACCENT = "#FFBF00"        # янтарный акцент
-ACCENT_HOVER = "#FFD24D"  # акцент при наведении
-TEXT = "#E6EDF3"          # основной текст
-MUTED = "#8B949E"         # приглушённый текст
-DANGER = "#F85149"        # выход: действие необратимое, выделяем цветом
+# --- Brand palette --------------------------------------------------------
+BG = "#0D1117"            # dark background
+PANEL = "#161B22"         # input fields / combo boxes
+BORDER = "#30363D"        # separators, borders
+ACCENT = "#FFBF00"        # amber accent
+ACCENT_HOVER = "#FFD24D"  # accent on hover
+TEXT = "#E6EDF3"          # main text
+MUTED = "#8B949E"         # muted text
+DANGER = "#F85149"        # quit: an irreversible action, marked by colour
 DANGER_HOVER = "#3D1D1D"
 
 DEFAULT_LANG = "en"
 
-# --- Локализация: ВСЕ строки UI + HUD/алертов ----------------------------
+# --- Localization: EVERY UI + HUD/alert string ---------------------------
 STRINGS = {
     "en": {
         "theme": "Theme",
@@ -34,6 +37,7 @@ STRINGS = {
         "split": "Before / after wipe",
         "sec_processing": "processing",
         "sec_compare": "comparison",
+        "sec_speed": "speed",
         "sec_view": "appearance",
         "sec_capture": "capture",
         "sec_behaviour": "behaviour",
@@ -57,13 +61,14 @@ STRINGS = {
         "gpu_wait": "checking...",
         "split_hint": "share of the frame left unprocessed; 0 — off",
         "off": "off",
+        "nr_small": "Process at reduced resolution",
         "github_opened": "Opened in browser",
         "started": "NeuralScreen is running · F8 for menu",
         "hotkeys": "F9 NR · F8 menu · Insert record · Ctrl+Alt+Q quit",
         "title": "NeuralScreen",
         "settings_title": "Settings",
         "work_scale": "Work scale",
-        "work_scale_hint": "higher = sharper, FPS unaffected",
+        "work_scale_hint": "only while the setting above is on: lower = faster and softer",
         "profile": "Profile",
         "intensity": "Intensity",
         "local_tone": "Local tone",
@@ -97,6 +102,7 @@ STRINGS = {
         "split": "Шторка до / после",
         "sec_processing": "обработка",
         "sec_compare": "сравнение",
+        "sec_speed": "скорость",
         "sec_view": "вид",
         "sec_capture": "захват",
         "sec_behaviour": "поведение",
@@ -120,13 +126,14 @@ STRINGS = {
         "gpu_wait": "проверяется...",
         "split_hint": "доля кадра без обработки; 0 — выключено",
         "off": "выкл",
+        "nr_small": "Обрабатывать в пониженном разрешении",
         "github_opened": "Открыто в браузере",
         "started": "NeuralScreen работает · F8 — меню",
         "hotkeys": "F9 NR · F8 меню · Insert запись · Ctrl+Alt+Q выход",
         "title": "NeuralScreen",
         "settings_title": "Настройки",
         "work_scale": "Масштаб обработки",
-        "work_scale_hint": "выше = чётче, на FPS не влияет",
+        "work_scale_hint": "только при включённой настройке выше: ниже = быстрее и мягче",
         "profile": "Профиль",
         "intensity": "Интенсивность",
         "local_tone": "Локальный тон",
@@ -152,5 +159,5 @@ STRINGS = {
 
 
 def tr(lang: str, key: str) -> str:
-    """Перевести ключ STRINGS; неизвестный ключ вернуть как есть."""
+    """Translate a STRINGS key; an unknown key comes back unchanged."""
     return STRINGS.get(lang, STRINGS[DEFAULT_LANG]).get(key, key)

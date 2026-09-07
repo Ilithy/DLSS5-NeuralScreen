@@ -21,5 +21,6 @@
   ],
   "open_menu_on_start": true,
   "split": 0.0,
-  "record_audio": true
+  "record_audio": true,
+  "nr_small": false
 }
