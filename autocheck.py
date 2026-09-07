@@ -52,7 +52,7 @@ def zip_integrity():
     required = [
         "main.py", "gpuinfo.py", "overlay_ui.py", "i18n.py", "recorder.py",
         "display.py", "guides.py", "hotkeys.py", "tray.py", "capture.py",
-        "audio.py",
+        "audio.py", "NeuralScreen.exe",
         "README.md", "README.ru.md", "NeuralScreen.vbs", "NeuralScreen.bat",
         "native/nvngx.dll", "native/nvngx_dlssnr.dll",
         "runtime/pythonw.exe", "docs/menu-light.png", "docs/menu-dark.png",

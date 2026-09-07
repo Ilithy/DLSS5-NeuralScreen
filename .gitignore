@@ -5,9 +5,11 @@ _work/
 __pycache__/
 *.pyc
 
-# Worker build artefacts (built by native/build-host.bat)
+# Build artefacts (native/build-host.bat, native/build-launcher.bat)
 *.obj
 native/nvngx.dll
+native/launcher.res
+NeuralScreen.exe
 
 # NVIDIA redistributable: 165 MB, over the GitHub file limit (100 MB).
 # How to get it - see README.md, the Requirements section.
