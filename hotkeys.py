@@ -32,6 +32,7 @@ MOD_CONTROL = 0x0002
 MOD_SHIFT = 0x0004
 MOD_NOREPEAT = 0x4000  # удержание клавиши не сыплет повторами
 
+VK_F7 = 0x76
 VK_F8 = 0x77
 VK_F9 = 0x78
 VK_UP = 0x26
@@ -51,6 +52,10 @@ DEFAULT_BINDINGS = {
     4: (MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, VK_DOWN, "scale_down", "Ctrl+Alt+Down"),
     5: (MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, VK_Q, "quit", "Ctrl+Alt+Q"),
     6: (MOD_NOREPEAT, VK_INSERT, "record", "Insert"),
+    # Скриншот жил только кнопкой в меню, и подписать её было нечем.
+    # F7 — рядом с F8/F9 и свободна. PrtScr не берём: её перехватывает
+    # «Набросок на фрагменте», RegisterHotKey на неё может не встать.
+    7: (MOD_NOREPEAT, VK_F7, "screenshot_menu", "F7"),
 }
 
 # Имя клавиши -> VK (для парсинга config)
