@@ -229,11 +229,14 @@ struct NvArchInfo
 using PFN_NvQueryInterface = void *(__cdecl *)(unsigned);
 using PFN_NvGetArchInfo = int (__cdecl *)(void *, NvArchInfo *);
 
-static PFN_NvGetArchInfo g_arch_real;
-static BYTE              g_arch_saved[12];
+// Ответы кэшируются на старте, до установки патча: архитектура GPU не
+// меняется за время работы процесса, а кэш убирает саму причину гонки —
+// хуку больше незачем снимать пролог, чтобы позвать настоящую функцию.
+static const int         kArchMaxGpus = 64;
+static void             *g_arch_handles[kArchMaxGpus];
+static NvArchInfo        g_arch_cache[kArchMaxGpus];
+static int               g_arch_count;
 static bool              g_arch_patched;
-static CRITICAL_SECTION  g_arch_lock;
-static bool              g_arch_lock_ready;
 static unsigned          g_arch_real_group;   // что было на самом деле
 
 static int __cdecl ArchInfoHook(void *gpu, NvArchInfo *info);
@@ -250,46 +253,47 @@ static bool WriteCode(void *at, const void *src, size_t bytes)
 }
 
 // mov rax, imm64 ; jmp rax
+static void *g_arch_target;
+
 static bool ArchApplyPatch()
 {
     BYTE code[12] = { 0x48, 0xB8 };
     void *dst = reinterpret_cast<void *>(&ArchInfoHook);
     memcpy(code + 2, &dst, sizeof(dst));
     code[10] = 0xFF; code[11] = 0xE0;
-    if (!WriteCode(reinterpret_cast<void *>(g_arch_real), code, sizeof(code)))
+    if (!WriteCode(g_arch_target, code, sizeof(code)))
         return false;
     g_arch_patched = true;
     return true;
 }
 
-static void ArchRemovePatch()
-{
-    if (WriteCode(reinterpret_cast<void *>(g_arch_real), g_arch_saved,
-                  sizeof(g_arch_saved)))
-        g_arch_patched = false;
-}
-
 static int __cdecl ArchInfoHook(void *gpu, NvArchInfo *info)
 {
-    int rc = -1;   // NVAPI_ERROR
-    if (g_arch_lock_ready) EnterCriticalSection(&g_arch_lock);
-    if (g_arch_real != nullptr)
+    if (info == nullptr) return -1;              // NVAPI_ERROR
+    for (int i = 0; i < g_arch_count; ++i)
     {
-        ArchRemovePatch();
-        rc = g_arch_real(gpu, info);
-        ArchApplyPatch();
+        if (g_arch_handles[i] != gpu) continue;
+        // Версию структуры оставляем ту, что запросил вызывающий: V1 и V2
+        // отличаются только этим полем, размер один и тот же.
+        const unsigned want = info->version;
+        *info = g_arch_cache[i];
+        info->version = want;
+        const unsigned group = info->architecture & 0xFFFFFFF0u;
+        if (group == NV_ARCH_TURING || group == NV_ARCH_AMPERE
+            || group == NV_ARCH_ADA)
+        {
+            // Врём согласованно: implementation/revision сняты с живой
+            // RTX 5070 Ti — проверка может смотреть не только на группу.
+            info->architecture   = NV_ARCH_BLACKWELL;
+            info->implementation = 0x3u;
+            info->revision       = 0xA1u;
+        }
+        return 0;                                 // NVAPI_OK
     }
-    if (g_arch_lock_ready) LeaveCriticalSection(&g_arch_lock);
-    if (rc != 0 || info == nullptr) return rc;
-    const unsigned group = info->architecture & 0xFFFFFFF0u;
-    if (group != NV_ARCH_TURING && group != NV_ARCH_AMPERE && group != NV_ARCH_ADA)
-        return rc;
-    // Врём согласованно: значения implementation/revision сняты с живой
-    // RTX 5070 Ti, потому что проверка может смотреть не только на группу.
-    info->architecture   = NV_ARCH_BLACKWELL;
-    info->implementation = 0x3u;
-    info->revision       = 0xA1u;
-    return rc;
+    // Хендл, которого не было при перечислении. Позвать настоящую функцию
+    // нельзя — её пролог занят нами, а снимать его на лету значит вернуть
+    // ту самую гонку. Честная ошибка лучше выдуманного ответа.
+    return -1;
 }
 
 static bool ArchSpoofRequested()
@@ -322,36 +326,55 @@ static int SetupArchSpoof()
     { Log("[arch] функции nvapi не разрешились по id"); return -1; }
     if (init() != 0) { Log("[arch] NvAPI_Initialize не прошёл"); return -1; }
 
-    void *handles[64] = {};
+    void *handles[kArchMaxGpus] = {};
     unsigned count = 0;
     if (enum_gpus(handles, &count) != 0 || count == 0)
     { Log("[arch] список GPU не получен"); return -1; }
+    if (count > static_cast<unsigned>(kArchMaxGpus)) count = kArchMaxGpus;
 
-    NvArchInfo info = {};
-    info.version = static_cast<unsigned>(sizeof(NvArchInfo)) | (2u << 16);
-    if (get_arch(handles[0], &info) != 0)
+    // Снимаем ответы для ВСЕХ карт до патча: после него настоящую функцию
+    // уже не позвать, а отвечать хуку надо на любой хендл.
+    g_arch_count = 0;
+    for (unsigned i = 0; i < count; ++i)
     {
-        info.version = static_cast<unsigned>(sizeof(NvArchInfo)) | (1u << 16);
-        if (get_arch(handles[0], &info) != 0)
-        { Log("[arch] GetArchInfo не ответил"); return -1; }
+        NvArchInfo one = {};
+        one.version = static_cast<unsigned>(sizeof(NvArchInfo)) | (2u << 16);
+        if (get_arch(handles[i], &one) != 0)
+        {
+            one.version = static_cast<unsigned>(sizeof(NvArchInfo)) | (1u << 16);
+            if (get_arch(handles[i], &one) != 0) continue;
+        }
+        g_arch_handles[g_arch_count] = handles[i];
+        g_arch_cache[g_arch_count] = one;
+        ++g_arch_count;
     }
+    if (g_arch_count == 0)
+    { Log("[arch] GetArchInfo не ответил ни по одной карте"); return -1; }
+
+    const NvArchInfo info = g_arch_cache[0];
     g_arch_real_group = info.architecture & 0xFFFFFFF0u;
-    if (g_arch_real_group >= NV_ARCH_BLACKWELL)
+    // NS_ARCH_FORCE=1 ставит патч даже там, где он не нужен. Нужен для
+    // проверки: на Blackwell хук иначе не исполняется ни разу, и убедиться,
+    // что он вообще отвечает, было бы негде. На такой карте подмены не
+    // происходит — хук отдаёт закэшированные настоящие значения.
+    char force[8] = {};
+    const DWORD force_got = GetEnvironmentVariableA("NS_ARCH_FORCE", force,
+                                                    sizeof(force));
+    const bool forced = force_got > 0 && force_got < sizeof(force)
+                        && force[0] == '1';
+    if (g_arch_real_group >= NV_ARCH_BLACKWELL && !forced)
     {
         Log("[arch] архитектура 0x%X и так поддерживается — подмена не нужна",
             info.architecture);
         return 0;
     }
 
-    if (!g_arch_lock_ready)
-    { InitializeCriticalSection(&g_arch_lock); g_arch_lock_ready = true; }
-    g_arch_real = get_arch;
-    memcpy(g_arch_saved, reinterpret_cast<const void *>(get_arch),
-           sizeof(g_arch_saved));
+    g_arch_target = reinterpret_cast<void *>(get_arch);
     if (!ArchApplyPatch())
     { Log("[arch] не удалось поставить патч, err=%lu", GetLastError()); return -1; }
-    Log("[arch] подмена включена: 0x%X -> 0x%X (NS_ARCH_SPOOF=1)",
-        info.architecture, NV_ARCH_BLACKWELL);
+    Log("[arch] патч установлен: %d карт в кэше, архитектура 0x%X%s",
+        g_arch_count, info.architecture,
+        forced ? " (NS_ARCH_FORCE=1, подмены не будет)" : " -> 0x1B0");
     return 1;
 }
 
