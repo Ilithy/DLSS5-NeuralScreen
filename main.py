@@ -351,6 +351,10 @@ def _drain_stderr(worker, logs: list[str], stop: threading.Event) -> None:
                 break
             line = raw.decode("utf-8", "replace").rstrip()
             logs.append(line)
+            # Список растёт неограниченно (NS_PHASE=1 добавляет строку на
+            # кадр) — все потребители читают только хвост, держим 2000.
+            if len(logs) > 2000:
+                del logs[: len(logs) - 2000]
             # Лог воркера — в общий лог, но только когда включён профилировщик
             # (NS_PHASE=1): иначе он оседает в буфере и виден лишь когда
             # что-то упало. Кроме замеров фаз пропускаем и [pure]/[host]:
@@ -1304,8 +1308,10 @@ def main() -> int:
                 if "feature 18 ready" in line:
                     gpu_ok = True
                     return
-                if ("feature 18 create failed" in line
-                        or "Unsupported GPU architecture" in line):
+                # Реальная строка отказа воркера — «[pure] direct feature 18
+                # create failed»; «Unsupported GPU architecture» живёт внутри
+                # nvngx_dlssnr.dll и в stderr воркера не попадает.
+                if "feature 18 create failed" in line:
                     gpu_ok = False
                     return
 
@@ -1441,6 +1447,9 @@ def main() -> int:
                         shot_dir = BASE_DIR / "screenshots"
                         shot_dir.mkdir(exist_ok=True)
                         stamp = time.strftime("%Y%m%d-%H%M%S")
+                        # Два скриншота в одну секунду не должны перезаписывать
+                        # друг друга — добавляем миллисекунды.
+                        stamp = f"{stamp}-{time.time() % 1 * 1000:03.0f}"
                         shot_path = shot_dir / f"neuralscreen-{stamp}.jpg"
                         if present_mode:
                             pending_shot = shot_path
@@ -1457,6 +1466,9 @@ def main() -> int:
                             rec_dir = BASE_DIR / "recordings"
                             rec_dir.mkdir(exist_ok=True)
                             stamp = time.strftime("%Y%m%d-%H%M%S")
+                            # Две записи в одну секунду не должны перезаписывать
+                            # друг друга — добавляем миллисекунды.
+                            stamp = f"{stamp}-{time.time() % 1 * 1000:03.0f}"
                             path = str(rec_dir / f"neuralscreen-{stamp}.mp4")
                             try:
                                 recorder = VideoRecorder(path, width, height, fps=60)
@@ -1567,6 +1579,14 @@ def main() -> int:
                 else:
                     guide = guides.process(work_frame)
                 _perf("guides", t0)
+            except Exception as guide_exc:
+                # guides — не критичен: ValueError/TypeError/cv2.error (форма
+                # gray-кадра, деление на ноль) не должны валить процесс.
+                # Пропускаем кадр — воркер получит следующий.
+                print(f"[main] guides.process упал ({guide_exc}) — кадр пропущен",
+                      file=sys.stderr)
+                continue
+            try:
                 check_worker(worker, worker_logs)
                 t0 = time.perf_counter()
                 send_frame(worker, frame_index, work_frame, guide.motion, guide.reset,

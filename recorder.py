@@ -104,7 +104,12 @@ class VideoRecorder:
         проигрывается ускоренно. Гарантируем строгую монотонность.
         """
         if rgba.shape[0] != self.height or rgba.shape[1] != self.width:
-            return  # режим дисплея сменился — кадры другой формы пропустить
+            # Режим дисплея сменился — кадры другой формы. Молча пропускать
+            # нельзя: запись «тихо» пишет пустоту. Исключение останавливает
+            # запись (main.py: recorder.close() + recorder = None).
+            raise ValueError(
+                f"display mode changed: frame {rgba.shape[1]}x{rgba.shape[0]} "
+                f"!= recorder {self.width}x{self.height}")
         frame = av.VideoFrame.from_ndarray(rgba, format="rgba")
         # Цветовые теги ОБЯЗАТЕЛЬНО на кадре, а не только на потоке:
         # swscale при конвертации RGBA->yuv420p берёт матрицу из кадра,
