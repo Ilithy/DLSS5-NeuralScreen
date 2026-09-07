@@ -11,6 +11,9 @@
 
 from __future__ import annotations
 
+import queue
+import sys
+import threading
 import time
 from fractions import Fraction
 
@@ -20,7 +23,25 @@ import numpy as np
 
 class VideoRecorder:
     """Пишет кадры в MP4 (av1_nvenc). Создаётся на старте записи, закрывается
-    по Insert/выходу. НЕ потокобезопасен — вызывается только из main-цикла."""
+    по Insert/выходу. write()/close() зовутся только из main-цикла.
+
+    Кодирование идёт в своём потоке. Замер на 4K показал, что синхронный
+    write() стоил 19.9 мс на кадр — перевод RGBA->yuv420p и отправка в nvenc
+    на CPU — и ронял конвейер с 56 до 21 FPS. От битрейта это не зависело:
+    время съедало цветовое преобразование, а не кодер.
+
+    Кадр отдаётся потоку по ссылке, без копии: воркер присылает каждый кадр
+    в свежем буфере (WorkerReader.recv -> np.frombuffer поверх нового bytes),
+    и main-цикл его больше не меняет — только читает для показа и скриншота.
+    """
+
+    #: Сколько кадров ждёт кодировщика. Больше — больше памяти (на 4K это
+    #: 33 МБ на кадр), меньше — раньше начнём терять кадры на всплесках.
+    QUEUE_DEPTH = 4
+    #: Сколько ждать место в очереди, прежде чем выбросить кадр. Ронять
+    #: конвейер ради записи нельзя: пользователь смотрит на экран, а не в
+    #: файл. Пропуск кадра на времени не отражается — pts от часов.
+    PUT_TIMEOUT_S = 0.25
 
     #: Битрейт и параметры кодировщика вынесены в атрибуты класса, чтобы их
     #: можно было менять без правки конструктора (замеры, эксперименты).
@@ -40,6 +61,10 @@ class VideoRecorder:
         self.width = width
         self.height = height
         self.fps = fps
+        self.dropped = 0
+        self._queue: queue.Queue = queue.Queue(maxsize=self.QUEUE_DEPTH)
+        self._thread: threading.Thread | None = None
+        self._encode_error: BaseException | None = None
         self._container = av.open(path, mode="w")
         self._stream = self._container.add_stream("av1_nvenc", rate=int(round(fps)))
         self._stream.width = width
@@ -66,7 +91,7 @@ class VideoRecorder:
             self._stream.color_primaries = 1    # AVCOL_PRI_BT709
             self._stream.color_trc = 13         # AVCOL_TRC_IEC61966_2_1 = sRGB
         except Exception as exc:
-            print(f"[record] color metadata failed: {exc}", file=__import__("sys").stderr)
+            print(f"[record] color metadata failed: {exc}", file=sys.stderr)
         # NVENC: битрейт 50 Мбит/с — запаса качества для интерфейса/текста
         # (пользовательский выбор). «Рассыпание» картинки на длинных
         # прогонах лечится НЕ только битрейтом, а коротким GOP и без
@@ -82,7 +107,7 @@ class VideoRecorder:
             self._stream.gop_size = max(30, int(round(fps)) * 2)  # keyframe раз в 2 с
             self._stream.max_b_frames = 0
         except Exception as exc:
-            print(f"[record] encoder params failed: {exc}", file=__import__("sys").stderr)
+            print(f"[record] encoder params failed: {exc}", file=sys.stderr)
         # Опции кодировщика идут строками через options — атрибутов
         # max_bit_rate/rc_buffer_size у PyAV не существует.
         if self.ENCODER_OPTIONS:
@@ -90,18 +115,34 @@ class VideoRecorder:
                 self._stream.options = dict(self.ENCODER_OPTIONS)
             except Exception as exc:
                 print(f"[record] encoder options failed: {exc}",
-                      file=__import__("sys").stderr)
+                      file=sys.stderr)
         self._frame_idx = 0
         self.written = 0
         self._started = time.perf_counter()
 
+    def _encode_loop(self) -> None:
+        """Единственный владелец контейнера, пока запись идёт."""
+        while True:
+            item = self._queue.get()
+            if item is None:
+                return
+            pts, rgba = item
+            try:
+                self._encode_one(pts, rgba)
+            except BaseException as exc:   # noqa: BLE001 — донесём в main
+                self._encode_error = exc
+                print(f"[record] кодирование прервано: {exc}", file=sys.stderr)
+                return
+
     def write(self, rgba: np.ndarray) -> None:
-        """Закодировать один кадр (RGBA8 full-res, 4 канала).
+        """Поставить кадр в очередь кодировщика (RGBA8 full-res, 4 канала).
 
         PTS строим от РЕАЛЬНОГО времени записи, а не от счётчика кадров:
         кадры приходят с фактическим fps конвейера (~16-32), а не ровно 30,
         и контейнер обязан отражать реальную длительность — иначе видео
-        проигрывается ускоренно. Гарантируем строгую монотонность.
+        проигрывается ускоренно. Считаем его ЗДЕСЬ, в момент прихода кадра:
+        в потоке он отражал бы момент кодирования, то есть врал бы на всю
+        длину очереди.
         """
         if rgba.shape[0] != self.height or rgba.shape[1] != self.width:
             # Режим дисплея сменился — кадры другой формы. Молча пропускать
@@ -110,6 +151,27 @@ class VideoRecorder:
             raise ValueError(
                 f"display mode changed: frame {rgba.shape[1]}x{rgba.shape[0]} "
                 f"!= recorder {self.width}x{self.height}")
+        if self._encode_error is not None:
+            exc, self._encode_error = self._encode_error, None
+            raise RuntimeError(f"encoder thread failed: {exc}")
+        if self._thread is None:
+            self._thread = threading.Thread(target=self._encode_loop,
+                                            name="nr-encode", daemon=True)
+            self._thread.start()
+        elapsed = time.perf_counter() - self._started
+        pts_by_time = int(round(elapsed * self.fps))
+        pts = max(self._frame_idx + 1, pts_by_time)
+        self._frame_idx = pts
+        try:
+            self._queue.put((pts, rgba), timeout=self.PUT_TIMEOUT_S)
+        except queue.Full:
+            # Кодировщик не успевает. Выбросить кадр честнее, чем держать
+            # main-цикл: на экране пользователь заметит, в файле — нет.
+            self.dropped += 1
+            self._frame_idx = pts - 1   # номер не занят, отдадим следующему
+
+    def _encode_one(self, pts: int, rgba: np.ndarray) -> None:
+        """Собственно кодирование — только из потока _encode_loop."""
         frame = av.VideoFrame.from_ndarray(rgba, format="rgba")
         # Цветовые теги ОБЯЗАТЕЛЬНО на кадре, а не только на потоке:
         # swscale при конвертации RGBA->yuv420p берёт матрицу из кадра,
@@ -121,25 +183,37 @@ class VideoRecorder:
             frame.color_primaries = 1    # AVCOL_PRI_BT709
             frame.color_trc = 13         # AVCOL_TRC_IEC61966_2_1 = sRGB
         except Exception as exc:
-            print(f"[record] frame color tags failed: {exc}", file=__import__("sys").stderr)
-        elapsed = time.perf_counter() - self._started
-        pts_by_time = int(round(elapsed * self.fps))
-        frame.pts = max(self._frame_idx + 1, pts_by_time)
-        self._frame_idx = frame.pts
+            print(f"[record] frame color tags failed: {exc}", file=sys.stderr)
+        frame.pts = pts
         for packet in self._stream.encode(frame):
             self._container.mux(packet)
         self.written += 1
 
     def close(self) -> None:
-        """Дописать трейлер и закрыть контейнер. Идемпотентно."""
+        """Дождаться кодировщика, дописать трейлер и закрыть контейнер.
+
+        Поток останавливаем ДО работы с контейнером: он его единственный
+        владелец, пока запись идёт, и трогать контейнер из двух потоков
+        нельзя.
+        """
         if self._container is None:
             return
+        if self._thread is not None:
+            self._queue.put(None)
+            self._thread.join(timeout=30.0)
+            if self._thread.is_alive():
+                print("[record] кодировщик не завершился за 30 c",
+                      file=sys.stderr)
+            self._thread = None
+        if self.dropped:
+            print(f"[record] кадров выброшено: {self.dropped} "
+                  f"(кодировщик не успевал)", file=sys.stderr)
         try:
             for packet in self._stream.encode(None):  # flush encoder
                 self._container.mux(packet)
             self._container.close()
         except Exception as exc:
-            print(f"[record] close failed: {exc}", file=__import__("sys").stderr)
+            print(f"[record] close failed: {exc}", file=sys.stderr)
         self._container = None
 
     @property
