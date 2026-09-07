@@ -287,17 +287,18 @@ policy check, not missing code.
 
 The library learns the architecture through nvapi — it loads `nvapi64.dll`,
 takes its single export `nvapi_QueryInterface` and asks for
-`NvAPI_GPU_GetArchInfo` by id. Setting `NS_ARCH_SPOOF=1` makes the worker
-patch that one function in **its own process memory** at startup: the prologue
-is saved, replaced with a jump to our handler, and restored around every real
-call, so any GPU handle is still served by NVIDIA's own code — only the
-returned architecture is rewritten to Blackwell. Nothing in NVIDIA's files is
-modified, and on a 50-series card the hook disables itself and does nothing.
+`NvAPI_GPU_GetArchInfo` by id. The worker patches that one function in **its
+own process memory** at startup: the prologue is saved, replaced with a jump
+to our handler, and restored around every real call, so any GPU handle is
+still served by NVIDIA's own code — only the returned architecture is
+rewritten to Blackwell. Nothing in NVIDIA's files is modified, and on a
+50-series card the hook disables itself and does nothing.
 
-Off by default. **Untested on real 20/30/40-series hardware** — the only card
-here is a 5070 Ti, where the hook is a no-op by design. The menu's GPU dot
-tells you the truth either way: it goes green only when the worker actually
-created feature 18, not when the architecture merely looks right.
+**On by default** (set `NS_ARCH_SPOOF=0` to disable). **Untested on real
+20/30/40-series hardware** — the only card here is a 5070 Ti, where the hook
+is a no-op by design. The menu's GPU dot tells you the truth either way: it
+goes green only when the worker actually created feature 18, not when the
+architecture merely looks right.
 
 This likely conflicts with the license terms of NVIDIA's redistributable. It
 defeats no copy protection and modifies no files, but enabling it is your

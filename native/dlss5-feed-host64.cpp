@@ -208,9 +208,9 @@ static uint32_t g_eval_count;
 // (для него пришлось бы разбирать длины инструкций), и любой хендл GPU
 // обслуживается настоящим кодом, а не нашими догадками.
 //
-// Ничего из файлов NVIDIA не меняется: правка живёт только в памяти и только
-// когда пользователь сам включил NS_ARCH_SPOOF=1. На Blackwell не делается
-// вообще ничего.
+// Ничего из файлов NVIDIA не меняется: правка живёт только в памяти.
+// Включена по умолчанию (NS_ARCH_SPOOF=0 — выключить); на Blackwell не
+// делается вообще ничего.
 // ---------------------------------------------------------------------------
 static constexpr unsigned NVAPI_ID_INITIALIZE = 0x0150E828u;
 static constexpr unsigned NVAPI_ID_ENUM_GPUS  = 0xE5AC921Fu;
@@ -294,9 +294,13 @@ static int __cdecl ArchInfoHook(void *gpu, NvArchInfo *info)
 
 static bool ArchSpoofRequested()
 {
+    // Включён по умолчанию: на Blackwell хук сам себя отключает, на старых
+    // картах — единственный способ получить feature 18. NS_ARCH_SPOOF=0
+    // отключает явно.
     char buf[8] = {};
     const DWORD got = GetEnvironmentVariableA("NS_ARCH_SPOOF", buf, sizeof(buf));
-    return got > 0 && got < sizeof(buf) && buf[0] == '1';
+    if (got > 0 && got < sizeof(buf) && buf[0] == '0') return false;
+    return true;
 }
 
 // Возвращает: 0 — не требовалось, 1 — поставлен, -1 — не удалось.
