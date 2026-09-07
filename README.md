@@ -395,11 +395,12 @@ still served by NVIDIA's own code — only the returned architecture is
 rewritten to Blackwell. Nothing in NVIDIA's files is modified, and on a
 50-series card the hook disables itself and does nothing.
 
-**On by default** (set `NS_ARCH_SPOOF=0` to disable). **Untested on real
-20/30/40-series hardware** — the only card here is a 5070 Ti, where the hook
-is a no-op by design. The menu's GPU dot tells you the truth either way: it
-goes green only when the worker actually created feature 18, not when the
-architecture merely looks right.
+**On by default** (set `NS_ARCH_SPOOF=0` to disable). **Confirmed working on
+a 40-series card** by a user who ran it; 20- and 30-series are still
+unverified. Nothing here can test any of them — the only card on this machine
+is a 5070 Ti, where the hook disables itself by design. The menu's GPU dot
+tells you the truth either way: it goes green only when the worker actually
+created feature 18, not when the architecture merely looks right.
 
 This likely conflicts with the license terms of NVIDIA's redistributable. It
 defeats no copy protection and modifies no files, but enabling it is your
