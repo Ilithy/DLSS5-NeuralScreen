@@ -35,3 +35,9 @@ screenshots/
 _menu*.png
 *.local-backup
 release-package.html
+# Dev-скрипты и личные файлы — не для репозитория
+_measure_*.py
+_probe_*.py
+_render_*.py
+test_bake_menu.py
+requirements.txt
