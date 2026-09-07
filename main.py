@@ -886,6 +886,8 @@ def main() -> int:
     worker_stop: threading.Event | None = None
     shm: SharedFrameBuffer | None = None
     display: Display | None = None
+    tray: TrayController | None = None
+    hotkeys: HotkeyController | None = None
     try:
         # Воркер и guides работают на work-разрешении (NGX feature создаётся
         # по размерам заголовка; guides.assert требует совпадения размеров)
@@ -921,8 +923,11 @@ def main() -> int:
         print(f"[main] GPU: {gpu_text} (группа 0x{gpu_info['arch_group']:X}, "
               f"официальная поддержка {'да' if gpu_info['official'] else 'нет'})")
         startup_pending = True
-        # Размер и положение меню — как их оставил пользователь.
+        # Размер, положение и тема меню — как их оставил пользователь.
         display.menu.set_user_scale(float(cfg.get("menu_scale", 1.0)))
+        saved_theme = cfg.get("theme")
+        if isinstance(saved_theme, str) and saved_theme in ("light", "dark"):
+            display.menu.set_state({"theme": saved_theme})
         saved_offset = cfg.get("menu_offset")
         if isinstance(saved_offset, (list, tuple)) and len(saved_offset) == 2:
             display.menu.offset = [int(saved_offset[0]), int(saved_offset[1])]
@@ -1113,6 +1118,10 @@ def main() -> int:
                     worker, params, new_w, new_h, RESTART_WARMUP,
                     new_full_w, new_full_h, worker_stop, shm)
                 _forget_present()
+                # Новый воркер не знает про DDA/gray: сбросить флаги, чтобы
+                # главный цикл заново послал DDA1/GRAY. Иначе кадры уходят с
+                # NO_COLOR в воркер без захвата — рассинхрон, цикл рестартов.
+                _forget_dda()
 
             # Порядок важен: work_w/work_h и guides меняются ВМЕСТЕ, иначе
             # размер motion разойдётся с тем, что ждёт воркер (см. docstring).
@@ -1271,6 +1280,7 @@ def main() -> int:
                 data["menu_scale"] = round(display.menu.user_scale, 2)
                 data["open_menu_on_start"] = startup_menu
                 data["split"] = round(split_pos, 2)
+                data["theme"] = display.menu.state.get("theme", "light")
                 data["menu_offset"] = [int(display.menu.offset[0]),
                                        int(display.menu.offset[1])]
                 args.config.write_text(
@@ -1351,6 +1361,9 @@ def main() -> int:
                     display.menu.set_state({"lang": lang})
                     print(f"[main] Язык интерфейса -> {lang}")
             elif kind == "theme":
+                # Меню уже применило тему к себе (overlay_ui), здесь только
+                # запоминаем для config.json — _save_menu_layout() вызывается
+                # при закрытии меню и на выходе.
                 print(f"[main] Тема меню -> {action[1]}")
             elif kind == "button":
                 name = action[1]
@@ -1669,7 +1682,20 @@ def main() -> int:
                     except Exception as menu_exc:
                         print(f"[main] Меню на кадр записи не легло: {menu_exc}",
                               file=sys.stderr)
-                    recorder.write(output_rgba)
+                    # Запись — отдельный try: сбой кодера НЕ должен попадать в
+                    # except «Сбой вывода» (тот пересоздаёт pygame-окно на
+                    # каждом кадре — бесконечный цикл). Ошибка записи
+                    # останавливает запись, а не окно.
+                    try:
+                        recorder.write(output_rgba)
+                    except Exception as rec_exc:
+                        print(f"[main] Ошибка записи кадра ({rec_exc}) — "
+                              f"останавливаю запись", file=sys.stderr)
+                        try:
+                            recorder.close()
+                        except Exception:
+                            pass
+                        recorder = None
                 if present_mode:
                     # В WNDO-режиме кадр на экране рисует воркер; в Python
                     # пиксели приходят ТОЛЬКО по want_pixels (запись/скриншот).
@@ -1766,6 +1792,13 @@ def main() -> int:
                 print(f"  {line}", file=sys.stderr)
         return 1
     finally:
+        # Запись могла идти в момент выхода: без close() moov-атом не
+        # допишется и файл останется битым (плееры его не откроют).
+        if recorder is not None:
+            try:
+                recorder.close()
+            except Exception as exc:
+                print(f"[main] Ошибка закрытия записи: {exc}", file=sys.stderr)
         if worker is not None:
             shutdown_worker(worker, worker_stop)
         if shm is not None:

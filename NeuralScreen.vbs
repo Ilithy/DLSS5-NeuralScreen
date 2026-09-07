@@ -29,6 +29,27 @@ If py = "" Then
     py = "pythonw"
 End If
 
+' --- Проверка Python: без него запуск вслепую = тихий отказ ---
+If py = "pythonw" Then
+    Dim found
+    found = False
+    Dim pathVar, parts, part
+    pathVar = shell.ExpandEnvironmentStrings("%PATH%")
+    parts = Split(pathVar, ";")
+    For Each part In parts
+        If part <> "" And fso.FileExists(part & "\pythonw.exe") Then
+            found = True
+            Exit For
+        End If
+    Next
+    If Not found Then
+        MsgBox "NeuralScreen: pythonw.exe not found." & vbCrLf & _
+               "Install Python or unpack the release archive (it bundles a portable runtime).", _
+               16, "NeuralScreen"
+        WScript.Quit 1
+    End If
+End If
+
 ' --- Проверка NGX runtime (165 МБ, не хранится в git) ---
 If Not fso.FileExists(dir & "\native\nvngx_dlssnr.dll") Then
     MsgBox "NeuralScreen: native\nvngx_dlssnr.dll not found." & vbCrLf & _

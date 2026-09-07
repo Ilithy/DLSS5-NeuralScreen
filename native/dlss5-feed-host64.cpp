@@ -609,7 +609,10 @@ static void PumpPresent()
     if (h.swap == nullptr) return;
 
     // Paint the banner into the backbuffer (ReShade's overlay composites on top at Present).
-    if (g_banner != nullptr && g_pump_list != nullptr && g_swap3 != nullptr)
+    // h.pump_queue не создаётся в этом билде (мёртвый путь от InitBanner) —
+    // проверка обязательна, иначе латентный NULL-краш.
+    if (g_banner != nullptr && g_pump_list != nullptr && g_swap3 != nullptr
+        && h.pump_queue != nullptr)
     {
         ID3D12Resource *bb = nullptr;
         if (SUCCEEDED(g_swap3->GetBuffer(g_swap3->GetCurrentBackBufferIndex(), __uuidof(ID3D12Resource),
@@ -2146,7 +2149,7 @@ static bool DdaGrab(VideoState &v)
         ctx4->Release();
     }
     g_dda_ctx->Flush();
-    frame->Release(); res->Release(); g_dda_dup->ReleaseFrame();
+    frame->Release(); res->Release();
 
     // Ждать копию D3D11 событием, а НЕ опросом со Sleep(1). Sleep(1) при
     // стандартном разрешении таймера Windows спит до 15.6 мс, и это давало
@@ -2170,8 +2173,13 @@ static bool DdaGrab(VideoState &v)
         }
     }
     if (g_dda_signal->GetCompletedValue() < want)
-    { Log("[dda] signal fence timeout"); return false; }
+    { Log("[dda] signal fence timeout"); g_dda_dup->ReleaseFrame(); return false; }
     ++g_dda_fence_value;
+    // Desktop Duplication требует ReleaseFrame() ПОСЛЕ завершения всех
+    // операций чтения кадра. Копия D3D11 подтверждена фенсом выше — только
+    // теперь поверхность можно освобождать, иначе композитор может
+    // перезаписать её, пока копия ещё идёт (рваные кадры на движении).
+    g_dda_dup->ReleaseFrame();
 
     // swizzle into g_dda_dst, then copy into v.color.tex
     if (!BeginCommands()) return false;
@@ -2564,7 +2572,15 @@ static int ReadVideoMessage(VideoState &v, VideoFrameHeader &fh, std::vector<BYT
     if (!ReadExact(stdin, &fh, sizeof(fh))) return 0;
     if (fh.magic == FRAME_MAGIC)
     {
-        const bool no_color = (fh.reserved & FRAME_FLAG_NO_COLOR) != 0 && g_dda_active;
+        bool no_color = (fh.reserved & FRAME_FLAG_NO_COLOR) != 0;
+        if (no_color && !g_dda_active)
+        {
+            // Клиент думает, что DDA активен, а захват умер (recreate не
+            // удался). Пробуем переоткрыть один раз; не вышло — выходим:
+            // клиент перезапустит воркера и пошлёт DDA1 заново. Иначе
+            // прочитаем из пайпа цвет, которого нет — «truncated frame».
+            if (!OpenDda(g_dda_w, g_dda_h) || !g_dda_active) return 0;
+        }
         const size_t cw = v.upscale ? v.full_w : v.w;
         const size_t ch = v.upscale ? v.full_h : v.hgt;
         const size_t color_bytes = cw * ch * 4;
@@ -3324,6 +3340,9 @@ static int Serve(DWORD game_pid)
             break;
         }
     }
+    // Штатный выход: освободить NGX-ресурсы, иначе быстрый рестарт воркера
+    // конфликтует с остатками (exit 127 / зависание на кадре 0).
+    CleanupVideoNgx();
     return 0;
 }
 
