@@ -187,8 +187,8 @@ PROFILES = {
 BASE_DIR = Path(__file__).resolve().parent
 NATIVE_DIR = BASE_DIR / "native"
 # IMPORTANT: NGX Core returns FAIL_PlatformError from Init_Ext for ANY process
-# name other than nvngx.dll (verified experimentally; merserk-0.1 builds its
-# worker the same way). The file name is part of the NGX contract.
+# name other than nvngx.dll (verified experimentally). The file name is part of
+# the NGX contract.
 WORKER_EXE = NATIVE_DIR / "nvngx.dll"
 
 FPS_LOG_INTERVAL = 2.0  # seconds, FPS log to the console
