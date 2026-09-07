@@ -62,16 +62,23 @@ desktop capture -> motion guides -> NGX worker (D3D12) -> overlay on top of the 
 |---|---|
 | `F9` | NR on/off. **Off is a bypass**: the overlay stays on screen showing the raw capture (no neural effect), and the desktop runs faster. Everything hides only on real exit. |
 | `F8` | open/close the menu. While it is open the overlay takes mouse and keyboard, so the menu works on top of a game; closed, it is click-through again and the desktop behaves normally. |
+| `F7` | screenshot — opens a native "Save As" dialog (JPEG 100%). The dialog runs in its own thread, so the pipeline does not stop while you pick a name |
 | `Insert` | start/stop video recording (MP4, AV1 NVENC, 60 fps, ~64 Mbps). Also a **Record** button in the menu |
 | `Ctrl+Alt+↑` / `Ctrl+Alt+↓` | processing scale ±0.05 |
 | `Ctrl+Alt+Q` | quit |
 
-Hotkeys are configurable: put `"hotkeys": {"toggle": "F9", "record": "Insert", ...}` into `config.json` (commands: `toggle`, `settings`, `record`, `scale_up`, `scale_down`, `quit`; keys: F1–F12, letters, digits, Insert/Delete/Home/End/PgUp/PgDn/arrows, modifiers Ctrl/Alt/Shift).
+Hotkeys are remappable **from the menu**: gear → Hotkeys → click a field →
+press the combination. Global hotkeys are suspended while a field is
+waiting, otherwise `F8` would toggle the menu instead of landing in the
+field; `Esc` cancels. The assignment is written to `config.json` right away
+and every button caption in the menu follows it.
+
+They can also be edited by hand: `"hotkeys": {"toggle": "F9", "record": "Insert", ...}` (commands: `toggle`, `settings`, `screenshot_menu`, `record`, `scale_up`, `scale_down`, `quit`; keys: F1–F12, letters, digits, Insert/Delete/Home/End/PgUp/PgDn/arrows, modifiers Ctrl/Alt/Shift).
 
 Hotkeys are registered via `RegisterHotKey`, not polled: the system delivers
 the keypress **only to us and not to the active app** — F9 inside a game
 toggles NR and the game never sees the key. The flip side: while
-NeuralScreen runs, F8, F9 and Insert belong to it.
+NeuralScreen runs, F7, F8, F9 and Insert belong to it.
 
 Tray icon: left click opens the same menu, right click gives NR on/off,
 scale and quit.
@@ -79,17 +86,45 @@ scale and quit.
 **The menu** lives inside the overlay itself — there is no separate settings
 window (there used to be one; it was a second interface over the same
 values, it stole focus from games, and it dragged the whole tcl/tk runtime
-along). It holds: live counters (FPS, resolution, work size, frames,
-recording time), NR on/off, profile (Faithful / Natural / Strong / Extreme),
-the four NR parameters, the before/after wipe, language (ru/en), light/dark
-theme, "open menu on launch", monitor selection, autostart with Windows,
-and the buttons Screenshot / Help / Record / Exit / Close. A status line
-shows the GPU, its architecture and whether Neural Rendering works on it.
-Screenshot opens a native "Save As" dialog (JPEG 100%).
+along).
 
-Drag it by the title bar, resize it by the bottom-right corner — both are
-highlighted when you point at them, and both are remembered in
-`config.json` (`menu_offset`, `menu_scale`).
+The main page carries what you touch during a session, in labelled
+sections:
+
+- **status** — live counters (FPS, resolution, work size, frames, recording
+  time) and a line with the GPU, its architecture and a dot: green when
+  Neural Rendering actually runs on this card, red when it does not. The dot
+  follows the worker's answer, not the architecture — the only thing that
+  knows for sure is `CreateFeature`
+- **processing** — NR on/off with its key, profile (Faithful / Natural /
+  Strong / Extreme) and the four NR parameters
+- **comparison** — the before/after wipe
+- **appearance** — language and theme as two-way switches rather than
+  dropdowns; a dropdown for two values is an extra click for nothing
+
+The footer holds Screenshot, Record and Collapse, each with its key printed
+under the label, and below a rule a single wide row: **Quit and unload from
+memory**, with the key and a note that processing stops and the overlay
+disappears. There is no × in the header on purpose — it used to sit next to
+the quit button, and two actions with very different consequences looked
+equally harmless.
+
+Two buttons in the header: **?** opens this page, and the sliders icon opens
+the settings page — monitor, "open menu on launch", autostart with Windows
+and hotkey remapping. Things touched once, kept out of the way.
+
+<table>
+<tr>
+<td><img src="docs/menu-light.png" alt="Main page" width="380"></td>
+<td><img src="docs/menu-settings.png" alt="Settings page" width="380"></td>
+</tr>
+</table>
+
+Drag it by the title bar, resize it by the bottom-right corner, drag the
+bottom edge to set the height — all three are highlighted when you point at
+them, and all are remembered in `config.json` (`menu_offset`, `menu_scale`,
+`menu_height`). Whatever does not fit the chosen height scrolls, with a thin
+bar on the right that appears only when there is somewhere to scroll.
 
 On launch the menu opens by itself. NeuralScreen draws on top of the desktop
 and otherwise gives no sign of life, so without this you could not tell
@@ -100,8 +135,8 @@ instead.
 
 | | Effect |
 |---|---|
-| `Ctrl+Alt+Q`, "Exit" in the menu, "Exit" in tray | terminate: worker shut down, windows closed, no processes left |
-| "Close" in the menu, `F8`, `Esc` | only hides the menu, the app keeps running |
+| `Ctrl+Alt+Q`, "Quit and unload from memory" in the menu, "Exit" in tray | terminate: worker shut down, windows closed, no processes left |
+| "Collapse" in the menu, `F8`, `Esc` | only hides the menu, the app keeps running |
 
 ## Recording (Insert)
 
@@ -130,6 +165,38 @@ instead.
 - Recording works in both NR ON and NR OFF (bypass) modes; the file duration
   matches real time (PTS is built from the wall clock).
 
+### What recording costs, and why it is not the bitrate
+
+Recording used to halve the frame rate. Measured at 4K with `NS_PHASE=1`,
+per frame:
+
+```
+                    idle    recording   after both fixes
+frame rate          55.7      20.6           30.1 FPS
+recv                17.5      31.6           24.5 ms
+encode (Python)      0.4      19.9            3.1 ms
+worker frame        17.4      24.1           21.3 ms
+```
+
+Two costs, neither of them the bitrate:
+
+- **19.9 ms of RGBA→yuv420p on the CPU** plus the nvenc submit, inside the
+  capture loop. Encoding now runs in its own thread behind a 4-slot queue;
+  the loop only computes the PTS and hands the frame over. On a full queue
+  the frame is dropped rather than stalling the loop — the user is looking at
+  the screen, not at the file, and a gap does not shift timing because the
+  PTS comes from the clock.
+- **~7 ms of pushing 33 MB down the pipe.** The `OUTS` channel hands the
+  worker a named section to write pixels into instead. The copy out of the
+  section happens on the reader thread; a copy is unavoidable because the
+  section has one slot and the worker overwrites it next frame, while a
+  recorded frame outlives that.
+
+Lowering the bitrate does nothing for any of this: the time goes into the
+colour conversion, not into the encoder. Which is why there is no bitrate
+slider in the menu — it would be a knob that looks like it helps and does
+not.
+
 ## config.json
 
 | Field | Meaning |
@@ -145,6 +212,12 @@ instead.
 | `worker_present` | worker shows the frame in its own window (`false` — pygame output) |
 | `motion_on_gpu` | worker upscales the motion field (`false` — CPU) |
 | `capture_in_worker` | worker captures the desktop itself (DDA, `false` — dxcam in Python) |
+| `pixels_in_shm` | result pixels come back through a shared section instead of the pipe (`false` — pipe, as before) |
+| `split` | 0–1, share of the frame left unprocessed for the before/after wipe; 0 — off |
+| `theme` | `light` / `dark` |
+| `open_menu_on_start` | open the menu on launch; `false` — a short alert instead |
+| `hotkeys` | `{"toggle": "F9", ...}` — see Controls |
+| `menu_offset`, `menu_scale`, `menu_height` | where the menu sits, its scale and height. Written by the app, not meant to be edited by hand (`menu_height: null` — fit the content) |
 
 ## Architecture
 
@@ -164,6 +237,7 @@ They talk over stdin/stdout with a binary protocol:
 | `FRM1` | frame: header, then either payload (RGBA8 + motion) or "in shared memory" flag |
 | `OUT1` | result: RGBA8 full-res, or `bytes=0` — the worker already presented it |
 | `RNSZ` / `RACK` | change work resolution on the fly, no process restart |
+| `OUTS` / `OAK2` | named section the worker writes result pixels into; the reply then carries `bytes = 0xFFFFFFFF` instead of a payload |
 
 **Capture.** On `DDA1` the worker opens Desktop Duplication on the GPU: each
 frame is copied into a cross-device shared texture and swizzled to RGBA.

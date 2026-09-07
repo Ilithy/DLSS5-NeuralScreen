@@ -39,5 +39,6 @@ release-package.html
 _measure_*.py
 _probe_*.py
 _render_*.py
+_mockup_*.py
 test_bake_menu.py
 requirements.txt
