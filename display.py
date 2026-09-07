@@ -353,10 +353,23 @@ class Display:
         if enabled:
             # Focus is needed for the keyboard. The mouse works without it -
             # the click goes to the window under the cursor now that it is no
-            # longer transparent.
+            # longer transparent. SetForegroundWindow alone is refused when
+            # the foreground window belongs to another process that has not
+            # received input from the user (a game in the foreground): the
+            # system blocks the steal. AttachThreadInput is the standard
+            # workaround - it makes the foreground thread share its input
+            # state with ours, so the activation is treated as user-initiated.
             try:
+                fg = user32.GetForegroundWindow()
+                fg_tid = user32.GetWindowThreadProcessId(fg, None)
+                my_tid = ctypes.windll.kernel32.GetCurrentThreadId()
+                if fg_tid and fg_tid != my_tid:
+                    user32.AttachThreadInput(my_tid, fg_tid, True)
                 user32.SetForegroundWindow(hwnd)
                 user32.SetActiveWindow(hwnd)
+                user32.SetFocus(hwnd)
+                if fg_tid and fg_tid != my_tid:
+                    user32.AttachThreadInput(my_tid, fg_tid, False)
             except Exception:
                 pass
         self._click_through = not enabled

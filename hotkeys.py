@@ -24,6 +24,7 @@ from __future__ import annotations
 import ctypes
 import queue
 import threading
+import time
 from ctypes import wintypes
 
 user32 = ctypes.windll.user32
@@ -36,10 +37,16 @@ MOD_NOREPEAT = 0x4000  # holding the key does not spam repeats
 VK_F7 = 0x76
 VK_F8 = 0x77
 VK_F9 = 0x78
+VK_F10 = 0x79
+VK_F11 = 0x7A
 VK_UP = 0x26
 VK_DOWN = 0x28
 VK_Q = 0x51
 VK_INSERT = 0x2D
+VK_HOME = 0x24
+VK_CONTROL = 0x11
+VK_MENU = 0x12
+VK_SHIFT = 0x10
 
 WM_HOTKEY = 0x0312
 WM_QUIT = 0x0012
@@ -52,17 +59,22 @@ MSG_RESUME = 0x8000 + 2
 MSG_REBIND = 0x8000 + 3
 
 # id -> (modifiers, VK, command, human-readable name)
+# The defaults avoid keys games use: F9 is quickload in Bethesda titles,
+# F8/F7 are screenshots in some engines, PrtScr belongs to Snip & Sketch.
+# F10/F11/Home are nearly dead in games. The polling fallback (see below)
+# does not swallow the key - it still reaches the game - so a collision
+# would fire both sides.
 DEFAULT_BINDINGS = {
-    1: (MOD_NOREPEAT, VK_F9, "toggle", "F9"),
-    2: (MOD_NOREPEAT, VK_F8, "settings", "F8"),
+    1: (MOD_NOREPEAT, VK_F10, "toggle", "F10"),
+    2: (MOD_NOREPEAT, VK_F11, "settings", "F11"),
     3: (MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, VK_UP, "scale_up", "Ctrl+Alt+Up"),
     4: (MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, VK_DOWN, "scale_down", "Ctrl+Alt+Down"),
     5: (MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, VK_Q, "quit", "Ctrl+Alt+Q"),
     6: (MOD_NOREPEAT, VK_INSERT, "record", "Insert"),
     # The screenshot lived only as a menu button, with no key to print on it.
-    # F7 sits next to F8/F9 and is free. Not PrtScr: Snip & Sketch takes it,
-    # and RegisterHotKey may well refuse it.
-    7: (MOD_NOREPEAT, VK_F7, "screenshot_menu", "F7"),
+    # Home sits far from the WASD cluster and is free in games. Not PrtScr:
+    # Snip & Sketch takes it, and RegisterHotKey may well refuse it.
+    7: (MOD_NOREPEAT, VK_HOME, "screenshot_menu", "Home"),
 }
 
 # Key name -> VK (for parsing the config)
@@ -137,6 +149,42 @@ def describe(bindings: dict | None = None) -> str:
     return ", ".join(f"{name}={cmd}" for _, (_, _, cmd, name) in sorted(src.items()))
 
 
+# --- polling fallback -----------------------------------------------------
+# Some engines (id Tech 5, UE3) grab the keyboard exclusively even in a
+# window: the system does not deliver WM_HOTKEY while the game holds the
+# device, so RegisterHotKey alone is dead under them. The poller below reads
+# the raw key state (GetAsyncKeyState) and fires the command when the press
+# never arrived as WM_HOTKEY. It runs ALWAYS - when RegisterHotKey works it
+# fires first and the poller's duplicate is suppressed by the cooldown; when
+# the game swallows the hotkey the poller is the only path. The key still
+# reaches the game (unlike RegisterHotKey), which is fine for F9/F8/Insert
+# and the Ctrl+Alt combinations.
+
+POLL_INTERVAL = 0.03
+POLL_COOLDOWN = 0.25
+
+
+def _pressed(vk: int) -> bool:
+    return bool(user32.GetAsyncKeyState(vk) & 0x8000)
+
+
+def _mods_down(mods: int) -> bool:
+    if mods & MOD_CONTROL and not _pressed(VK_CONTROL):
+        return False
+    if mods & MOD_ALT and not _pressed(VK_MENU):
+        return False
+    if mods & MOD_SHIFT and not _pressed(VK_SHIFT):
+        return False
+    return True
+
+
+def _mods_clear(mods: int) -> bool:
+    """A bare key (no modifiers) must not fire while Ctrl/Alt/Shift is down."""
+    if mods & (MOD_CONTROL | MOD_ALT | MOD_SHIFT):
+        return True
+    return not (_pressed(VK_CONTROL) or _pressed(VK_MENU) or _pressed(VK_SHIFT))
+
+
 class HotkeyController:
     """Registers the global hotkeys; commands go into a queue."""
 
@@ -151,6 +199,11 @@ class HotkeyController:
         self._lock = threading.Lock()
         self._pending: dict | None = None   # bindings for MSG_REBIND
         self._active = False                # hotkeys are currently registered
+        # Polling fallback state: vk -> last time the command fired. The
+        # cooldown suppresses both repeats and the duplicate that arrives
+        # when RegisterHotKey DID deliver the press.
+        self._poll_last: dict[int, float] = {}
+        self._poll_stop = threading.Event()
 
     def start(self, timeout: float = 3.0) -> None:
         """Start the thread and wait for the registration result."""
@@ -159,6 +212,11 @@ class HotkeyController:
         self._thread = threading.Thread(target=self._run, daemon=True, name="hotkeys")
         self._thread.start()
         self._ready.wait(timeout)
+        # The polling fallback is a separate daemon: it must keep running
+        # even while the message loop is blocked inside GetMessageW.
+        self._poll_stop.clear()
+        threading.Thread(target=self._poll_loop, daemon=True,
+                         name="hotkeys-poll").start()
 
     def _run(self) -> None:
         self._tid = ctypes.windll.kernel32.GetCurrentThreadId()
@@ -201,6 +259,30 @@ class HotkeyController:
                 self.failed.append(name)
         self._active = True
 
+    def _poll_loop(self) -> None:
+        """Raw-key fallback: fires commands RegisterHotKey cannot deliver.
+
+        Runs every POLL_INTERVAL. A binding fires when its key is down, the
+        modifiers match, and the same key has not fired within POLL_COOLDOWN.
+        The cooldown is what makes the fallback invisible when the normal
+        path works: WM_HOTKEY arrives first, the poller sees the key still
+        down and skips it.
+        """
+        while not self._poll_stop.wait(POLL_INTERVAL):
+            with self._lock:
+                bindings = dict(self._bindings)
+            now = time.monotonic()
+            for hk_id, (mods, vk, cmd, _name) in bindings.items():
+                if not _pressed(vk):
+                    continue
+                if not _mods_down(mods) or not _mods_clear(mods):
+                    continue
+                last = self._poll_last.get(vk, 0.0)
+                if now - last < POLL_COOLDOWN:
+                    continue
+                self._poll_last[vk] = now
+                self._commands.put(cmd)
+
     def _unregister(self) -> None:
         if not self._active:
             return
@@ -227,6 +309,7 @@ class HotkeyController:
         user32.PostThreadMessageW(self._tid, MSG_REBIND, 0, 0)
 
     def stop(self) -> None:
+        self._poll_stop.set()
         if self._tid:
             user32.PostThreadMessageW(self._tid, WM_QUIT, 0, 0)
             self._tid = 0

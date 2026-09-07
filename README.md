@@ -45,14 +45,14 @@ delete the folder.
 
 ## Using it
 
-The program sits in the tray and draws over your desktop. Press **F8** for the
+The program sits in the tray and draws over your desktop. Press **F11** for the
 menu.
 
 | Key | What it does |
 |---|---|
-| **F8** | open / close the menu |
-| **F9** | neural rendering on / off |
-| **F7** | screenshot |
+| **F11** | open / close the menu |
+| **F10** | neural rendering on / off |
+| **Home** | screenshot |
 | **Insert** | start / stop recording, with sound |
 | **Ctrl+Alt+Q** | quit |
 
@@ -93,7 +93,7 @@ with Windows, key assignments — is behind the sliders icon.
 ## Recording and screenshots
 
 **Insert** records what you see, with the system sound, into an MP4 in
-`recordings`. **F7** saves a screenshot. If the menu is open it appears in
+`recordings`. **Home** saves a screenshot. If the menu is open it appears in
 both, on purpose.
 
 Recording has to be done from inside the program: OBS, ShadowPlay and NVIDIA

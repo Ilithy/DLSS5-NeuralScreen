@@ -139,7 +139,7 @@ is filled with a chroma key and made transparent (`LWA_COLORKEY`). While the
 menu is open the window's global alpha (`LWA_ALPHA`) goes to 255, otherwise
 the bright frame underneath bleeds through the panel.
 
-**NR off (bypass).** `F9` does not stop the pipeline anymore. Frames are
+**NR off (bypass).** `F10` does not stop the pipeline anymore. Frames are
 sent with `FRAME_FLAG_BYPASS`: the worker skips the NGX evaluate and
 presents the raw capture instead. The overlay stays alive; everything is
 hidden only on real exit.
