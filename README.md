@@ -3,7 +3,7 @@
 **NVIDIA DLSS 5 Neural Rendering (NGX Feature 18), applied to your whole
 Windows desktop in real time.** The screen is captured, run through the same
 neural renderer that DLSS 5 games use, and drawn back in a click-through
-overlay. RTX 50-series only.
+overlay. RTX 20/30/40/50 — see "Older GPUs" below.
 
 <table>
 <tr>
