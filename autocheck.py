@@ -78,7 +78,7 @@ def zip_integrity():
         # nvngx.dll whose content nobody can verify by eye, so a
         # non-committed rebuild slips through (audit #4, C1/C2).
         for name in ("main.py", "hotkeys.py", "display.py", "recorder.py",
-                     "overlay_ui.py", "i18n.py", "autocheck.py", "README.md",
+                     "overlay_ui.py", "i18n.py", "README.md",
                      "README.ru.md"):
             try:
                 head = subprocess.check_output(["git", "show", f"HEAD:{name}"],

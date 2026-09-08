@@ -53,6 +53,14 @@ DROP_PACKAGES = {
 }
 SP = "runtime/Lib/site-packages/"
 
+# Dev-only files that must NOT reach the release archive (user rule
+# 2026-09-08: the archive contains only what the program needs to run).
+DEV_ONLY = {
+    "autocheck.py",
+    "run_tests.py",
+    "build_release_zip.py",
+}
+
 
 def _drop_sitepackage(norm: str) -> bool:
     if not norm.startswith(SP):
@@ -69,6 +77,11 @@ def _drop_sitepackage(norm: str) -> bool:
 def _skip(path: str) -> bool:
     norm = path.replace("\\", "/")
     if any(norm == p or norm.startswith(p) for p in TK_SKIP):
+        return True
+    # Dev-only files: the tests, the test runner and the release builder are
+    # for the repository, not for the end user. The archive must contain
+    # exactly what the program needs to run (user rule 2026-09-08).
+    if norm in DEV_ONLY or norm.startswith("test_"):
         return True
     # .pyc/__pycache__ is dead weight (~13 MB in the zip): pythonw regenerates
     # them on the fly, a distribution does not need them.
@@ -91,6 +104,11 @@ for f in files + extra:
     if norm in seen:
         continue
     seen.add(norm)
+    # The same dev-only filter applies to the git-tracked files: the
+    # tests and the builders must not reach the archive (user rule
+    # 2026-09-08).
+    if _skip(norm):
+        continue
     uniq.append(norm)
 
 out = "neuralscreen-v1.3.0-full.zip"
