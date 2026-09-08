@@ -158,7 +158,8 @@ off the numpad sends Insert/End/arrows and the keys simply do not exist. The
 program writes this to the log and shows it on screen.
 
 **The picture is soft.** Put *Resolution the network runs at* back to the top
-of its slider.
+of its slider. (With the residual composite the picture stays sharp down to
+the reduced resolutions; only the very bottom of the slider starts to soften.)
 
 **A key does nothing.** Something else on the machine has claimed it. Reassign
 it in the menu under the sliders icon.

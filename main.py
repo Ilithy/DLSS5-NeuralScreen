@@ -43,6 +43,14 @@ from pathlib import Path
 # this file).
 LOG_PATH = Path(__file__).resolve().parent / "NeuralScreen.log"
 
+# The version shown in the menu header. Kept in sync with native/launcher.rc
+# (FileVersion/ProductVersion) and build_release_zip.py at release time.
+APP_VERSION = "1.3.0"
+
+# The channel label: the header shows the version, the channel lives in the
+# settings page (user rule 2026-09-08).
+CHANNEL_LABEL = "@perseval_BLR"
+
 
 def _init_logging() -> None:
     """Redirect stdout/stderr into NeuralScreen.log (utf-8)."""
@@ -90,6 +98,7 @@ from i18n import STRINGS as UI_STRINGS
 
 # The project page: README, hotkeys, requirements. Opened from the menu.
 REPO_URL = "https://github.com/perseval-BLR/DLSS5-NeuralScreen"
+CHANNEL_URL = "https://www.youtube.com/@perseval_BLR/videos"
 from tray import TrayController
 
 # --- Worker protocol (matches dlss5_converter/core.py) -------------------
@@ -2296,6 +2305,8 @@ def main() -> int:
                 "windows": [f"{h:X}: {t}" for h, t in wins],
                 "window_current": next(
                     (f"{h:X}: {t}" for h, t in wins if h == window_hwnd), ""),
+                "version": APP_VERSION,
+                "channel": CHANNEL_LABEL,
             }
 
         def _apply_menu_action(action: tuple) -> None:
@@ -2429,6 +2440,16 @@ def main() -> int:
                         display.alert(UI_STRINGS[lang]["github_opened"])
                     except Exception as exc:
                         print(f"[main] could not open {REPO_URL}: {exc}",
+                              file=sys.stderr)
+                elif name == "channel":
+                    # The channel label in the settings page opens the
+                    # channel (user rule 2026-09-08).
+                    try:
+                        import webbrowser
+                        webbrowser.open(CHANNEL_URL)
+                        display.alert(UI_STRINGS[lang]["github_opened"])
+                    except Exception as exc:
+                        print(f"[main] could not open {CHANNEL_URL}: {exc}",
                               file=sys.stderr)
 
         def request_apply(new_scale: float, new_profile: str, new_params: dict,

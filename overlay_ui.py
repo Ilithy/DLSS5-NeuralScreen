@@ -186,6 +186,10 @@ class OverlayMenu:
             "monitor": "0",
             "monitors": [],
             "autostart": False,
+            # The header shows the version; the channel label lives in the
+            # settings page (user rule 2026-09-08).
+            "version": "",
+            "channel": "",
         }
         # Pipeline readings: the same ones the HUD shows. The menu is meant to
         # be the single place where both the settings and what is going on are
@@ -462,6 +466,19 @@ class OverlayMenu:
             self._hint_rel = pygame.Rect(pad, cy, inner_w,
                                          self._u(SMALL_SIZE) + self._u(6))
             cy += self._hint_rel.h + gap
+
+            # The channel label: the header shows the version, the channel
+            # lives here (user rule 2026-09-08). A button item - the only
+            # non-interactive kind the drawer supports - with the label as
+            # its caption.
+            channel = self.state.get("channel") or ""
+            if channel:
+                section(s["sec_about"])
+                act_h = self._u(ACTION_H)
+                items.append(Item("button", "channel",
+                                  pygame.Rect(pad, cy, inner_w, act_h),
+                                  extra={"label": channel, "filled": False}))
+                cy += act_h + pad
         else:
             section(s["sec_processing"])
             nr_on = bool(self.state.get("nr"))
@@ -677,7 +694,7 @@ class OverlayMenu:
             else:
                 self.hover = None
                 for it in self.items:
-                    if it.kind in ("action", "hotkey") and \
+                    if it.kind in ("action", "hotkey", "button") and \
                             it.rect.collidepoint(event.pos):
                         self.hover = f"{it.kind}:{it.key}"
                         break
@@ -877,7 +894,7 @@ class OverlayMenu:
         if self.hover == "edge" or self._resize_h_from is not None:
             return pygame.SYSTEM_CURSOR_SIZENS
         if isinstance(self.hover, str) and self.hover.startswith(
-                ("icon:", "action:", "hotkey:")):
+                ("icon:", "action:", "hotkey:", "button:")):
             return pygame.SYSTEM_CURSOR_HAND
         if self.hover == "title" or self._move_from is not None:
             return pygame.SYSTEM_CURSOR_SIZEALL
@@ -932,12 +949,15 @@ class OverlayMenu:
                 else s["title"])
         title = self._title_font.render(head, True, _rgb(self.c["text"]))
         surface.blit(title, (r.x + pad, r.y + self._u(16)))
-        # The author right after the title: the top right corner is taken by
-        # the icons.
-        brand = self._small_font.render("· @perseval_BLR", True,
-                                        _rgb(self.c["muted"]))
-        surface.blit(brand, (r.x + pad + title.get_width() + self._u(10),
-                             r.y + self._u(22)))
+        # The version right after the title: the top right corner is taken by
+        # the icons. The channel label lives in the settings page (user rule
+        # 2026-09-08).
+        ver = self.state.get("version") or ""
+        if ver:
+            ver_text = self._small_font.render(f"v{ver}", True,
+                                               _rgb(self.c["muted"]))
+            surface.blit(ver_text, (r.x + pad + title.get_width() + self._u(10),
+                                    r.y + self._u(22)))
 
         # The content is drawn clipped to the scroll area, otherwise scrolled
         # rows would spill outside the panel.
@@ -1286,14 +1306,22 @@ class OverlayMenu:
             key_col = self.c["muted"]
         name = self._font.render(item.extra.get("label", ""), True,
                                  _rgb(name_col))
-        surface.blit(name, (rect.centerx - name.get_width() // 2,
-                            rect.y + self._u(6)))
         hk = item.extra.get("hotkey")
+        note = item.extra.get("note")
+        if hk or note:
+            # The two-line layout: the name on top, the caption below.
+            surface.blit(name, (rect.centerx - name.get_width() // 2,
+                                rect.y + self._u(6)))
+        else:
+            # A single-line action (Back without a hotkey): centre it, the
+            # top-anchored position was left over from the two-line layout
+            # and looked off (user: the Back button is not centred).
+            surface.blit(name, (rect.centerx - name.get_width() // 2,
+                                rect.centery - name.get_height() // 2))
         if hk:
             img = self._small_font.render(hk, True, _rgb(key_col))
             surface.blit(img, (rect.centerx - img.get_width() // 2,
                                rect.y + self._u(26)))
-        note = item.extra.get("note")
         if note:
             img = self._small_font.render(note, True, _rgb(key_col))
             surface.blit(img, (rect.centerx - img.get_width() // 2,
@@ -1330,10 +1358,12 @@ class OverlayMenu:
         item.extra["field"] = field
 
     def _draw_button(self, surface, item: Item, s: dict) -> None:
+        hot = self.hover == f"button:{item.key}"
         pygame.draw.rect(surface, _rgb(self.c["surface"]), item.rect,
                          border_radius=self._u(RADIUS // 2))
-        pygame.draw.rect(surface, _rgb(self.c["border"]), item.rect, self._u(1),
-                         border_radius=self._u(RADIUS // 2))
+        pygame.draw.rect(surface,
+                         _rgb(self.c["accent"] if hot else self.c["border"]),
+                         item.rect, self._u(1), border_radius=self._u(RADIUS // 2))
         label = self._font.render(item.extra.get("label", item.key), True,
                                   _rgb(item.extra.get("color", self.c["text"])))
         surface.blit(label, (item.rect.centerx - label.get_width() // 2,
