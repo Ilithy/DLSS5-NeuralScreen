@@ -1229,6 +1229,16 @@ def main() -> int:
     args = parser.parse_args()
     _init_logging()  # pythonw: stdout/stderr -> NeuralScreen.log
 
+    # One instance only: two copies fight over the screen capture (the
+    # second one gets a dead DDA and the first one loses frames). The
+    # mutex is the standard Windows single-instance mechanism - it lives
+    # in the kernel and dies with the process, so a crashed copy does not
+    # block the next launch.
+    _mutex = ctypes.windll.kernel32.CreateMutexW(None, False, "NeuralScreen_SingleInstance")
+    if ctypes.windll.kernel32.GetLastError() == 183:  # ERROR_ALREADY_EXISTS
+        print("[main] another NeuralScreen is already running - this copy exits", file=sys.stderr)
+        return 1
+
     cfg = load_config(args.config)
     params = resolve_params(cfg)
     width, height = int(cfg["width"]), int(cfg["height"])
