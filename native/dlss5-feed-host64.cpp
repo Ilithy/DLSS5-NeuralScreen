@@ -1223,6 +1223,12 @@ struct VideoState
     UINT nr_w = 0, nr_h = 0;
     ID3D12Resource *nr_in = nullptr;    // NON_PIXEL_SHADER_RESOURCE at rest
     ID3D12Resource *nr_out = nullptr;   // UNORDERED_ACCESS at rest
+    // Matched residual composite: instead of stretching nr_out up to full
+    // size, compose native + (nr_out_up - nr_in_up) * strength. The native
+    // frame stays the 1:1 anchor, so text and edges keep full sharpness
+    // while the network runs at the cheap work resolution.
+    bool residual = false;
+    float residual_strength = 1.0f;
 };
 
 static VideoHeader g_video_options = {};
@@ -1675,6 +1681,31 @@ static bool NrSmallRequested()
     return cached == 1;
 }
 
+// NS_NR_RESIDUAL=0: force the plain upscale path (tests only). By default
+// the matched residual composite is ALWAYS on with nr_small - the user's
+// single resolution slider must never produce a soft picture (the whole
+// point of the Cost-Scaler principle: cheap network + 1:1 native anchor).
+static bool ResidualRequested()
+{
+    char buf[8] = {};
+    const DWORD got = GetEnvironmentVariableA("NS_NR_RESIDUAL", buf, sizeof(buf));
+    return !(got > 0 && got < sizeof(buf) && buf[0] == '0');
+}
+
+// NS_NR_RESIDUAL_STRENGTH=0..1: how much of the neural delta is applied.
+// 0.0 is a real value (the native frame untouched) - do not treat it as unset.
+static float ResidualStrengthRequested()
+{
+    char buf[16] = {};
+    const DWORD got = GetEnvironmentVariableA("NS_NR_RESIDUAL_STRENGTH", buf, sizeof(buf));
+    if (got > 0 && got < sizeof(buf))
+    {
+        const float f = static_cast<float>(atof(buf));
+        if (f >= 0.0f && f <= 2.0f) return f;
+    }
+    return 1.0f;
+}
+
 // want_small < 0 means "whatever NS_NR_SMALL says" - used for the very first
 // creation, before the client has had a chance to ask for anything.
 static bool CreateVideoResources(VideoState &v, UINT w, UINT hgt, UINT full_w = 0, UINT full_h = 0,
@@ -1690,6 +1721,11 @@ static bool CreateVideoResources(VideoState &v, UINT w, UINT hgt, UINT full_w = 
     v.nr_small = v.upscale && asked;
     v.nr_w = v.nr_small ? w : 0;
     v.nr_h = v.nr_small ? hgt : 0;
+    // Residual compose rides on nr_small: at work == full there is nothing
+    // to compose (native would equal nr_in). Env-overridable for now; the
+    // menu wiring lands with the release.
+    v.residual = v.nr_small && ResidualRequested();
+    v.residual_strength = v.residual ? ResidualStrengthRequested() : 1.0f;
     const UINT cw = v.upscale ? full_w : w;   // color texture: full-res in upscale mode
     const UINT ch = v.upscale ? full_h : hgt;
     if (!CreateVideoTex(v.color, cw, ch, DXGI_FORMAT_R8G8B8A8_UNORM, cw * 4) ||
@@ -1857,6 +1893,32 @@ static const char kScaleHlsl4[] =
     "    gDst[id.xy] = lerp(lerp(v00, v10, f.x), lerp(v01, v11, f.x), f.y);\n"
     "}\n";
 
+// Matched residual composite (the DLSSNR-Cost-Scaler principle): run the
+// network at the work resolution, then compose the neural delta onto the
+// pristine 1:1 native frame instead of stretching the low-res result.
+//   edit   = nr_out(up) - nr_in(up)   -- what the network changed
+//   result = native + edit * strength  -- the native frame stays the anchor,
+//                                        so text/edges keep full sharpness
+// while the cheap low-res network does the relighting.
+static const char kResidualHlsl[] =
+    "Texture2D<float4>   gNative : register(t0);\n"
+    "Texture2D<float4>   gNrIn   : register(t1);\n"
+    "Texture2D<float4>   gNrOut  : register(t2);\n"
+    "RWTexture2D<float4> gDst    : register(u0);\n"
+    "cbuffer RC : register(b0) { uint gW; uint gH; float gStrength; };\n"
+    "SamplerState gSamp : register(s0);\n"
+    "[numthreads(8, 8, 1)]\n"
+    "void CSMain(uint3 id : SV_DispatchThreadID)\n"
+    "{\n"
+    "    if (id.x >= gW || id.y >= gH) return;\n"
+    "    float2 uv = (float2(id.xy) + 0.5f) / float2(gW, gH);\n"
+    "    float3 native = gNative[id.xy].rgb;\n"
+    "    float3 nrIn  = gNrIn.SampleLevel(gSamp, uv, 0).rgb;\n"
+    "    float3 nrOut = gNrOut.SampleLevel(gSamp, uv, 0).rgb;\n"
+    "    float3 result = max(native + (nrOut - nrIn) * gStrength, 0.0);\n"
+    "    gDst[id.xy] = float4(result, 1.0);\n"
+    "}\n";
+
 typedef HRESULT(WINAPI *PFN_D3DCompile_)(LPCVOID, SIZE_T, LPCSTR, const void *, void *,
                                          LPCSTR, LPCSTR, UINT, UINT, ID3DBlob **, ID3DBlob **);
 typedef HRESULT(WINAPI *PFN_D3D12SerializeRootSignature_)(const D3D12_ROOT_SIGNATURE_DESC *,
@@ -1874,6 +1936,15 @@ static ID3D12Resource       *g_scale4_src_bound;   // slot 0: the downscale pair
 static ID3D12Resource       *g_scale4_dst_bound;
 static ID3D12Resource       *g_scale4_src_bound2;  // slot 1: the upscale pair
 static ID3D12Resource       *g_scale4_dst_bound2;
+// Matched residual composite pass: native + (nr_out - nr_in) * strength.
+// One descriptor set of three SRVs + one UAV, rebuilt on resource change.
+static ID3D12RootSignature  *g_residual_rs;   // kept for the dispatch (PSO owns its own ref)
+static ID3D12PipelineState  *g_residual_pso;
+static ID3D12DescriptorHeap *g_residual_heap;
+static ID3D12Resource       *g_res_native_bound;
+static ID3D12Resource       *g_res_in_bound;
+static ID3D12Resource       *g_res_out_bound;
+static ID3D12Resource       *g_res_dst_bound;
 static VideoTex              g_motion_small;      // motion field at flow resolution
 static UINT                  g_motion_w, g_motion_h;  // 0 = motion arrives at work resolution
 
@@ -2009,6 +2080,83 @@ static bool EnsureScalePipeline()
     if (FAILED(hr)) { Log("[scale] colour descriptor heap failed 0x%08X", hr); return false; }
 
     Log("[scale] compute pipeline ready (bilinear, clamp; motion and colour)");
+
+    // --- Matched residual composite pipeline -------------------------------
+    // Three SRVs (native, nr_in, nr_out) + one UAV (dst), a 32-bit-constants
+    // cbuffer (w, h, strength) and the same linear-clamp sampler. A separate
+    // root signature because the layout differs from the scale pair.
+    ID3DBlob *res_code = nullptr;
+    hr = compile(kResidualHlsl, sizeof(kResidualHlsl) - 1, "residual.hlsl", nullptr, nullptr,
+                 "CSMain", "cs_5_0", 0, 0, &res_code, &errors);
+    if (FAILED(hr) || res_code == nullptr)
+    {
+        Log("[residual] shader compile failed 0x%08X: %s", hr,
+            errors ? static_cast<const char *>(errors->GetBufferPointer()) : "(no log)");
+        if (errors) errors->Release();
+        return false;
+    }
+    if (errors) errors->Release();
+
+    D3D12_DESCRIPTOR_RANGE rres[2] = {};
+    rres[0].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+    rres[0].NumDescriptors = 3;
+    rres[0].BaseShaderRegister = 0;
+    rres[0].OffsetInDescriptorsFromTableStart = 0;
+    rres[1].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
+    rres[1].NumDescriptors = 1;
+    rres[1].BaseShaderRegister = 0;
+    rres[1].OffsetInDescriptorsFromTableStart = 3;
+
+    D3D12_ROOT_PARAMETER rparams[2] = {};
+    rparams[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+    rparams[0].Constants.ShaderRegister = 0;
+    rparams[0].Constants.Num32BitValues = 3;   // gW, gH, gStrength
+    rparams[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+    rparams[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    rparams[1].DescriptorTable.NumDescriptorRanges = 2;
+    rparams[1].DescriptorTable.pDescriptorRanges = rres;
+    rparams[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+
+    D3D12_ROOT_SIGNATURE_DESC rrsd = {};
+    rrsd.NumParameters = _countof(rparams);
+    rrsd.pParameters = rparams;
+    rrsd.NumStaticSamplers = 1;
+    rrsd.pStaticSamplers = &samp;
+
+    ID3DBlob *rs_res = nullptr;
+    hr = serialize(&rrsd, D3D_ROOT_SIGNATURE_VERSION_1, &rs_res, &errors);
+    if (FAILED(hr) || rs_res == nullptr)
+    {
+        Log("[residual] root signature serialize failed 0x%08X", hr);
+        if (errors) errors->Release();
+        res_code->Release();
+        return false;
+    }
+    if (errors) errors->Release();
+    hr = h.dev->CreateRootSignature(0, rs_res->GetBufferPointer(), rs_res->GetBufferSize(),
+                                    __uuidof(ID3D12RootSignature),
+                                    reinterpret_cast<void **>(&g_residual_rs));
+    rs_res->Release();
+    if (FAILED(hr)) { Log("[residual] CreateRootSignature failed 0x%08X", hr); res_code->Release(); return false; }
+
+    D3D12_COMPUTE_PIPELINE_STATE_DESC rpd = {};
+    rpd.pRootSignature = g_residual_rs;
+    rpd.CS.pShaderBytecode = res_code->GetBufferPointer();
+    rpd.CS.BytecodeLength = res_code->GetBufferSize();
+    hr = h.dev->CreateComputePipelineState(&rpd, __uuidof(ID3D12PipelineState),
+                                           reinterpret_cast<void **>(&g_residual_pso));
+    res_code->Release();
+    if (FAILED(hr)) { Log("[residual] CreateComputePipelineState failed 0x%08X", hr); return false; }
+
+    D3D12_DESCRIPTOR_HEAP_DESC rhd = {};
+    rhd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+    rhd.NumDescriptors = 4;
+    rhd.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+    hr = h.dev->CreateDescriptorHeap(&rhd, __uuidof(ID3D12DescriptorHeap),
+                                     reinterpret_cast<void **>(&g_residual_heap));
+    if (FAILED(hr)) { Log("[residual] descriptor heap failed 0x%08X", hr); return false; }
+
+    Log("[residual] compute pipeline ready (native + (nr_out - nr_in) * strength)");
     return true;
 }
 
@@ -2096,6 +2244,63 @@ static void ScaleColorInto(ID3D12Resource *src, UINT sw, UINT sh,
     gpu.ptr += static_cast<UINT64>(slot) * 2 * stride;
     h.list->SetComputeRootDescriptorTable(1, gpu);
     h.list->Dispatch((dw + 7) / 8, (dh + 7) / 8, 1);
+}
+
+// The residual composite needs three SRVs + one UAV, descriptor at slot 0.
+// Recreated only when the resources change (RNSZ, MOTS, per-frame pointers
+// are stable across frames in the steady state).
+static void BindResidualDescriptors(ID3D12Resource *native, ID3D12Resource *nr_in,
+                                    ID3D12Resource *nr_out, ID3D12Resource *dst)
+{
+    if (native == g_res_native_bound && nr_in == g_res_in_bound &&
+        nr_out == g_res_out_bound && dst == g_res_dst_bound)
+        return;
+    const UINT stride = h.dev->GetDescriptorHandleIncrementSize(
+        D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+    D3D12_CPU_DESCRIPTOR_HANDLE cpu = g_residual_heap->GetCPUDescriptorHandleForHeapStart();
+
+    D3D12_SHADER_RESOURCE_VIEW_DESC sd = {};
+    sd.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    sd.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+    sd.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    sd.Texture2D.MipLevels = 1;
+    for (int i = 0; i < 3; ++i)
+    {
+        h.dev->CreateShaderResourceView(i == 0 ? native : (i == 1 ? nr_in : nr_out),
+                                        &sd, cpu);
+        cpu.ptr += stride;
+    }
+
+    D3D12_UNORDERED_ACCESS_VIEW_DESC ud = {};
+    ud.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    ud.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
+    h.dev->CreateUnorderedAccessView(dst, nullptr, &ud, cpu);
+
+    g_res_native_bound = native;
+    g_res_in_bound = nr_in;
+    g_res_out_bound = nr_out;
+    g_res_dst_bound = dst;
+}
+
+// Compose native + (nr_out - nr_in) * strength at full resolution.
+// native must be in NON_PIXEL_SHADER_RESOURCE, dst and (optionally) nr_out
+// in UNORDERED_ACCESS - the caller owns the barriers, as with ScaleColorInto.
+static void ResidualCompose(ID3D12Resource *native, ID3D12Resource *nr_in,
+                            ID3D12Resource *nr_out, UINT w, UINT h_,
+                            ID3D12Resource *dst, float strength)
+{
+    BindResidualDescriptors(native, nr_in, nr_out, dst);
+    ID3D12DescriptorHeap *heaps[] = { g_residual_heap };
+    h.list->SetDescriptorHeaps(1, heaps);
+    h.list->SetComputeRootSignature(g_residual_rs);
+    h.list->SetPipelineState(g_residual_pso);
+    UINT32 rc[3] = { w, h_, 0 };
+    float str = strength;
+    memcpy(&rc[2], &str, sizeof(float));
+    h.list->SetComputeRoot32BitConstants(0, 3, rc, 0);
+    D3D12_GPU_DESCRIPTOR_HANDLE gpu = g_residual_heap->GetGPUDescriptorHandleForHeapStart();
+    h.list->SetComputeRootDescriptorTable(1, gpu);
+    h.list->Dispatch((w + 7) / 8, (h_ + 7) / 8, 1);
 }
 
 // Open the "motion arrives downscaled" path. 0x0 closes it.
@@ -3204,13 +3409,20 @@ static bool EvaluateVideo(VideoState &v, int reset)
     if (v.nr_small)
     {
         // The result is work-sized; stretch it into the full-res output the
-        // rest of the pipeline expects. output stays UNORDERED_ACCESS, which
-        // is exactly what the compute pass writes to.
+        // rest of the pipeline expects. In residual mode the work-res nr_out
+        // and nr_in are sampled at full-res UVs inside ResidualCompose and
+        // the pristine native colour stays the anchor - the network does the
+        // relighting, the native frame keeps the sharpness. output stays
+        // UNORDERED_ACCESS, which is exactly what the compute pass writes to.
         D3D12_RESOURCE_BARRIER to_srv = Transition(
             v.nr_out, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
             D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
         h.list->ResourceBarrier(1, &to_srv);
-        ScaleColorInto(v.nr_out, nw, nh, v.output, cw, ch, 1);
+        if (v.residual)
+            ResidualCompose(v.color.tex, v.nr_in, v.nr_out, cw, ch, v.output,
+                            v.residual_strength);
+        else
+            ScaleColorInto(v.nr_out, nw, nh, v.output, cw, ch, 1);
         D3D12_RESOURCE_BARRIER back = Transition(
             v.nr_out, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
             D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
