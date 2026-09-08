@@ -14,8 +14,11 @@ What this pins down, because all three have already been got wrong once:
     our own overlay is the loop this mode exists to avoid;
   * switching back is clean, not a dead pipeline stuck on a window.
 
-The overlay geometry is deliberately not checked: in this step the overlay is
-still fullscreen and the processed window sits in its corner.
+The geometry is checked too: both layers - the worker's picture window and the
+HUD on top of it - have to sit on the target window, follow it when it moves,
+and get out of the way when it is minimised. A resize means rebuilding the
+pipeline, and that must happen once the size settles rather than on every
+pixel of a drag.
 
 Requires NeuralScreen not to be running. ~40 seconds.
 
@@ -47,6 +50,46 @@ VK_NUMLOCK = 0x90
 VK_NUMPAD2 = 0x62
 VK_NUMPAD5 = 0x65
 KEYEVENTF_KEYUP = 0x0002
+
+
+def find_window(class_name: str, exclude_pid: int = 0) -> int:
+    """The first visible top-level window of a class, optionally not ours.
+
+    The two overlay layers are found by class: the worker's picture window is
+    "NeuralScreenPresent", and the HUD is a pygame window - and so is this
+    test's own target, hence exclude_pid.
+    """
+    user32 = ctypes.windll.user32
+    found = []
+
+    @ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
+    def cb(hwnd, _lparam):
+        buf = ctypes.create_unicode_buffer(128)
+        user32.GetClassNameW(hwnd, buf, 128)
+        if buf.value != class_name:
+            return True
+        if not user32.IsWindowVisible(hwnd):
+            return True
+        if exclude_pid:
+            pid = ctypes.c_ulong(0)
+            user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+            if pid.value == exclude_pid:
+                return True
+        found.append(int(hwnd))
+        return False
+
+    user32.EnumWindows(cb, None)
+    return found[0] if found else 0
+
+
+def frame_rect(hwnd: int):
+    """The window's visible bounds, the way the compositor sees them."""
+    r = ctypes.wintypes.RECT()
+    hr = ctypes.windll.dwmapi.DwmGetWindowAttribute(
+        ctypes.c_void_p(int(hwnd)), ctypes.c_uint(9), ctypes.byref(r), ctypes.sizeof(r))
+    if hr != 0:
+        ctypes.windll.user32.GetWindowRect(ctypes.c_void_p(int(hwnd)), ctypes.byref(r))
+    return (int(r.left), int(r.top), int(r.right - r.left), int(r.bottom - r.top))
 
 
 def numlock_on() -> bool:
@@ -177,7 +220,69 @@ def main() -> int:
         if "back to full screen" in after:
             failures.append("window mode dropped itself back to full screen")
 
-        # 2. And back out.
+        # 2. Geometry: both layers sit on the window.
+        import os
+        pres = find_window("NeuralScreenPresent")
+        hud = find_window("pygame", exclude_pid=os.getpid())
+        if not pres:
+            failures.append("the worker's picture window was not found")
+        if not hud:
+            failures.append("the HUD overlay window was not found")
+
+        def check_on_target(what: str) -> None:
+            """Both layers within a couple of pixels of the target window."""
+            want = frame_rect(hwnd)
+            for name, w in (("picture", pres), ("HUD", hud)):
+                if not w:
+                    continue
+                got = frame_rect(w)
+                off = max(abs(got[0] - want[0]), abs(got[1] - want[1]))
+                print(f"     {what}: {name} at {got[:2]}, window at {want[:2]}")
+                if off > 2:
+                    failures.append(f"{what}: the {name} layer is {off} px off "
+                                    f"the window ({got[:2]} vs {want[:2]})")
+
+        check_on_target("placed")
+
+        # 3. Move the window - the layers follow.
+        user32.SetWindowPos(hwnd, 0, 520, 360, 0, 0, 0x0001 | 0x0004 | 0x0010)
+        pump(2.0)
+        check_on_target("moved")
+
+        # 4. Minimise - the picture must get out of the way rather than hang a
+        #    frozen frame over whatever is underneath.
+        mark = autocheck.log_offset()
+        user32.ShowWindow(hwnd, 6)          # SW_MINIMIZE
+        deadline = time.monotonic() + 6.0
+        hidden = False
+        while time.monotonic() < deadline and not hidden:
+            time.sleep(0.2)
+            hidden = pres and not user32.IsWindowVisible(ctypes.c_void_p(pres))
+        if not hidden:
+            failures.append("the picture stayed visible while the window was minimised")
+        user32.ShowWindow(hwnd, 9)          # SW_RESTORE
+        if not focus_target():
+            failures.append("could not restore the target window")
+        pump(2.0)
+        if pres and not user32.IsWindowVisible(ctypes.c_void_p(pres)):
+            failures.append("the picture did not come back after the window was restored")
+
+        # 5. Resize - the pipeline is rebuilt for the new size, once it settles.
+        mark = autocheck.log_offset()
+        new_w, new_h = W - 160, H - 120
+        user32.SetWindowPos(hwnd, 0, 520, 360, new_w, new_h, 0x0004 | 0x0010)
+        text = wait_log(mark, "rebuilding the pipeline", 20.0)
+        if not text:
+            failures.append("a resized window did not rebuild the pipeline")
+        else:
+            line = [l for l in text.splitlines() if "rebuilding the pipeline" in l][-1]
+            print("size:", line.strip())
+            if f"{new_w}x{new_h}" not in line:
+                failures.append(f"the rebuild used the wrong size: {line.strip()}")
+            if not wait_log(mark, f"pipeline rebuilt: {new_w}x{new_h}", 30.0):
+                failures.append("the pipeline did not come back at the new size")
+
+        # 6. And back out.
         mark = autocheck.log_offset()
         autocheck.send_key(VK_NUMPAD5)
         text = wait_log(mark, "pipeline rebuilt", 30.0)
@@ -186,7 +291,7 @@ def main() -> int:
         else:
             line = [l for l in text.splitlines() if "pipeline rebuilt" in l][-1]
             print("out:", line.strip())
-            if f"{W}x{H}" in line:
+            if "3840x2160" not in line and f"{W}x{H}" in line:
                 failures.append("switching back kept the window size")
         mark = autocheck.log_offset()
         pump(4.0)

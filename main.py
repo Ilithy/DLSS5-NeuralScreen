@@ -664,6 +664,34 @@ def send_wgc(worker: subprocess.Popen, hwnd: int, width: int = 0,
     worker.stdin.flush()
 
 
+class _RECT(ctypes.Structure):
+    _fields_ = [("left", ctypes.c_long), ("top", ctypes.c_long),
+                ("right", ctypes.c_long), ("bottom", ctypes.c_long)]
+
+
+DWMWA_EXTENDED_FRAME_BOUNDS = 9
+
+
+def window_frame_rect(hwnd: int):
+    """The window's visible bounds as the compositor sees them: (x, y, w, h).
+
+    Not GetWindowRect: that one includes the invisible resize border - several
+    pixels of nothing on each side - so an overlay placed by it sits visibly
+    off the window. The DWM answer is also the rectangle Windows Graphics
+    Capture hands over, which is what the picture has to line up with.
+    Returns None when the window is gone.
+    """
+    r = _RECT()
+    hr = ctypes.windll.dwmapi.DwmGetWindowAttribute(
+        ctypes.c_void_p(int(hwnd)), ctypes.c_uint(DWMWA_EXTENDED_FRAME_BOUNDS),
+        ctypes.byref(r), ctypes.sizeof(r))
+    if hr != 0:
+        if not ctypes.windll.user32.GetWindowRect(ctypes.c_void_p(int(hwnd)),
+                                                  ctypes.byref(r)):
+            return None
+    return (int(r.left), int(r.top), int(r.right - r.left), int(r.bottom - r.top))
+
+
 def foreign_foreground() -> int:
     """The focused window, unless it is one of ours. 0 when there is none.
 
@@ -1312,6 +1340,8 @@ def main() -> int:
         dda_attempted = False     # already tried for the current worker (do not spam)
         window_hwnd = None        # WGCW target; None = the whole desktop (DDA1)
         last_foreground = 0       # the last focused window that was not ours
+        follow_pos = None         # where the overlay currently sits (window mode)
+        follow_resize = None      # a pending size change, waiting to settle
         gray_active = False       # guides take luminance from the worker's gray channel
         pending_shot: Path | None = None  # a screenshot waiting for a frame with pixels
         recorder: VideoRecorder | None = None  # recording (Num0), MP4 AV1 NVENC
@@ -1674,6 +1704,7 @@ def main() -> int:
             pipeline is rebuilt for exactly that.
             """
             nonlocal window_hwnd, width, height, work_w, work_h
+            nonlocal follow_pos, follow_resize
             if hwnd and not want_dda:
                 display.alert(UI_STRINGS[lang]["win_fail"])
                 print("[main] window mode needs capture in the worker "
@@ -1700,7 +1731,50 @@ def main() -> int:
                 width, height = capture.resolution
                 note = UI_STRINGS[lang]["win_mode_off"]
             work_w, work_h = _work_size(width, height, work_scale)
+            follow_pos = None        # a fresh overlay starts at (0,0)
+            follow_resize = None
             _rebuild_pipeline(note)
+
+        def _follow_window() -> None:
+            """Keep the HUD layer on the window being processed.
+
+            Position every frame - it is one DWM call and a SetWindowPos only
+            when the window actually moved. A SIZE change is a different
+            animal: the worker, the shared memory and every texture are built
+            for one frame size, so it means rebuilding the pipeline - and doing
+            that on every pixel while someone drags a resize handle would be
+            unusable. The new size has to hold still for half a second first.
+            """
+            nonlocal follow_pos, follow_resize
+            if window_hwnd is None:
+                return
+            rect = window_frame_rect(window_hwnd)
+            if rect is None:
+                return
+            x, y, w, h = rect
+            if ctypes.windll.user32.IsIconic(ctypes.c_void_p(window_hwnd)):
+                # Minimised: the capture goes silent (the worker hides its own
+                # window for the same reason), so the HUD goes with it rather
+                # than floating over whatever is underneath.
+                if display.is_visible():
+                    display.set_visible(False)
+                    follow_pos = None
+                return
+            if not display.is_visible():
+                display.set_visible(True)
+            if (x, y) != follow_pos:
+                display.move_to(x, y)
+                follow_pos = (x, y)
+            if (w, h) != (width, height):
+                now = time.monotonic()
+                if follow_resize is None or follow_resize[0] != (w, h):
+                    follow_resize = ((w, h), now)
+                elif now - follow_resize[1] > 0.5:
+                    follow_resize = None
+                    print(f"[main] the window is now {w}x{h} - rebuilding the pipeline")
+                    _switch_window(window_hwnd)
+            else:
+                follow_resize = None
 
         def _probe_window_capture(hwnd: int) -> tuple:
             """Ask the CURRENT worker for the capture size of a window.
@@ -2319,12 +2393,13 @@ def main() -> int:
             fg = foreign_foreground()
             if fg:
                 last_foreground = fg
-            if window_hwnd is not None and frame_index % 60 == 0 and \
-                    not ctypes.windll.user32.IsWindow(window_hwnd):
-                print("[main] the captured window closed - back to full screen",
-                      file=sys.stderr)
-                _switch_window(0)
-                continue
+            if window_hwnd is not None:
+                if not ctypes.windll.user32.IsWindow(ctypes.c_void_p(window_hwnd)):
+                    print("[main] the captured window closed - back to full screen",
+                          file=sys.stderr)
+                    _switch_window(0)
+                    continue
+                _follow_window()
             if want_dda and not dda_mode and not dda_attempted:
                 if window_hwnd is not None:
                     _enable_wgc()

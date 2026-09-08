@@ -19,6 +19,7 @@
 #include <windows.h>
 #include <d3d11.h>
 #include <d3d11_4.h>
+#include <dwmapi.h>
 // Windows Graphics Capture - the per-window input (WGCW). C++/WinRT needs
 // C++17, which is why build-host.bat carries /std:c++17.
 #include <winrt/base.h>
@@ -1258,6 +1259,13 @@ static D3D12_RESOURCE_BARRIER Transition(ID3D12Resource *r, D3D12_RESOURCE_STATE
                                          D3D12_RESOURCE_STATES after);
 
 static HWND                       g_present_hwnd;
+static bool                       g_present_shown = true;  // window mode hides it when the target is minimised
+static RECT                       g_present_follow = {};   // where the target window was last seen
+// Defined here rather than with the capture code below: the present window
+// has to know whether one window is being captured, and which one, and this
+// file is compiled top to bottom.
+static bool                       g_wgc_active = false;
+static HWND                       g_wgc_hwnd = nullptr;
 static IDXGISwapChain3           *g_present_swap;
 static HANDLE                     g_present_thread;
 static DWORD                      g_present_tid;
@@ -1434,6 +1442,55 @@ static bool PresentModeActive(const VideoState &v)
         return false;
     }
     return true;
+}
+
+// One-window mode: keep the overlay exactly on the window being processed.
+//
+// The position is followed here, in the worker, because the worker is what
+// knows which window it captures - and it is two cheap calls plus a
+// SetWindowPos only when the window actually moved. The SIZE is deliberately
+// left alone (SWP_NOSIZE): the swap chain, the textures and the client's
+// shared memory are all built for one frame size, so a resize means rebuilding
+// the pipeline, which only the client can do. Until it does, the picture keeps
+// the old size in the corner of the window.
+static void FollowCapturedWindow()
+{
+    if (!g_wgc_active || g_present_hwnd == nullptr || g_wgc_hwnd == nullptr) return;
+    if (!IsWindow(g_wgc_hwnd)) return;      // the client notices and switches back
+    if (IsIconic(g_wgc_hwnd))
+    {
+        // Minimised: the capture falls silent, so the overlay gets out of the
+        // way instead of hanging a frozen frame over whatever is underneath.
+        if (g_present_shown)
+        {
+            ShowWindow(g_present_hwnd, SW_HIDE);
+            g_present_shown = false;
+            Log("[wgc] the window is minimised - the overlay is hidden");
+        }
+        return;
+    }
+    RECT r = {};
+    // DWMWA_EXTENDED_FRAME_BOUNDS, not GetWindowRect: the latter includes the
+    // invisible resize border, so the overlay would sit several pixels off
+    // and the picture would not line up with the window under it. This is
+    // also the rectangle Windows Graphics Capture hands over.
+    if (FAILED(DwmGetWindowAttribute(g_wgc_hwnd, DWMWA_EXTENDED_FRAME_BOUNDS,
+                                     &r, sizeof(r))) &&
+        !GetWindowRect(g_wgc_hwnd, &r))
+        return;
+    if (!g_present_shown)
+    {
+        ShowWindow(g_present_hwnd, SW_SHOWNOACTIVATE);
+        g_present_shown = true;
+        Log("[wgc] the window is back - the overlay is shown");
+    }
+    if (r.left != g_present_follow.left || r.top != g_present_follow.top ||
+        r.right != g_present_follow.right || r.bottom != g_present_follow.bottom)
+    {
+        g_present_follow = r;
+        SetWindowPos(g_present_hwnd, HWND_TOPMOST, r.left, r.top, 0, 0,
+                     SWP_NOSIZE | SWP_NOACTIVATE);
+    }
 }
 
 static bool PresentFrame(VideoState &v)
@@ -2752,13 +2809,19 @@ struct WgcSession
     ns_wgdx::Direct3D11::IDirect3DDevice device{nullptr};
 };
 
-static WgcSession *g_wgc = nullptr;
-static bool        g_wgc_active = false;
-static HWND        g_wgc_hwnd = nullptr;
+static WgcSession *g_wgc = nullptr;   // g_wgc_active / g_wgc_hwnd live up with the present window
 
 static void CloseWgc()
 {
     g_wgc_active = false;
+    g_present_follow = RECT{};
+    if (!g_present_shown && g_present_hwnd != nullptr)
+    {
+        // It was hidden because the target was minimised; the next mode must
+        // not inherit an invisible overlay.
+        ShowWindow(g_present_hwnd, SW_SHOWNOACTIVATE);
+        g_present_shown = true;
+    }
     if (g_wgc != nullptr)
     {
         try
@@ -3819,6 +3882,7 @@ static int RunVideo()
             const double t_pres = PhaseNow();
             // NR OFF: show the raw capture (v.color is already full-res) - the
             // NGX evaluate is skipped but the pipeline is alive (window, HUD).
+            FollowCapturedWindow();
             const bool pres_ok = bypass ? PresentBypass(v) : PresentFrame(v);
             PhaseAdd(PH_PRESENT, t_pres);
             if (!pres_ok) return 9;

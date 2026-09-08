@@ -237,6 +237,21 @@ class Display:
         except Exception:
             pass
 
+    def move_to(self, x: int, y: int) -> None:
+        """Put the overlay's top-left corner at (x, y) on the desktop.
+
+        The one-window mode needs it: the overlay is the size of the window
+        being processed and has to sit exactly on it. Topmost is reasserted on
+        the way (the insert-after argument), so a game raising itself does not
+        end up above the HUD.
+        """
+        try:
+            hwnd = pygame.display.get_wm_info()["window"]
+            # SWP_NOSIZE | SWP_NOACTIVATE - move only, never take the focus.
+            user32.SetWindowPos(hwnd, -1, int(x), int(y), 0, 0, 0x0001 | 0x0010)
+        except Exception as exc:
+            print(f"Display: WARNING could not move the overlay: {exc}")
+
     def _move_to_origin(self) -> None:
         """Move the window to (0,0) - the monitor's top left corner."""
         try:
