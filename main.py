@@ -2375,11 +2375,15 @@ def main() -> int:
             else:
                 _do_restart(new_scale, new_profile, new_params, new_small=new_small)
 
-        while running:
-            loop_start = time.perf_counter()
-            now = time.monotonic()
+        def _drain_commands() -> bool:
+            """Handle the tray/hotkey commands; False when the program must quit.
 
-            # Commands from the tray (thread-safe queue)
+            Called from the main loop AND from inside the recv wait: at 4K a
+            heavy scene can take ~1 s per NGX frame, and the hotkeys must
+            stay responsive while main waits for the worker (user: "NR toggle
+            does not always fire in Cyberpunk").
+            """
+            nonlocal running, paused, recorder, window_hwnd, work_frame, last_foreground, work_scale, params, lang, width, height, mon_w, mon_h, frame_index, pending_apply, last_restart, split_pos, startup_menu, nr_small, work_h, work_w, monitor, dda_mode, dda_attempted, present_mode, present_attempted, out_shm, out_attempted, motion_small, motion_attempted, gray_active, follow_pos, follow_resize, pts, output_rgba, pending_shot, consecutive_restarts, guide_fails, buf_full, guides, shm, worker, worker_logs, reader, worker_stop, display, tray, hotkeys, cfg
             try:
                 while True:
                     cmd = tray_commands.get_nowait()
@@ -2509,6 +2513,14 @@ def main() -> int:
                             request_apply(new_scale, cfg["profile"], params)
             except queue.Empty:
                 pass
+            return running
+
+        while running:
+            loop_start = time.perf_counter()
+            now = time.monotonic()
+
+            if not _drain_commands():
+                break
 
             # Deferred apply (coalescing): if a restart happened recently, we
             # apply the last value once the pause is over
@@ -2721,7 +2733,30 @@ def main() -> int:
 
             t0 = time.perf_counter()
             try:
-                output_rgba = reader.recv(frame_index, timeout=5.0)
+                output_rgba = None
+                recv_reader = reader
+                recv_deadline = time.monotonic() + 5.0
+                while time.monotonic() < recv_deadline:
+                    try:
+                        output_rgba = reader.recv(frame_index, timeout=0.05)
+                        break
+                    except TimeoutError:
+                        # A heavy 4K scene can take ~1 s per NGX frame -
+                        # keep the hotkeys alive while main waits (user:
+                        # "NR toggle does not always fire in Cyberpunk").
+                        if not _drain_commands():
+                            running = False
+                            break
+                        if reader is not recv_reader:
+                            break  # a command restarted the worker
+                        continue
+                else:
+                    raise TimeoutError(
+                        f"the worker has been silent for 5s on frame {frame_index} - NGX did not answer after the restart")
+                if not running:
+                    break
+                if reader is not recv_reader:
+                    continue  # the worker was restarted by a command
             except (TimeoutError, EOFError, RuntimeError, OSError) as exc:
                 consecutive_restarts += 1
                 if consecutive_restarts >= MAX_CONSECUTIVE_RESTARTS:
