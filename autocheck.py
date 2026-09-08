@@ -46,9 +46,9 @@ def fresh_worker():
 
 
 def zip_integrity():
-    zpath = ROOT / "neuralscreen-v1.2.0-full.zip"
+    zpath = ROOT / "neuralscreen-v1.2.1-full.zip"
     if not zpath.exists():
-        return False, "no neuralscreen-v1.2.0-full.zip"
+        return False, "no neuralscreen-v1.2.1-full.zip"
     required = [
         "main.py", "gpuinfo.py", "overlay_ui.py", "i18n.py", "recorder.py",
         "display.py", "guides.py", "hotkeys.py", "tray.py", "capture.py",
@@ -175,9 +175,9 @@ def git_clean():
 
 
 def release_notes_short():
-    """The v1.2.0 release notes are concise (the EN part is under 2 KB)."""
+    """The v1.2.1 release notes are concise (the EN part is under 2 KB)."""
     r = subprocess.run(
-        ["gh", "release", "view", "v1.2.0", "-R", "perseval-BLR/DLSS5-NeuralScreen",
+        ["gh", "release", "view", "v1.2.1", "-R", "perseval-BLR/DLSS5-NeuralScreen",
          "--json", "body", "--jq", ".body"],
         capture_output=True, text=True, timeout=60)
     if r.returncode != 0:
