@@ -100,7 +100,11 @@ def gpuinfo_works():
         "import gpuinfo; i = gpuinfo.probe(); "
         "print(gpuinfo.describe(i)); print('official:', i['official'])" % ROOT
     )
-    r = subprocess.run([str(py), "-c", code], capture_output=True, text=True, timeout=30)
+    # PYTHONIOENCODING: without it the child prints in the console codepage
+    # and an em-dash in the GPU name decodes into garbage (or throws).
+    env = dict(os.environ, PYTHONIOENCODING="utf-8")
+    r = subprocess.run([str(py), "-c", code], capture_output=True, text=True,
+                       timeout=30, encoding="utf-8", errors="replace", env=env)
     if r.returncode != 0:
         return False, f"gpuinfo crashed: {r.stderr.strip()[:200]}"
     out = r.stdout.strip()
@@ -167,7 +171,8 @@ def readme_consistency():
 def git_clean():
     """The working copy is clean (apart from a personal config.json)."""
     r = subprocess.run(["git", "status", "--short"], cwd=ROOT,
-                       capture_output=True, text=True)
+                       capture_output=True, text=True,
+                       encoding="utf-8", errors="replace")
     dirty = [l for l in r.stdout.splitlines() if l.strip() and "config.json" not in l]
     if dirty:
         return False, f"dirty: {dirty[:5]}"
@@ -179,7 +184,8 @@ def release_notes_short():
     r = subprocess.run(
         ["gh", "release", "view", "v1.2.1", "-R", "perseval-BLR/DLSS5-NeuralScreen",
          "--json", "body", "--jq", ".body"],
-        capture_output=True, text=True, timeout=60)
+        capture_output=True, text=True, timeout=60,
+        encoding="utf-8", errors="replace")
     if r.returncode != 0:
         return False, f"gh: {r.stderr.strip()[:100]}"
     en_part = r.stdout.split("---")[0]
