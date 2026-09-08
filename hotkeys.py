@@ -2,16 +2,17 @@
 
 The difference from polling GetAsyncKeyState is fundamental: the system
 delivers WM_HOTKEY only to us and does NOT pass the keypress to the active
-application. F10 inside a game toggles NR and the game never sees the key.
+application. Num1 inside a game toggles NR and the game never sees the key.
 Polling cannot do that — it only peeks at the key state while the press still
 reaches the game.
 
-The flip side of the same property: while NeuralScreen runs, F10 and F11
-belong to it and other programs (debuggers, games) will not get them.
+The flip side of the same property: while NeuralScreen runs, the numpad
+digits it binds belong to it and other programs (games, a spreadsheet) will
+not get them.
 
-The arrow and quit combinations are on Ctrl+Alt deliberately: bare arrows
-must not be registered — they would stop working system-wide — and quitting
-on a single key is far too easy to hit by accident.
+Quitting is on Ctrl+Alt deliberately: a single key for it is far too easy to
+hit by accident. Bare arrows are never registered either - they would stop
+working system-wide.
 
 RegisterHotKey(NULL, ...) posts WM_HOTKEY to the message queue of the CALLING
 thread, so no window is needed — only a message loop in our own thread.
@@ -47,6 +48,20 @@ VK_HOME = 0x24
 VK_CONTROL = 0x11
 VK_MENU = 0x12
 VK_SHIFT = 0x10
+VK_NUMLOCK = 0x90
+# The numpad block. These codes only arrive while Num Lock is ON: with it off
+# the same physical keys send Insert/End/arrows/Home/PageUp, and nothing in
+# RegisterHotKey or GetAsyncKeyState can tell them apart from the dedicated
+# navigation keys - which is why numpad bindings need Num Lock (see
+# numlock_needed below).
+VK_NUMPAD = {n: 0x60 + n for n in range(10)}
+VK_DECIMAL = 0x6E
+VK_MULTIPLY = 0x6A
+VK_SUBTRACT = 0x6D
+VK_ADD = 0x6B
+VK_DIVIDE = 0x6F
+_NUMPAD_VKS = set(VK_NUMPAD.values()) | {
+    VK_DECIMAL, VK_MULTIPLY, VK_SUBTRACT, VK_ADD, VK_DIVIDE}
 
 WM_HOTKEY = 0x0312
 WM_QUIT = 0x0012
@@ -59,22 +74,30 @@ MSG_RESUME = 0x8000 + 2
 MSG_REBIND = 0x8000 + 3
 
 # id -> (modifiers, VK, command, human-readable name)
-# The defaults avoid keys games use: F9 is quickload in Bethesda titles,
-# F8/F7 are screenshots in some engines, PrtScr belongs to Snip & Sketch.
-# F10/F11/Home are nearly dead in games. The polling fallback (see below)
-# does not swallow the key - it still reaches the game - so a collision
-# would fire both sides.
+# The defaults live on the numpad. The reasoning, since it changed twice:
+# function keys keep colliding with things - F9 is quickload in Bethesda
+# titles, F8/F7 are screenshots in some engines, and F10 turned out to be the
+# NVIDIA App's recording key on a real machine, so one press did two things.
+# The numpad is a block of keys almost nothing competes for, and 0-1-2-3 in a
+# row is easier to remember than three scattered F-keys.
+#
+# Two consequences to be honest about:
+#   * Num Lock has to be ON, otherwise these keys send Insert/End/arrows
+#     instead and the bindings are simply not there (main warns about it);
+#   * while NeuralScreen runs these numpad digits belong to it and other
+#     programs will not see them - that is what RegisterHotKey does, and it
+#     was equally true of F10/F11 before.
+# Quitting stays on Ctrl+Alt+Q: a single key for it is too easy to hit.
 DEFAULT_BINDINGS = {
-    1: (MOD_NOREPEAT, VK_F10, "toggle", "F10"),
-    2: (MOD_NOREPEAT, VK_F11, "settings", "F11"),
-    3: (MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, VK_UP, "scale_up", "Ctrl+Alt+Up"),
-    4: (MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, VK_DOWN, "scale_down", "Ctrl+Alt+Down"),
+    1: (MOD_NOREPEAT, VK_NUMPAD[1], "toggle", "Num1"),
+    2: (MOD_NOREPEAT, VK_NUMPAD[2], "settings", "Num2"),
+    3: (MOD_NOREPEAT, VK_NUMPAD[6], "scale_up", "Num6"),
+    4: (MOD_NOREPEAT, VK_NUMPAD[4], "scale_down", "Num4"),
     5: (MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, VK_Q, "quit", "Ctrl+Alt+Q"),
-    6: (MOD_NOREPEAT, VK_INSERT, "record", "Insert"),
-    # The screenshot lived only as a menu button, with no key to print on it.
-    # Home sits far from the WASD cluster and is free in games. Not PrtScr:
-    # Snip & Sketch takes it, and RegisterHotKey may well refuse it.
-    7: (MOD_NOREPEAT, VK_HOME, "screenshot_menu", "Home"),
+    # Num0 is the big key at the bottom of the block, and with Num Lock off it
+    # is the very Insert that used to start a recording.
+    6: (MOD_NOREPEAT, VK_NUMPAD[0], "record", "Num0"),
+    7: (MOD_NOREPEAT, VK_NUMPAD[3], "screenshot_menu", "Num3"),
 }
 
 # Key name -> VK (for parsing the config)
@@ -92,6 +115,12 @@ _KEY_NAMES = {
     "N": 0x4E, "M": 0x4D,
     "0": 0x30, "1": 0x31, "2": 0x32, "3": 0x33, "4": 0x34,
     "5": 0x35, "6": 0x36, "7": 0x37, "8": 0x38, "9": 0x39,
+    # The numpad. "NUM+" is unspellable here - the parser splits on "+" - so
+    # the arithmetic keys go by name.
+    "NUM0": 0x60, "NUM1": 0x61, "NUM2": 0x62, "NUM3": 0x63, "NUM4": 0x64,
+    "NUM5": 0x65, "NUM6": 0x66, "NUM7": 0x67, "NUM8": 0x68, "NUM9": 0x69,
+    "NUMDOT": VK_DECIMAL, "NUMMUL": VK_MULTIPLY, "NUMMINUS": VK_SUBTRACT,
+    "NUMPLUS": VK_ADD, "NUMDIV": VK_DIVIDE,
 }
 
 
@@ -144,9 +173,27 @@ def build_bindings(overrides: dict | None = None) -> dict:
 
 
 def describe(bindings: dict | None = None) -> str:
-    """A line like 'F10=toggle, F11=settings, ...' for the startup log."""
+    """A line like 'Num1=toggle, Num2=settings, ...' for the startup log."""
     src = bindings or DEFAULT_BINDINGS
     return ", ".join(f"{name}={cmd}" for _, (_, _, cmd, name) in sorted(src.items()))
+
+
+def numlock_on() -> bool:
+    """Num Lock state. The low bit of GetKeyState is the toggle, not the press."""
+    return bool(user32.GetKeyState(VK_NUMLOCK) & 1)
+
+
+def numlock_needed(bindings: dict | None = None) -> list:
+    """Binding names that do nothing while Num Lock is off.
+
+    With Num Lock off the numpad sends Insert/End/arrows instead of the
+    numeric codes, so those hotkeys are not merely inconvenient - they never
+    fire at all. Worth saying out loud rather than letting the user conclude
+    the program is broken.
+    """
+    src = bindings or DEFAULT_BINDINGS
+    return [name for _, (_, vk, _cmd, name) in sorted(src.items())
+            if vk in _NUMPAD_VKS]
 
 
 # --- polling fallback -----------------------------------------------------
@@ -157,7 +204,7 @@ def describe(bindings: dict | None = None) -> str:
 # never arrived as WM_HOTKEY. It runs ALWAYS - when RegisterHotKey works it
 # fires first and the poller's duplicate is suppressed by the cooldown; when
 # the game swallows the hotkey the poller is the only path. The key still
-# reaches the game (unlike RegisterHotKey), which is fine for F9/F8/Insert
+# reaches the game (unlike RegisterHotKey), which is fine for the numpad keys
 # and the Ctrl+Alt combinations.
 
 POLL_INTERVAL = 0.03

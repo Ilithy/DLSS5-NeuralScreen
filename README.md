@@ -45,15 +45,17 @@ delete the folder.
 
 ## Using it
 
-The program sits in the tray and draws over your desktop. Press **F11** for the
-menu.
+The program sits in the tray and draws over your desktop. Press **Num2** for
+the menu. The hotkeys live on the numpad, so **Num Lock has to be on** - with
+it off those keys send Insert/End/arrows instead and nothing happens.
 
 | Key | What it does |
 |---|---|
-| **F11** | open / close the menu |
-| **F10** | neural rendering on / off |
-| **Home** | screenshot |
-| **Insert** | start / stop recording, with sound |
+| **Num2** | open / close the menu |
+| **Num1** | neural rendering on / off |
+| **Num3** | screenshot |
+| **Num0** | start / stop recording, with sound |
+| **Num4** / **Num6** | processing resolution down / up |
 | **Ctrl+Alt+Q** | quit |
 
 Every key can be reassigned in the menu, under the sliders icon.
@@ -92,8 +94,8 @@ with Windows, key assignments — is behind the sliders icon.
 
 ## Recording and screenshots
 
-**Insert** records what you see, with the system sound, into an MP4 in
-`recordings`. **Home** saves a screenshot. If the menu is open it appears in
+**Num0** records what you see, with the system sound, into an MP4 in
+`recordings`. **Num3** saves a screenshot. If the menu is open it appears in
 both, on purpose.
 
 Recording has to be done from inside the program: OBS, ShadowPlay and NVIDIA

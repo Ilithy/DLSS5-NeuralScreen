@@ -1,7 +1,7 @@
 """VideoRecorder - writes NR overlay frames into an MP4 (AV1 NVENC + AAC).
 
 Records the frames Python receives from the worker (output_rgba) while
-recording is on (Insert). Frames arrive full-res RGBA8 every ~30 ms; PyAV
+recording is on (Num0). Frames arrive full-res RGBA8 every ~30 ms; PyAV
 converts them to yuv420p and encodes AV1 through NVENC.
 
 System audio comes from WASAPI loopback (audio.LoopbackCapture) as a second
@@ -29,7 +29,7 @@ from audio import LoopbackCapture
 
 class VideoRecorder:
     """Writes frames into an MP4 (av1_nvenc). Created when recording starts,
-    closed on Insert/exit. write()/close() are called from the main loop only.
+    closed on Num0/exit. write()/close() are called from the main loop only.
 
     Encoding runs in its own thread. A 4K measurement showed a synchronous
     write() cost 19.9 ms per frame - the RGBA->yuv420p conversion and the

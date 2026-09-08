@@ -6,10 +6,10 @@ The loop: desktop capture (capture.ScreenCapture) -> motion guides
 
 Controls (global hotkeys, RegisterHotKey + a polling fallback - see
 hotkeys.py):
-    F10           - NR on/off
-    F11           - the settings menu
-    Home          - screenshot
-    Insert        - recording
+    Num1          - NR on/off
+    Num2          - the settings menu
+    Num3          - screenshot
+    Num0          - recording
     Ctrl+Alt+Up/Down - processing scale
     Ctrl+Alt+Q    - quit (the same as "Exit" in the tray)
 
@@ -81,7 +81,8 @@ from capture import ScreenCapture, list_monitors
 from display import Display
 from guides import TemporalGuideGenerator
 from hotkeys import (HotkeyController, build_bindings,
-                     describe as describe_hotkeys, parse_binding)
+                     describe as describe_hotkeys, numlock_needed, numlock_on,
+                     parse_binding)
 from recorder import VideoRecorder
 from gpuinfo import describe as gpu_describe, probe as gpu_probe
 from i18n import STRINGS as UI_STRINGS
@@ -1019,7 +1020,7 @@ def restart_worker(worker: subprocess.Popen, params: dict, width: int, height: i
 
 
 def hotkey_labels(bindings: dict) -> dict:
-    """Bindings -> {command: "F10"} for the captions on the menu buttons."""
+    """Bindings -> {command: "Num1"} for the captions on the menu buttons."""
     return {cmd: name for _mods, _vk, cmd, name in bindings.values()}
 
 
@@ -1181,10 +1182,10 @@ def main() -> int:
 
         # Global hotkeys: RegisterHotKey rather than polling the key state.
         # The system gives the keypress to us alone and does not pass it to the
-        # active application - F10 inside a game toggles NR and the game never
-        # sees the key (the polling fallback does not swallow it, but F10 is
-        # free in games). The commands go into the same queue the tray uses. The
-        # user's bindings come from config.json ("hotkeys": {"toggle": "F10", ...}).
+        # active application - Num1 inside a game toggles NR and the game never
+        # sees the key (the polling fallback does not swallow it, but the numpad
+        # is free in games). The commands go into the same queue the tray uses. The
+        # user's bindings come from config.json ("hotkeys": {"toggle": "Num1", ...}).
         hotkey_overrides = cfg.get("hotkeys")
         if not isinstance(hotkey_overrides, dict):
             hotkey_overrides = {}
@@ -1197,11 +1198,20 @@ def main() -> int:
         if hotkeys.failed:
             print(f"[main] hotkeys taken by another program: {', '.join(hotkeys.failed)}",
                   file=sys.stderr)
+        # The numpad sends different key codes with Num Lock off, so those
+        # bindings do not misbehave - they are simply absent. Say so, or it
+        # looks like the program ignores the keyboard.
+        numpad = numlock_needed(hotkey_bindings)
+        if numpad and not numlock_on():
+            print(f"[main] Num Lock is off: the numpad hotkeys "
+                  f"({', '.join(numpad)}) will not fire until it is on",
+                  file=sys.stderr)
+            display.alert(UI_STRINGS[lang]["numlock_off"], duration=6.0)
         # The captions on the menu buttons come from the same bindings that were
         # registered. Strictly after build_bindings: before that they do not exist.
         display.menu.set_hotkeys(hotkey_labels(hotkey_bindings))
 
-        # The settings live in the overlay menu (F11). There is no separate
+        # The settings live in the overlay menu (Num2). There is no separate
         # window any more: it was a second interface over the same fields, it
         # stole focus from the game and dragged the whole of tcl/tk into the
         # runtime.
@@ -1218,7 +1228,7 @@ def main() -> int:
         paused = False
         frame_index = 0
         pts = 0
-        guide = None  # initialised before the loop: F10 before the first NR frame must not raise NameError
+        guide = None  # initialised before the loop: Num1 before the first NR frame must not raise NameError
         output_rgba = None  # the last NR frame (for a screenshot); None until the first one
         # WNDO mode: the worker shows the frame, no pixels come back to Python.
         want_present = bool(cfg.get("worker_present", True))
@@ -1240,7 +1250,7 @@ def main() -> int:
         dda_attempted = False     # already tried for the current worker (do not spam)
         gray_active = False       # guides take luminance from the worker's gray channel
         pending_shot: Path | None = None  # a screenshot waiting for a frame with pixels
-        recorder: VideoRecorder | None = None  # recording (Insert), MP4 AV1 NVENC
+        recorder: VideoRecorder | None = None  # recording (Num0), MP4 AV1 NVENC
         work_frame = None  # the current work frame; None -> grab at the top of the loop
         fps_window: list[float] = []
         last_log = time.monotonic()
@@ -1945,7 +1955,7 @@ def main() -> int:
                     print(f"[main] interface language -> {lang}")
             elif kind == "capture":
                 # While the menu waits for a keypress the global hotkeys must
-                # be suspended: otherwise F11 toggles the menu instead of
+                # be suspended: otherwise Num2 toggles the menu instead of
                 # landing in the field.
                 if action[1]:
                     hotkeys.suspend()
@@ -2039,7 +2049,7 @@ def main() -> int:
                               f"(frames processed {frame_index})")
                         running = False
                     elif cmd == "settings":
-                        # F11 and a left click on the tray open the overlay
+                        # Num2 and a left click on the tray open the overlay
                         # menu - the only place the settings live.
                         display.menu.set_state(_menu_payload())
                         opened = display.menu.toggle()
@@ -2058,7 +2068,7 @@ def main() -> int:
                     elif cmd == "screenshot_menu":
                         _open_save_dialog()
                     elif cmd == "record":
-                        # Insert: record the NR frame into an MP4. The frames
+                        # Num0: record the NR frame into an MP4. The frames
                         # are requested from the worker through
                         # FRAME_FLAG_WANT_PIXELS (the screenshot mechanism,
                         # but for every recorded frame).

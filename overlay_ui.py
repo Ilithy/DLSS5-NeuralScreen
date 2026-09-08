@@ -64,9 +64,15 @@ HOTKEY_ROWS = (
 
 
 # pygame.key.name() gives "page up" while the parser in hotkeys.parse_binding
-# expects "PGUP". These are the only ones that differ.
+# expects "PGUP", and the numpad comes back as "[1]" where the parser wants
+# "NUM1". These are the only ones that differ.
 _KEY_ALIASES = {"page up": "PGUP", "page down": "PGDN",
-                "return": "ENTER", "escape": "ESC"}
+                "return": "ENTER", "escape": "ESC",
+                "[.]": "Numdot", "[+]": "Numplus", "[-]": "Numminus",
+                "[*]": "Nummul", "[/]": "Numdiv"}
+# Mixed case on purpose: the parser upper-cases anyway, and "Num3" is what the
+# default bindings print on the buttons.
+_KEY_ALIASES.update({f"[{n}]": f"Num{n}" for n in range(10)})
 
 
 def key_text(event) -> str | None:
@@ -220,7 +226,7 @@ class OverlayMenu:
         self.page = "main"
         # The command we are currently waiting for a keypress for (or None).
         self.capturing: str | None = None
-        # Hotkey captions: command -> "F10". They come from main together with
+        # Hotkey captions: command -> "Num1". They come from main together with
         # the bindings, so a remap shows up on the buttons immediately.
         self.hotkeys: dict = {}
         self._sections: list = []
@@ -267,7 +273,7 @@ class OverlayMenu:
         return getattr(self, "_drag_item", None) is not None
 
     def set_hotkeys(self, mapping: dict) -> None:
-        """Hotkey captions: command -> "F10". Sourced from the real bindings."""
+        """Hotkey captions: command -> "Num1". Sourced from the real bindings."""
         self.hotkeys = dict(mapping or {})
 
     def set_stats(self, hud: dict) -> None:
@@ -1011,7 +1017,7 @@ class OverlayMenu:
 
     def _draw_hotkeys(self, surface, s: dict) -> None:
         """The hotkey line. Otherwise there is nowhere to learn about
-        F10/Insert/Ctrl+Alt+Q."""
+        Num1/Num0/Ctrl+Alt+Q."""
         rect = getattr(self, "_hotkeys_rect", None)
         if rect is None:
             return

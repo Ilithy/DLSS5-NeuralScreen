@@ -9,9 +9,9 @@ Every number here was measured on this machine - RTX 5070 Ti, driver
 conclusion turned out to be wrong, the correction is kept rather than
 quietly edited out: the mistakes are the useful part.
 
-## Recording (Insert)
+## Recording (Num0)
 
-`Insert` starts/stops recording of the **NR-processed frame** into
+`Num0` starts/stops recording of the **NR-processed frame** into
 `recordings/neuralscreen-<timestamp>.mp4`:
 
 - AV1 NVENC hardware encoding at your desktop resolution, **60 fps**,
@@ -99,7 +99,7 @@ not.
 | `split` | 0–1, share of the frame left unprocessed for the before/after wipe; 0 — off |
 | `theme` | `light` / `dark` |
 | `open_menu_on_start` | open the menu on launch; `false` — a short alert instead |
-| `hotkeys` | `{"toggle": "F10", ...}` — see Controls |
+| `hotkeys` | `{"toggle": "Num1", ...}` — see Controls. Names: `Num0`-`Num9`, `Numdot`, `Numplus`, `Numminus`, `Nummul`, `Numdiv`, `F1`-`F12`, `Insert`, `Home`, letters, digits, with `Ctrl+`/`Alt+`/`Shift+` |
 | `menu_offset`, `menu_scale`, `menu_height` | where the menu sits, its scale and height. Written by the app, not meant to be edited by hand (`menu_height: null` — fit the content) |
 
 ## Architecture
@@ -139,7 +139,7 @@ is filled with a chroma key and made transparent (`LWA_COLORKEY`). While the
 menu is open the window's global alpha (`LWA_ALPHA`) goes to 255, otherwise
 the bright frame underneath bleeds through the panel.
 
-**NR off (bypass).** `F10` does not stop the pipeline anymore. Frames are
+**NR off (bypass).** `Num1` does not stop the pipeline anymore. Frames are
 sent with `FRAME_FLAG_BYPASS`: the worker skips the NGX evaluate and
 presents the raw capture instead. The overlay stays alive; everything is
 hidden only on real exit.

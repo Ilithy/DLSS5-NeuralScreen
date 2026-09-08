@@ -559,7 +559,13 @@ class Display:
         pygame.display.flip()
 
     def poll_events(self) -> List[str]:
-        """Return event names: 'quit' (Esc / window close), 'toggle' (F10)."""
+        """Return event names: 'quit' (Esc / window close), 'toggle' (Num1/F10).
+
+        This is the local path, for when our own window has the focus - the
+        global hotkeys are RegisterHotKey in hotkeys.py. Num1 matches the
+        default binding; F10 stays because it was the default before and is
+        still what a habit reaches for.
+        """
         events = []
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
@@ -567,7 +573,7 @@ class Display:
             elif event.type == pygame.KEYDOWN:
                 if event.key == pygame.K_ESCAPE:
                     events.append("quit")
-                elif event.key == pygame.K_F10:
+                elif event.key in (pygame.K_KP1, pygame.K_F10):
                     events.append("toggle")
         return events
 
@@ -604,7 +610,7 @@ class Display:
         self.screen.blit(surf, (rect.x + pad_x, rect.y + pad_y))
 
 def main() -> int:
-    """Standalone smoke test: gradient frames + HUD until Esc/F10."""
+    """Standalone smoke test: gradient frames + HUD until Esc/Num1."""
     disp = Display(2560, 1440)
     disp.set_hud({
         "fps": 60.0,

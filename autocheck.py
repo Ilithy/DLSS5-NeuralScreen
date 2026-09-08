@@ -196,9 +196,23 @@ def release_notes_short():
 
 # --- driving the running program (the GUI and smoke checks share this) ---
 LOG = ROOT / "NeuralScreen.log"
-VK_INSERT = 0x2D
-VK_Q = 0x51
 KEYEVENTF_KEYUP = 0x0002
+_MOD_VK = {0x0002: 0x11, 0x0001: 0x12, 0x0004: 0x10}  # Ctrl / Alt / Shift
+
+
+def binding_keys(command):
+    """The default binding for a command as (vk, modifier vks).
+
+    Taken from hotkeys.DEFAULT_BINDINGS rather than written out here: the
+    defaults have moved twice already, and a check that presses yesterday's
+    key tests nothing.
+    """
+    sys.path.insert(0, str(ROOT))
+    from hotkeys import DEFAULT_BINDINGS
+    for mods, vk, cmd, _name in DEFAULT_BINDINGS.values():
+        if cmd == command:
+            return vk, tuple(v for bit, v in _MOD_VK.items() if mods & bit)
+    raise KeyError(command)
 
 
 def send_key(vk, mods=()):
@@ -266,7 +280,7 @@ def wait_for(offset, needle, timeout):
 def quit_app(timeout=8.0):
     """Ctrl+Alt+Q, then confirm nothing of ours is left running."""
     import time
-    send_key(VK_Q, (0x11, 0x12))
+    send_key(*binding_keys("quit"))
     deadline = time.monotonic() + timeout
     left = []
     while time.monotonic() < deadline:
@@ -337,10 +351,11 @@ def gui_check():
     offset = launch()
     if wait_for(offset, "NR ON", timeout=25.0) is None:
         return False, "NeuralScreen did not come up (no 'NR ON' in the log)"
-    # 2. record for 5 seconds
-    send_key(VK_INSERT)
+    # 2. record for 5 seconds - with the key the program actually binds
+    record = binding_keys("record")
+    send_key(*record)
     time.sleep(5)
-    send_key(VK_INSERT)
+    send_key(*record)
     time.sleep(3)
     recs = sorted((ROOT / "recordings").glob("neuralscreen-*.mp4"),
                   key=lambda p: p.stat().st_mtime)
