@@ -175,8 +175,9 @@ the menu catches up when the load drops.
   the screen capture; the tests refuse to run while one is up, but the
   program itself does not stop you. Close the first one before starting
   another.
-- **The window list is not in the menu yet.** Num5 takes the window under the
-  cursor (or the last focused one); choosing from a list is planned.
+- **The window list** in the menu shows every visible window; picking one
+  switches to it. Num5 still takes the window under the cursor for the
+  quick path.
 - **A second monitor** is supported but was not tested with a window between
   monitors.
 - **The menu position in window mode** starts in the bottom-right corner of
