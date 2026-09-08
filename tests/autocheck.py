@@ -14,7 +14,7 @@ import sys
 import zipfile
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parent.parent  # the project root (tests/ lives inside it)
 FAILS = []
 
 

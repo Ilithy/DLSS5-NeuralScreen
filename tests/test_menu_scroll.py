@@ -15,7 +15,8 @@ os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
 
 import pygame  # noqa: E402
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # the project root
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # tests/ (autocheck)
 import overlay_ui  # noqa: E402
 
 STATE = {

@@ -30,8 +30,9 @@ from pathlib import Path
 
 import numpy as np
 
-BASE = Path(__file__).resolve().parent
-sys.path.insert(0, str(BASE))
+BASE = Path(__file__).resolve().parent.parent  # the project root
+sys.path.insert(0, str(BASE))  # the project modules (main.py, display.py, ...)
+sys.path.insert(0, str(Path(__file__).resolve().parent))  # tests/ (autocheck)
 
 # Physical pixels, before pygame loads: SDL freezes the process DPI awareness
 # at import, and a window measured in logical units would not match what the

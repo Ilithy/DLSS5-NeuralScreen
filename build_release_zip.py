@@ -81,7 +81,7 @@ def _skip(path: str) -> bool:
     # Dev-only files: the tests, the test runner and the release builder are
     # for the repository, not for the end user. The archive must contain
     # exactly what the program needs to run (user rule 2026-09-08).
-    if norm in DEV_ONLY or norm.startswith("test_"):
+    if norm in DEV_ONLY or norm.startswith("tests/") or norm.startswith("test_"):
         return True
     # .pyc/__pycache__ is dead weight (~13 MB in the zip): pythonw regenerates
     # them on the fly, a distribution does not need them.

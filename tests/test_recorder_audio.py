@@ -20,8 +20,9 @@ from pathlib import Path
 import av
 import numpy as np
 
-BASE = Path(__file__).resolve().parent
-sys.path.insert(0, str(BASE))
+BASE = Path(__file__).resolve().parent.parent  # the project root
+sys.path.insert(0, str(BASE))  # the project modules (main.py, display.py, ...)
+sys.path.insert(0, str(Path(__file__).resolve().parent))  # tests/ (autocheck)
 from recorder import VideoRecorder  # noqa: E402
 
 W, H = 1280, 720

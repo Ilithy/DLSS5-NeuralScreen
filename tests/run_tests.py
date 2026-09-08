@@ -34,7 +34,7 @@ try:
 except Exception:
     pass
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parent.parent  # the project root (tests/ lives inside it)
 PY = ROOT / "runtime" / "python.exe"
 TIMEOUT = 600
 
@@ -58,20 +58,21 @@ ABOUT = {
 
 def tracked_tests() -> list:
     try:
-        out = subprocess.check_output(["git", "ls-files", "test_*.py"], cwd=ROOT,
+        out = subprocess.check_output(["git", "ls-files", "tests/test_*.py"], cwd=ROOT,
                                       text=True, encoding="utf-8", errors="replace")
         names = [n.strip() for n in out.splitlines() if n.strip()]
         if names:
             return sorted(names)
     except Exception as exc:
         print(f"(git ls-files failed: {exc!r} - falling back to a glob)")
-    return sorted(p.name for p in ROOT.glob("test_*.py"))
+    return sorted(p.name for p in ROOT.glob("tests/test_*.py"))
 
 
 def run(label: str, args: list, note: str = "") -> dict:
     print(f"\n>>> {label}" + (f"  ({note})" if note else ""))
     started = time.monotonic()
     try:
+        args = [a if a.startswith("tests/") else f"tests/{a}" for a in args]
         r = subprocess.run([str(PY)] + args, cwd=ROOT, timeout=TIMEOUT,
                            capture_output=True, text=True, env=CHILD_ENV,
                            encoding="utf-8", errors="replace")

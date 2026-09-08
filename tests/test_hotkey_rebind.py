@@ -15,7 +15,8 @@ import sys
 import time
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # the project root
+sys.path.insert(0, str(Path(__file__).resolve().parent))  # tests/ (autocheck)
 from hotkeys import (DEFAULT_BINDINGS, HotkeyController,  # noqa: E402
                      MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, build_bindings)
 

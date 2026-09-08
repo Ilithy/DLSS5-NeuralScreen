@@ -22,8 +22,9 @@ import sys
 import time
 from pathlib import Path
 
-BASE = Path(__file__).resolve().parent
-sys.path.insert(0, str(BASE))
+BASE = Path(__file__).resolve().parent.parent  # the project root
+sys.path.insert(0, str(BASE))  # the project modules (main.py, display.py, ...)
+sys.path.insert(0, str(Path(__file__).resolve().parent))  # tests/ (autocheck)
 
 from hotkeys import HotkeyController, MOD_NOREPEAT  # noqa: E402
 
