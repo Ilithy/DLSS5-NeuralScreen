@@ -773,6 +773,39 @@ def window_under_cursor() -> int:
     return int(top)
 
 
+def list_capturable_windows() -> list[tuple[int, str]]:
+    """Visible top-level windows that can be captured: (hwnd, title).
+
+    The window list for the menu. Excludes our own windows, the desktop
+    (Progman/WorkerW) and windows without a title.
+    """
+    user32 = ctypes.windll.user32
+    out: list[tuple[int, str]] = []
+
+    @ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+    def cb(hwnd, _lparam):
+        if not user32.IsWindowVisible(hwnd) or user32.IsIconic(hwnd):
+            return True
+        pid = ctypes.c_ulong(0)
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        if pid.value == os.getpid():
+            return True
+        if _is_desktop_window(hwnd):
+            return True
+        length = user32.GetWindowTextLengthW(hwnd)
+        if length <= 0:
+            return True
+        buf = ctypes.create_unicode_buffer(length + 1)
+        user32.GetWindowTextW(hwnd, buf, length + 1)
+        title = buf.value.strip()
+        if title:
+            out.append((int(hwnd), title))
+        return True
+
+    user32.EnumWindows(cb, 0)
+    return out
+
+
 def send_gray(worker: subprocess.Popen, width: int, height: int,
               name: str, flags: int = 0, pts: int = 0) -> None:
     """GRAY: give the worker the name of the reverse mapping for luminance.
@@ -2221,6 +2254,7 @@ def main() -> int:
         def _menu_payload() -> dict:
             """The current state for the menu - a single source of truth."""
             _refresh_gpu_ok()
+            wins = list_capturable_windows()
             return {
                 "nr": not paused,
                 "work_scale": work_scale,
@@ -2247,6 +2281,9 @@ def main() -> int:
                 "gpu_ok": gpu_ok,
                 "monitor": str(monitor),
                 "monitors": [f"{i}: {w}x{h}" for i, w, h in list_monitors()],
+                "windows": [f"{h:X}: {t}" for h, t in wins],
+                "window_current": next(
+                    (f"{h:X}: {t}" for h, t in wins if h == window_hwnd), ""),
             }
 
         def _apply_menu_action(action: tuple) -> None:
@@ -2341,6 +2378,20 @@ def main() -> int:
                     return
                 if new_monitor != monitor:
                     _switch_monitor(new_monitor)
+            elif kind == "window":
+                # The window list in the menu: the value is "hwnd: title".
+                try:
+                    target = int(str(action[1]).split(":")[0], 16)
+                except (ValueError, IndexError):
+                    print(f"[main] invalid window: {action[1]!r}", file=sys.stderr)
+                    return
+                if not ctypes.windll.user32.IsWindow(ctypes.c_void_p(target)):
+                    print(f"[main] the window 0x{target:X} is gone", file=sys.stderr)
+                    display.alert(UI_STRINGS[lang]["win_fail"])
+                    return
+                print(f"[main] window mode on from the menu - target hwnd "
+                      f"0x{target:X}")
+                _switch_window(target)
             elif kind == "button":
                 name = action[1]
                 if name == "close":

@@ -512,6 +512,10 @@ class OverlayMenu:
                       ["EN", "RU"])
             segmented("theme", s["theme"], self.state.get("theme", "light"),
                       ["light", "dark"], [s["theme_light"], s["theme_dark"]])
+            windows = self.state.get("windows") or []
+            if windows:
+                choice("window", s.get("window", "Window"),
+                       str(self.state.get("window_current", "")), windows)
 
         # The footer: actions with the hotkey printed underneath. "Collapse"
         # and "Exit" used to look equally harmless, even though one hides the
@@ -819,6 +823,8 @@ class OverlayMenu:
             return [("theme", value)]
         if key == "monitor":
             return [("monitor", value)]
+        if key == "window":
+            return [("window", value)]
         return []
 
     def _slide(self, item: Item, mouse_x: int) -> list[tuple]:
