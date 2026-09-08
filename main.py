@@ -220,14 +220,29 @@ DEFAULT_LANG = "en"
 
 def _work_size(width: int, height: int, scale: float) -> tuple[int, int]:
     """The NGX work resolution: scale of full, but no larger than
-    WORK_MAX_W/H (NGX goes silent at 4K - the limit verified in isolation)."""
-    w = max(64, int(round(width * scale / 2) * 2))
-    h = max(64, int(round(height * scale / 2) * 2))
+    WORK_MAX_W/H (NGX goes silent at 4K - the limit verified in isolation).
+
+    Two rules that come from being bitten:
+
+    At 1:1 the answer is the frame itself, with no rounding. Rounding to the
+    nearest even number turned a 539-pixel-high window (900x500 plus its title
+    bar) into a 540-high work size - larger than the frame - and the worker
+    died on the header. An odd size at 1:1 stays on the legacy path, which is
+    known to work (test_odd_frame_size).
+
+    And a downscale rounds DOWN, never up: the work resolution must never
+    exceed the frame it came from.
+    """
+    if scale >= 1.0:
+        w, h = int(width), int(height)
+    else:
+        w = max(64, int(width * scale) // 2 * 2)
+        h = max(64, int(height * scale) // 2 * 2)
     if w > WORK_MAX_W or h > WORK_MAX_H:
         k = min(WORK_MAX_W / w, WORK_MAX_H / h)
-        w = max(64, int(round(w * k / 2) * 2))
-        h = max(64, int(round(h * k / 2) * 2))
-    return w, h
+        w = max(64, int(w * k) // 2 * 2)
+        h = max(64, int(h * k) // 2 * 2)
+    return min(w, int(width)), min(h, int(height))
 
 
 class SharedFrameBuffer:
@@ -1723,7 +1738,12 @@ def main() -> int:
                     print(f"[main] the worker cannot capture that window: {exc}",
                           file=sys.stderr)
                     return
-                if aw <= 0 or ah <= 0:
+                if aw < 64 or ah < 64:
+                    # Below the work-resolution floor there is nothing to
+                    # process - and a work size larger than the frame is how
+                    # the worker gets killed.
+                    print(f"[main] the window is {aw}x{ah} - too small to process",
+                          file=sys.stderr)
                     display.alert(UI_STRINGS[lang]["win_fail"])
                     return
                 _teardown_pipeline()

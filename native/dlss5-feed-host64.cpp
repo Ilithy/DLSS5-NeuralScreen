@@ -1198,7 +1198,7 @@ struct VideoState
 {
     UINT w = 0, hgt = 0;          // work resolution (NGX feature resolution)
     UINT full_w = 0, full_h = 0;  // full-res frame size (0 = legacy 1:1 mode)
-    bool upscale = false;         // full_w > 0 && full_w != w: feature does full->work->full
+    bool upscale = false;         // full size given AND different from work: feature does full->work->full
     VideoTex color, depth, mv, mask;
     ID3D12Resource *output = nullptr;
     ID3D12Resource *readback = nullptr;

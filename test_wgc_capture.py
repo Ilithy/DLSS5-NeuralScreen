@@ -160,8 +160,12 @@ def main() -> int:
         if (aw, ah) != (W, H):
             failures.append(f"the capture is {aw}x{ah}, the window is {W}x{H}")
 
+        # 60 attempts, not 40: the assertion itself has a wide margin (99%+
+        # measured against a 95% threshold), but a window that has not
+        # repainted yet returns no frame at all, and one suite run out of
+        # several failed on exactly that.
         pixels = None
-        for i in range(40):
+        for i in range(60):
             repaint(i)
             send_capture_frame(worker, i, motion)
             got = recv_result(worker)

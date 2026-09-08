@@ -90,6 +90,10 @@ class VideoRecorder:
         self._container = av.open(path, mode="w")
         self._stream = self._container.add_stream("av1_nvenc", rate=int(round(fps)))
         self._stream.width = width
+        # An odd height is rounded up by the encoder (yuv420p needs even
+        # dimensions) and the last row comes out duplicated. One-window mode
+        # makes odd sizes normal - a window with a title bar is 539 high - and
+        # a duplicated bottom row is a better answer than cropping a real one.
         self._stream.height = height
         self._stream.pix_fmt = "yuv420p"
         # MP4 (mov) muxer + nvenc: constant time_base 1/fps, pts is a counter.
@@ -271,11 +275,17 @@ class VideoRecorder:
         """Queue a frame for the encoder (RGBA8 full-res, 4 channels).
 
         PTS is built from the REAL recording time, not from a frame counter:
-        frames arrive at the pipeline's actual fps (~16-32), not exactly 30,
-        and the container must reflect the real duration - otherwise the video
-        plays back sped up. We compute it HERE, when the frame arrives: inside
-        the thread it would reflect the moment of encoding, i.e. it would be
-        off by the whole queue depth.
+        frames arrive at whatever rate the pipeline manages, and the container
+        must reflect the real duration - otherwise the video plays back at the
+        wrong speed. We compute it HERE, when the frame arrives: inside the
+        thread it would reflect the moment of encoding, i.e. it would be off by
+        the whole queue depth.
+
+        Frames that arrive faster than the stream's rate are dropped. A small
+        window runs the pipeline at ~140 FPS, and a 60 fps stream has no slot
+        for the extra ones; the old code handed them the next free counter
+        value instead, which turned five seconds of screen into an 11.8-second
+        file in slow motion.
         """
         if rgba.shape[0] != self.height or rgba.shape[1] != self.width:
             # The display mode changed - frames have a different shape. Skipping
@@ -293,8 +303,12 @@ class VideoRecorder:
                                             name="nr-encode", daemon=True)
             self._thread.start()
         elapsed = time.perf_counter() - self._started
-        pts_by_time = int(round(elapsed * self.fps))
-        pts = max(self._frame_idx + 1, pts_by_time)
+        pts = int(round(elapsed * self.fps))
+        if pts <= self._frame_idx:
+            # This second already has its quota of frames. Real time decides
+            # the duration, so the surplus goes away instead of stretching it.
+            self.dropped += 1
+            return
         self._frame_idx = pts
         try:
             self._queue.put((pts, rgba), timeout=self.PUT_TIMEOUT_S)
