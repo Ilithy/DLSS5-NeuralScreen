@@ -60,7 +60,7 @@ def system_cursor_visible() -> bool:
     Kept for the open problem it belongs to: a fullscreen game hides the
     cursor and our menu is then unusable. Drawing our own pointer was tried
     and reverted - it produced a SECOND pointer in real use, which is worse
-    than none. See the limitations section of the README.
+    than none. See "The menu pointer is missing or frozen" in the README.
 
     A fullscreen game hides it (ShowCursor(FALSE) on its own input queue) and
     it stays hidden while our menu is up. When it is gone the overlay draws

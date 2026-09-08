@@ -290,7 +290,11 @@ class HotkeyController:
                     # it the poller delivered the same command again ~30 ms
                     # later and every hotkey fired twice: NR toggled on and
                     # straight back off, the menu opened and closed.
-                    self._poll_last[binding[1]] = time.monotonic()
+                    vk = binding[1]
+                    now = time.monotonic()
+                    if now - self._poll_last.get(vk, 0.0) < POLL_COOLDOWN:
+                        continue  # the poller already delivered this press
+                    self._poll_last[vk] = now
                     self._commands.put(binding[2])
             elif msg.message == MSG_SUSPEND:
                 self._unregister()
@@ -328,8 +332,14 @@ class HotkeyController:
         suppresses the duplicate of a press RegisterHotKey already delivered -
         the message loop stamps the same table when it hands over a WM_HOTKEY,
         which is what makes the fallback invisible while the normal path works.
+        The poller also honours suspend: the message loop unregisters the
+        hotkeys while the menu waits for a rebind key, and the poller must
+        go quiet the same way - otherwise the key being remapped fires through
+        the poller and breaks the capture (audit #4, HIGH).
         """
         while not self._poll_stop.wait(POLL_INTERVAL):
+            if not self._active:
+                continue                  # suspended (or not yet registered)
             with self._lock:
                 bindings = dict(self._bindings)
             now = time.monotonic()

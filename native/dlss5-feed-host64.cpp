@@ -2623,16 +2623,16 @@ static StageResult StageCapturedFrame(ID3D11Texture2D *frame, UINT *out_w, UINT 
         IDXGIResource1 *r1 = nullptr;
         g_dda_shared->QueryInterface(__uuidof(IDXGIResource1), (void **)&r1);
         if (!r1 || FAILED(r1->CreateSharedHandle(nullptr, DXGI_SHARED_RESOURCE_READ, nullptr, &g_dda_nt)))
-        { Log("[cap] NT handle failed"); if (r1) r1->Release(); return StageResult::Failed; }
+        { Log("[cap] NT handle failed"); if (r1) r1->Release(); goto fail_capture; }
         r1->Release();
         if (FAILED(h.dev->OpenSharedHandle(g_dda_nt, __uuidof(ID3D12Resource),
                                            (void **)&g_dda_d12)))
-        { Log("[cap] OpenSharedHandle failed"); return StageResult::Failed; }
+        { Log("[cap] OpenSharedHandle failed"); goto fail_capture; }
         // cross-device signal fence
         g_dda_fence_value = 1;
         if (FAILED(h.dev->CreateFence(0, D3D12_FENCE_FLAG_SHARED, __uuidof(ID3D12Fence),
                                       reinterpret_cast<void **>(&g_dda_signal))))
-        { Log("[cap] signal fence failed"); return StageResult::Failed; }
+        { Log("[cap] signal fence failed"); goto fail_capture; }
         HANDLE nt_f = nullptr;
         h.dev->CreateSharedHandle(g_dda_signal, nullptr, GENERIC_ALL, nullptr, &nt_f);
         ID3D11Device5 *d5 = nullptr;
@@ -2643,7 +2643,7 @@ static StageResult StageCapturedFrame(ID3D11Texture2D *frame, UINT *out_w, UINT 
         }
         if (nt_f) CloseHandle(nt_f);
         if (!g_dda_signal11)
-        { Log("[cap] no D3D11 fence - capture invalid"); return StageResult::Failed; }
+        { Log("[cap] no D3D11 fence - capture invalid"); goto fail_capture; }
         D3D12_HEAP_PROPERTIES def = { D3D12_HEAP_TYPE_DEFAULT };
         D3D12_RESOURCE_DESC td = {};
         td.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
@@ -2655,9 +2655,14 @@ static StageResult StageCapturedFrame(ID3D11Texture2D *frame, UINT *out_w, UINT 
                                                   D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr,
                                                   __uuidof(ID3D12Resource),
                                                   reinterpret_cast<void **>(&g_dda_dst))))
-        { Log("[cap] dst UAV failed"); return StageResult::Failed; }
+        { Log("[cap] dst UAV failed"); goto fail_capture; }
         Log("[cap] shared texture %ux%u ready", (UINT)fd.Width, (UINT)fd.Height);
     }
+    // Any failure inside the "first frame" block leaves a PARTIAL bridge:
+    // g_dda_shared alive with a NULL fence, and the next frame would copy
+    // into the texture and hit g_dda_signal->GetCompletedValue() on null.
+    // CloseDda() releases the whole bridge so the next attempt restarts
+    // from scratch (audit #4, MEDIUM).
     // g_dda_shared is created for the size of the FIRST frame. When the source
     // changes size (monitor resolution, or the captured window resized), a
     // CopyResource with mismatched sizes gives device removed, and a cropped
@@ -2706,6 +2711,18 @@ static StageResult StageCapturedFrame(ID3D11Texture2D *frame, UINT *out_w, UINT 
     { Log("[cap] signal fence timeout"); return StageResult::Failed; }
     ++g_dda_fence_value;
     return StageResult::Ok;
+fail_capture:
+    // A partial bridge is worse than none: the texture without the fence
+    // would be copied into and then dereferenced as NULL on the next frame.
+    // Tear down ONLY the bridge - the source (dup/wgc, ctx, d11) stays up,
+    // so the next StageCapturedFrame rebuilds the channel from scratch.
+    if (g_dda_d12) { g_dda_d12->Release(); g_dda_d12 = nullptr; }
+    if (g_dda_nt)  { CloseHandle(g_dda_nt); g_dda_nt = nullptr; }
+    if (g_dda_signal) { g_dda_signal->Release(); g_dda_signal = nullptr; }
+    if (g_dda_signal11) { g_dda_signal11->Release(); g_dda_signal11 = nullptr; }
+    if (g_dda_dst) { g_dda_dst->Release(); g_dda_dst = nullptr; }
+    if (g_dda_shared) { g_dda_shared->Release(); g_dda_shared = nullptr; }
+    return StageResult::Failed;
 }
 
 // The D3D12 half: swizzle BGRA->RGBA out of the shared texture into

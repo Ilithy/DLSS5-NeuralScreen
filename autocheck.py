@@ -68,6 +68,25 @@ def zip_integrity():
         dll = z.read("native/nvngx.dll")
         if b"NS_ARCH_SPOOF" not in dll:
             return False, "nvngx.dll in the archive has no hook"
+        # the worker in the archive carries the window-capture mode (WGCW)
+        if b"WGCW" not in dll:
+            return False, "nvngx.dll in the archive has no WGCW (window mode)"
+        # the PYTHON SOURCES in the archive must be EXACTLY the committed
+        # ones: the archive is often rebuilt from a dirty tree, and a code
+        # change that never got committed ends up in the zip silently. The
+        # same goes for the worker - the archive carries a freshly built
+        # nvngx.dll whose content nobody can verify by eye, so a
+        # non-committed rebuild slips through (audit #4, C1/C2).
+        for name in ("main.py", "hotkeys.py", "display.py", "recorder.py",
+                     "overlay_ui.py", "i18n.py", "autocheck.py", "README.md",
+                     "README.ru.md"):
+            try:
+                head = subprocess.check_output(["git", "show", f"HEAD:{name}"],
+                                               cwd=ROOT)
+            except subprocess.CalledProcessError:
+                continue  # not in git - a new file, nothing to compare with
+            if z.read(name) != head:
+                return False, f"{name} in the archive differs from HEAD"
         # the config in the archive is the default one, not a personal one:
         # personal values are written into the config legitimately, so we
         # check ALL such fields against the committed HEAD config
@@ -180,9 +199,17 @@ def git_clean():
 
 
 def release_notes_short():
-    """The v1.2.1 release notes are concise (the EN part is under 2 KB)."""
+    """The latest release notes are concise (the EN part is under 2 KB)."""
+    from json import loads as _loads
+    try:
+        tag = _loads(subprocess.check_output(
+            ["gh", "release", "list", "-R", "perseval-BLR/DLSS5-NeuralScreen",
+             "--json", "tagName", "--limit", "1", "--exclude-drafts"],
+            text=True, timeout=60, encoding="utf-8", errors="replace"))[0]["tagName"]
+    except Exception:
+        return False, "cannot resolve the latest release tag"
     r = subprocess.run(
-        ["gh", "release", "view", "v1.2.1", "-R", "perseval-BLR/DLSS5-NeuralScreen",
+        ["gh", "release", "view", tag, "-R", "perseval-BLR/DLSS5-NeuralScreen",
          "--json", "body", "--jq", ".body"],
         capture_output=True, text=True, timeout=60,
         encoding="utf-8", errors="replace")
@@ -332,6 +359,12 @@ def smoke_check():
             pipe = "shared memory for pixels unavailable" in text
             return False, ("the pixels are not going through shared memory"
                            + (" - the worker refused the section" if pipe else ""))
+        # The capture must ALSO be the DDA one. A dead DDA1 makes the client
+        # silently fall back to sending frames from Python - the pipeline
+        # still runs, the FPS lines look fine, and only this log line tells
+        # it apart (audit #4: DDA has no direct regression test).
+        if "screen capture inside the worker (DDA1)" not in text:
+            return False, "the worker is not capturing the screen (no DDA1 in the log)"
     finally:
         left = quit_app()
     if left:

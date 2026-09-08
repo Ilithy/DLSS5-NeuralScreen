@@ -102,9 +102,10 @@ The settings worth touching:
   looking.
 - **Resolution the network runs at** — one slider. At the top it is your whole
   screen, which is the default and the best picture. Every step down hands the
-  network a smaller frame and scales the result back up: **roughly 50% more
-  frames** at 2560×1440 on a 4K screen, and a softer picture. Look at your own
-  screen and pick a step.
+  network a smaller frame and scales the result back up: with the slider off the
+  default (full screen) the network is already at its best, and every step down
+  means **roughly 50% more frames** at 2560×1440 on a 4K screen, with a softer
+  picture. Look at your own screen and pick a step.
 
 Everything else — which monitor, whether the menu opens on launch, starting
 with Windows, key assignments — is behind the sliders icon.
@@ -120,6 +121,11 @@ App cannot see the overlay. That is deliberate — the program captures your
 screen in order to process it, so if its own output were visible to capture it
 would feed on itself.
 
+In **one-window mode** (Num5) the input is a single window instead of the
+desktop, so there is no self-capture loop: the overlay stops hiding from
+screen capture, and external recorders (OBS display capture, NVIDIA App)
+see the processed picture. Full-screen mode keeps hiding it.
+
 ## If something is not working
 
 **Nothing appears after launch.** Check `NeuralScreen.log` next to the program;
@@ -130,6 +136,16 @@ it says what happened in plain text. The most common cause is a missing
 have anything drawn over them — that is a Windows rule, not a bug here. Switch
 the game to *borderless* or *windowed fullscreen*, which almost all modern
 games have.
+
+**The menu pointer is missing or frozen.** A fullscreen game hides the system
+cursor, and the game's own cursor (drawn into its frames) freezes when the game
+loses focus to the menu. The overlay only shows the system cursor; a game that
+hides it leaves the menu without a pointer. Switching the game to borderless
+fixes it.
+
+**The numpad hotkeys do nothing.** They need *Num Lock* to be on. With Num Lock
+off the numpad sends Insert/End/arrows and the keys simply do not exist. The
+program writes this to the log and shows it on screen.
 
 **The picture is soft.** Put *Resolution the network runs at* back to the top
 of its slider.

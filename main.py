@@ -1734,6 +1734,13 @@ def main() -> int:
                 try:
                     aw, ah = _probe_window_capture(hwnd)
                 except Exception as exc:
+                    # The probe left the worker inside a WGCW session that
+                    # may be half-open: put the source back on the desktop
+                    # before bailing out (audit #4, F2).
+                    try:
+                        send_dda(worker, width, height)
+                    except Exception:
+                        pass
                     display.alert(UI_STRINGS[lang]["win_fail"])
                     print(f"[main] the worker cannot capture that window: {exc}",
                           file=sys.stderr)
@@ -1741,7 +1748,12 @@ def main() -> int:
                 if aw < 64 or ah < 64:
                     # Below the work-resolution floor there is nothing to
                     # process - and a work size larger than the frame is how
-                    # the worker gets killed.
+                    # the worker gets killed. The probe above already switched
+                    # the worker's source to WGCW as a side effect: put it
+                    # back on the desktop, otherwise the frozen tiny window
+                    # becomes the picture until the next rebuild (audit #4,
+                    # F2).
+                    send_dda(worker, width, height)
                     print(f"[main] the window is {aw}x{ah} - too small to process",
                           file=sys.stderr)
                     display.alert(UI_STRINGS[lang]["win_fail"])
@@ -2689,6 +2701,14 @@ def main() -> int:
                     pass
                 display = Display(width, height, fullscreen=bool(cfg["fullscreen"]))
                 display.set_lang(lang)
+                # In one-window mode the overlay must stay visible to outside
+                # recorders: the NEW window comes up with the WDA flag set
+                # (the Display default), so state it explicitly here - the
+                # same call _rebuild_pipeline makes. Without this, any
+                # display-mode change while in window mode silently drops
+                # the overlay from NVIDIA App / OBS capture until the next
+                # pipeline rebuild (audit #4, F1).
+                display.set_excluded_from_capture(window_hwnd is None)
                 # The menu is created together with the window - we give it
                 # back its size, position, theme and language, otherwise after
                 # a game starts it jumps to the centre, turns light and
