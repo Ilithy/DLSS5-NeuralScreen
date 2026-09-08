@@ -249,10 +249,13 @@ class HotkeyController:
         self._lock = threading.Lock()
         self._pending: dict | None = None   # bindings for MSG_REBIND
         self._active = False                # hotkeys are currently registered
-        # Polling fallback state: vk -> last time the command fired. The
-        # cooldown suppresses both repeats and the duplicate that arrives
-        # when RegisterHotKey DID deliver the press.
+        # Polling fallback state: vk -> last time the command fired, and
+        # vk -> was the key down on the previous tick. The timestamp kills the
+        # duplicate that would otherwise follow a delivered WM_HOTKEY (the
+        # message loop stamps it too); the down-state makes the poller fire on
+        # the press EDGE instead of every cooldown while a key is held.
         self._poll_last: dict[int, float] = {}
+        self._poll_down: dict[int, bool] = {}
         self._poll_stop = threading.Event()
 
     def start(self, timeout: float = 3.0) -> None:
@@ -280,6 +283,11 @@ class HotkeyController:
             if msg.message == WM_HOTKEY:
                 binding = self._bindings.get(msg.wParam)
                 if binding is not None:
+                    # Tell the poller this press is already handled. Without
+                    # it the poller delivered the same command again ~30 ms
+                    # later and every hotkey fired twice: NR toggled on and
+                    # straight back off, the menu opened and closed.
+                    self._poll_last[binding[1]] = time.monotonic()
                     self._commands.put(binding[2])
             elif msg.message == MSG_SUSPEND:
                 self._unregister()
@@ -312,24 +320,27 @@ class HotkeyController:
     def _poll_loop(self) -> None:
         """Raw-key fallback: fires commands RegisterHotKey cannot deliver.
 
-        Runs every POLL_INTERVAL. A binding fires when its key is down, the
-        modifiers match, and the same key has not fired within POLL_COOLDOWN.
-        The cooldown is what makes the fallback invisible when the normal
-        path works: WM_HOTKEY arrives first, the poller sees the key still
-        down and skips it.
+        Runs every POLL_INTERVAL and fires on the press EDGE: a key that is
+        held down must not repeat the command. On top of that a cooldown
+        suppresses the duplicate of a press RegisterHotKey already delivered -
+        the message loop stamps the same table when it hands over a WM_HOTKEY,
+        which is what makes the fallback invisible while the normal path works.
         """
         while not self._poll_stop.wait(POLL_INTERVAL):
             with self._lock:
                 bindings = dict(self._bindings)
             now = time.monotonic()
             for hk_id, (mods, vk, cmd, _name) in bindings.items():
-                if not _pressed(vk):
-                    continue
+                down = _pressed(vk)
+                was_down = self._poll_down.get(vk, False)
+                self._poll_down[vk] = down
+                if not down or was_down:
+                    continue                      # not a fresh press
                 if not _mods_down(mods) or not _mods_clear(mods):
                     continue
                 last = self._poll_last.get(vk, 0.0)
                 if now - last < POLL_COOLDOWN:
-                    continue
+                    continue                      # WM_HOTKEY already did it
                 self._poll_last[vk] = now
                 self._commands.put(cmd)
 
