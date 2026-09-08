@@ -85,7 +85,12 @@ def zip_integrity():
                                                cwd=ROOT)
             except subprocess.CalledProcessError:
                 continue  # not in git - a new file, nothing to compare with
-            if z.read(name) != head:
+            # The worktree files carry CRLF (core.autocrlf) while git show
+            # returns LF - compare the NORMALIZED bytes on both sides,
+            # otherwise every CRLF file trips the check (audit #4, C2).
+            crlf, lf = bytes([13, 10]), bytes([10])
+            got = z.read(name).replace(crlf, lf)
+            if got != head.replace(crlf, lf):
                 return False, f"{name} in the archive differs from HEAD"
         # the config in the archive is the default one, not a personal one:
         # personal values are written into the config legitimately, so we
