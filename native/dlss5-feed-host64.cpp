@@ -3222,9 +3222,13 @@ static bool UploadVideoFrame(VideoState &v, const BYTE *color, const BYTE *mv, b
 {
     const UINT cw = v.upscale ? v.full_w : v.w;
     const UINT ch = v.upscale ? v.full_h : v.hgt;
-    if (!FillUpload(v.color, color, cw * 4, ch)) return false;
-    if (!motion_small && !FillUpload(v.mv, mv, v.w * 4, v.hgt)) return false;
-    if (!BeginCommands()) return false;
+    if (!FillUpload(v.color, color, cw * 4, ch))
+    { Log("[pure] upload: FillUpload color failed, err=%lu", GetLastError()); return false; }
+    if (!motion_small && !FillUpload(v.mv, mv, v.w * 4, v.hgt))
+    { Log("[pure] upload: FillUpload motion failed, err=%lu", GetLastError()); return false; }
+    Log("[pure] upload: FillUpload color ok, motion ok");
+    if (!BeginCommands())
+    { Log("[pure] upload: BeginCommands failed, err=%lu", GetLastError()); return false; }
     if (v.inputs_ready)
     {
         // The colour always goes as a copy; in downscaled-field mode it is
@@ -3237,9 +3241,12 @@ static bool UploadVideoFrame(VideoState &v, const BYTE *color, const BYTE *mv, b
         h.list->ResourceBarrier(motion_small ? 1 : _countof(pre), pre);
     }
     CopyUpload(h.list, v.color);
+    Log("[pure] upload: CopyUpload color ok");
     if (motion_small)
     {
-        if (!ScaleMotionInto(v, mv, v.inputs_ready)) return false;
+        if (!ScaleMotionInto(v, mv, v.inputs_ready))
+        { Log("[pure] upload: ScaleMotionInto failed, err=%lu", GetLastError()); return false; }
+        Log("[pure] upload: ScaleMotionInto ok");
         D3D12_RESOURCE_BARRIER post = Transition(v.color.tex, D3D12_RESOURCE_STATE_COPY_DEST,
                                                  D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
         h.list->ResourceBarrier(1, &post);
@@ -3247,6 +3254,7 @@ static bool UploadVideoFrame(VideoState &v, const BYTE *color, const BYTE *mv, b
     else
     {
         CopyUpload(h.list, v.mv);
+        Log("[pure] upload: CopyUpload motion ok");
         D3D12_RESOURCE_BARRIER post[] = {
             Transition(v.color.tex, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE),
             Transition(v.mv.tex, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE),
@@ -3254,15 +3262,22 @@ static bool UploadVideoFrame(VideoState &v, const BYTE *color, const BYTE *mv, b
         h.list->ResourceBarrier(_countof(post), post);
     }
     const UINT64 fence = EndCommands();
+    Log("[pure] upload: EndCommands ok, fence=%llu", (unsigned long long)fence);
     v.inputs_ready = true;
-    return WaitFenceValue(h.fence, fence, 30000);
+    if (!WaitFenceValue(h.fence, fence, 30000))
+    { Log("[pure] upload: WaitFenceValue failed, fence=%llu completed=%llu", (unsigned long long)fence, (unsigned long long)h.fence->GetCompletedValue()); return false; }
+    Log("[pure] upload: WaitFenceValue ok, fence=%llu", (unsigned long long)fence);
+    return true;
 }
 
 // DDA mode: the colour is already in v.color.tex (DdaGrab), we upload only motion.
 static bool UploadMotionOnly(VideoState &v, const BYTE *mv, bool motion_small)
 {
-    if (!motion_small && !FillUpload(v.mv, mv, v.w * 4, v.hgt)) return false;
-    if (!BeginCommands()) return false;
+    if (!motion_small && !FillUpload(v.mv, mv, v.w * 4, v.hgt))
+    { Log("[pure] upload: FillUpload motion failed, err=%lu", GetLastError()); return false; }
+    Log("[pure] upload: FillUpload motion ok");
+    if (!BeginCommands())
+    { Log("[pure] upload: BeginCommands failed, err=%lu", GetLastError()); return false; }
     if (v.inputs_ready)
     {
         D3D12_RESOURCE_BARRIER pre = Transition(v.mv.tex, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
@@ -3271,18 +3286,25 @@ static bool UploadMotionOnly(VideoState &v, const BYTE *mv, bool motion_small)
     }
     if (motion_small)
     {
-        if (!ScaleMotionInto(v, mv, v.inputs_ready)) return false;
+        if (!ScaleMotionInto(v, mv, v.inputs_ready))
+        { Log("[pure] upload: ScaleMotionInto failed, err=%lu", GetLastError()); return false; }
+        Log("[pure] upload: ScaleMotionInto ok");
     }
     else
     {
         CopyUpload(h.list, v.mv);
+        Log("[pure] upload: CopyUpload motion ok");
         D3D12_RESOURCE_BARRIER post = Transition(v.mv.tex, D3D12_RESOURCE_STATE_COPY_DEST,
                                                  D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
         h.list->ResourceBarrier(1, &post);
     }
     const UINT64 fence = EndCommands();
+    Log("[pure] upload: EndCommands ok, fence=%llu", (unsigned long long)fence);
     v.inputs_ready = true;
-    return WaitFenceValue(h.fence, fence, 30000);
+    if (!WaitFenceValue(h.fence, fence, 30000))
+    { Log("[pure] upload: WaitFenceValue failed, fence=%llu completed=%llu", (unsigned long long)fence, (unsigned long long)h.fence->GetCompletedValue()); return false; }
+    Log("[pure] upload: WaitFenceValue ok, fence=%llu", (unsigned long long)fence);
+    return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -3925,6 +3947,14 @@ static int RunVideo()
             }
             Log("[video] truncated frame %u", frame); return 5;
         }
+        if (msg == 1)
+            Log("[pure] frame %u: flags bypass=%d split=%d motion_small=%d no_color=%d capture=%s",
+                fh.index,
+                (fh.reserved & FRAME_FLAG_BYPASS) != 0,
+                (fh.reserved & FRAME_FLAG_SPLIT) != 0,
+                (fh.reserved & FRAME_FLAG_MOTION_SMALL) != 0 && g_motion_w != 0,
+                (fh.reserved & FRAME_FLAG_NO_COLOR) != 0,
+                g_wgc_active ? "WGC" : (g_dda_active ? "DDA" : "none"));
         if (msg == 2)
         {
             // RNSZ: reconfigure the feature at a new work size WITHOUT restarting
@@ -4128,7 +4158,8 @@ static int RunVideo()
             const bool up_ok = UploadMotionOnly(v, mv_ptr,
                                   (fh.reserved & FRAME_FLAG_MOTION_SMALL) != 0 && g_motion_w != 0);
             PhaseAdd(PH_UPLOAD, t_up);
-            if (!up_ok) return 6;
+            if (!up_ok)
+            { Log("[pure] upload: UploadMotionOnly failed - exit 6"); return 6; }
         }
         else
         {
@@ -4136,7 +4167,8 @@ static int RunVideo()
             const bool up_ok = UploadVideoFrame(v, color_ptr, mv_ptr,
                                    (fh.reserved & FRAME_FLAG_MOTION_SMALL) != 0 && g_motion_w != 0);
             PhaseAdd(PH_UPLOAD, t_up);
-            if (!up_ok) return 6;
+            if (!up_ok)
+            { Log("[pure] upload: UploadVideoFrame failed - exit 6"); return 6; }
         }
         if (!warmup_done)
         {
