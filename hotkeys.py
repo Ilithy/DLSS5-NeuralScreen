@@ -210,7 +210,10 @@ def numlock_needed(bindings: dict | None = None) -> list:
 # reaches the game (unlike RegisterHotKey), which is fine for the numpad keys
 # and the Ctrl+Alt combinations.
 
-POLL_INTERVAL = 0.03
+# 15 ms, not 30: under a game that swallows WM_HOTKEY the poller is the only
+# path, and it can only see a press that is still down when it samples. A
+# short press - and people do tap briefly - fell between two samples.
+POLL_INTERVAL = 0.015
 POLL_COOLDOWN = 0.25
 
 

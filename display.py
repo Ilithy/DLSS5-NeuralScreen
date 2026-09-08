@@ -45,6 +45,34 @@ user32.SetLayeredWindowAttributes.restype = wintypes.BOOL
 user32.SetWindowDisplayAffinity.argtypes = [wintypes.HWND, wintypes.DWORD]
 user32.SetWindowDisplayAffinity.restype = wintypes.BOOL
 
+
+class CURSORINFO(ctypes.Structure):
+    _fields_ = [("cbSize", wintypes.DWORD), ("flags", wintypes.DWORD),
+                ("hCursor", wintypes.HANDLE), ("ptScreenPos", wintypes.POINT)]
+
+
+CURSOR_SHOWING = 0x00000001
+
+
+def system_cursor_visible() -> bool:
+    """Is there a mouse pointer on screen right now?
+
+    A fullscreen game hides it (ShowCursor(FALSE) on its own input queue) and
+    it stays hidden while our menu is up. When it is gone the overlay draws
+    its own; when it is there, drawing one would mean two pointers.
+
+    Unknown counts as visible: a missing answer must not put a second pointer
+    on a normal desktop.
+    """
+    ci = CURSORINFO()
+    ci.cbSize = ctypes.sizeof(CURSORINFO)
+    try:
+        if not user32.GetCursorInfo(ctypes.byref(ci)):
+            return True
+    except Exception:
+        return True
+    return bool(ci.flags & CURSOR_SHOWING)
+
 # DPI-aware BEFORE import pygame: on load SDL freezes the process awareness,
 # and a later SetProcessDpiAwarenessContext no longer takes effect (it returns
 # an error). Without this Windows scales the window: 125% -> 3072x1728 instead
@@ -538,7 +566,28 @@ class Display:
         self.menu.set_stats(self._hud)
         self.menu.draw(self.screen)
         self._sync_cursor()
+        if self.menu.visible and not system_cursor_visible():
+            self._draw_pointer()
         pygame.display.flip()
+
+    def _draw_pointer(self) -> None:
+        """Our own mouse pointer, for when the system has none to show.
+
+        Drawn on the overlay itself, so it does not depend on any other
+        process's cursor state - which is the whole point: a fullscreen game
+        hides the cursor and the menu was unusable without it.
+        """
+        try:
+            x, y = pygame.mouse.get_pos()
+        except Exception:
+            return
+        s = max(0.9, self.ui_scale) * 1.1
+        shape = [(0, 0), (0, 18), (5, 13), (8, 21), (11, 19), (8, 12), (14, 12)]
+        pts = [(x + int(px * s), y + int(py * s)) for px, py in shape]
+        # White with a dark outline: legible over a game, a desktop and our
+        # own panel alike.
+        pygame.draw.polygon(self.screen, (255, 255, 255), pts)
+        pygame.draw.polygon(self.screen, (16, 20, 26), pts, max(1, int(2 * s)))
 
     def set_hud(self, data: dict) -> None:
         """Update HUD data: fps, status, resolution, params, frames."""

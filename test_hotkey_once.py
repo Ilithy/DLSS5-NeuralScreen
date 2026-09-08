@@ -32,11 +32,18 @@ KEYEVENTF_KEYUP = 0x0002
 COLLECT_S = 1.2
 
 
-def tap(hold: float = 0.0) -> None:
+def tap(hold: float = 0.12) -> None:
+    """Press and release, holding as long as a person does.
+
+    Not an instant press: while a game that grabs the keyboard has the focus,
+    WM_HOTKEY never arrives and the poller - which samples every 30 ms - is
+    the only path left. A zero-length synthetic tap falls between two samples
+    and is lost, which is a property of the machine, not what this test is
+    about. A human press lasts 50-100 ms.
+    """
     u = ctypes.windll.user32
     u.keybd_event(VK_F13, 0, 0, 0)
-    if hold:
-        time.sleep(hold)
+    time.sleep(hold)
     u.keybd_event(VK_F13, 0, KEYEVENTF_KEYUP, 0)
 
 
