@@ -164,6 +164,7 @@ class Display:
         # keeps spinning). A window the size of the monitor at position (0,0)
         # looks the same but is stable, and click-through works.
         flags = pygame.NOFRAME
+        self._flags = flags
         self.screen = pygame.display.set_mode((width, height), flags)
         self.width, self.height = self.screen.get_size()
         self._move_to_origin()
@@ -198,6 +199,7 @@ class Display:
             pass
         self._excluded = self._exclude_from_capture()
         self._click_through = False
+        self._menu_input = False
         if click_through:
             self._set_click_through()
         self._lang = "ru"  # HUD language (NR ON/NR OFF), see set_lang()
@@ -394,6 +396,7 @@ class Display:
         Exactly the ReShade behaviour. WS_EX_NOACTIVATE is removed too,
         otherwise there is no keyboard.
         """
+        self._menu_input = bool(enabled)
         try:
             hwnd = pygame.display.get_wm_info()["window"]
         except Exception as exc:
@@ -434,6 +437,51 @@ class Display:
             except Exception:
                 pass
         self._click_through = not enabled
+
+    def set_fullscreen_layer(self, full_w: int, full_h: int) -> None:
+        """Expand the HUD layer to the whole screen (menu open in window mode).
+
+        In one-window mode the layer is the size of the captured window, so a
+        menu dragged near the edge would be clipped by the window bounds. While
+        the menu is open the layer is expanded to the full screen - the menu
+        is then always fully visible - and set_window_layer() puts it back on
+        the window when the menu closes. The capture affinity is re-applied
+        because the window is recreated (user: menu lost outside a small
+        window).
+        """
+        try:
+            # set_mode returns a NEW surface - it must become self.screen,
+            # otherwise main keeps drawing the menu on the old (window-sized)
+            # surface and the layer never actually expands (user: the menu
+            # was clipped and could not be dragged above the captured window).
+            self.screen = pygame.display.set_mode((full_w, full_h), self._flags)
+            self.width, self.height = full_w, full_h
+            self._move_to_origin()
+            self._set_topmost()
+            # The recreated window lost EVERYTHING: the layered attributes
+            # (colorkey + alpha), the capture affinity and the input styles.
+            self.set_hud_only(self._hud_only, force=True)
+            self.set_menu_opaque(self.menu.visible)
+            self.set_excluded_from_capture(self._excluded)
+            self.set_menu_input(self._menu_input)
+        except Exception as exc:
+            print(f'Display: WARNING cannot expand the layer: {exc}')
+
+    def set_window_layer(self, x: int, y: int, w: int, h: int) -> None:
+        """Shrink the HUD layer back onto the captured window."""
+        try:
+            self.screen = pygame.display.set_mode((w, h), self._flags)
+            self.width, self.height = w, h
+            hwnd = pygame.display.get_wm_info()['window']
+            user32.SetWindowPos(hwnd, -1, int(x), int(y), 0, 0, 0x0001 | 0x0010)
+            # Restore everything the recreated window lost (see
+            # set_fullscreen_layer).
+            self.set_hud_only(self._hud_only, force=True)
+            self.set_menu_opaque(self.menu.visible)
+            self.set_excluded_from_capture(self._excluded)
+            self.set_menu_input(self._menu_input)
+        except Exception as exc:
+            print(f'Display: WARNING cannot shrink the layer: {exc}')
 
     def set_menu_opaque(self, opaque: bool) -> None:
         """Drop the global window translucency while the menu is open.

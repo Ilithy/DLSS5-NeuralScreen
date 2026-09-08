@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 import ctypes
+from ctypes import wintypes
 import json
 import mmap
 import os
@@ -722,7 +723,54 @@ def foreign_foreground() -> int:
     user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
     if pid.value == os.getpid():
         return 0
+    if _is_desktop_window(hwnd):
+        return 0
     return int(hwnd)
+
+
+def _is_desktop_window(hwnd: int) -> bool:
+    """Progman / WorkerW - the desktop itself, not a window to capture.
+
+    Clicking the desktop before Num5 made the capture target the wallpaper
+    (Progman): the overlay then showed the desktop with every real window
+    transparent above it. The desktop is not a window - exclude it (user
+    report: "only the desktop is shown, the windows are transparent").
+    """
+    user32 = ctypes.windll.user32
+    cls = ctypes.create_unicode_buffer(64)
+    if not user32.GetClassNameW(hwnd, cls, 64):
+        return False
+    return cls.value in ("Progman", "WorkerW")
+
+
+def window_under_cursor() -> int:
+    """The topmost real window under the mouse, 0 when none/ours/desktop.
+
+    The Num5 alternative to the focused window: point at the window you want
+    and press. Works on the desktop too - the focused window there is
+    Progman, which is not capturable.
+    """
+    user32 = ctypes.windll.user32
+    pt = wintypes.POINT()
+    if not user32.GetCursorPos(ctypes.byref(pt)):
+        return 0
+    hwnd = user32.WindowFromPoint(pt)
+    if not hwnd:
+        return 0
+    # WindowFromPoint can return a child (a button inside Chrome); walk up
+    # to the top-level owner.
+    top = user32.GetAncestor(hwnd, 2)  # GA_ROOT
+    if not top:
+        top = hwnd
+    if not user32.IsWindowVisible(top) or user32.IsIconic(top):
+        return 0
+    pid = ctypes.c_ulong(0)
+    user32.GetWindowThreadProcessId(top, ctypes.byref(pid))
+    if pid.value == os.getpid():
+        return 0
+    if _is_desktop_window(top):
+        return 0
+    return int(top)
 
 
 def send_gray(worker: subprocess.Popen, width: int, height: int,
@@ -1357,6 +1405,7 @@ def main() -> int:
         last_foreground = 0       # the last focused window that was not ours
         follow_pos = None         # where the overlay currently sits (window mode)
         follow_resize = None      # a pending size change, waiting to settle
+        mon_w, mon_h = width, height  # the full monitor size (for the menu layer)
         gray_active = False       # guides take luminance from the worker's gray channel
         pending_shot: Path | None = None  # a screenshot waiting for a frame with pixels
         recorder: VideoRecorder | None = None  # recording (Num0), MP4 AV1 NVENC
@@ -1712,7 +1761,12 @@ def main() -> int:
             _save_menu_layout()
             print(f"[main] pipeline rebuilt: {width}x{height}, "
                   f"work {work_w}x{work_h} - {note}")
-            display.alert(note)
+            # The mode-change alert must survive a rebuild: the pipeline
+            # teardown clears the alert list, and in a game the user has no
+            # time to read a 2.5 s toast. 6 s is long enough to read while
+            # the game keeps running (user: "the Num5 alert disappears too
+            # fast").
+            display.alert(note, duration=6.0)
 
         def _switch_window(hwnd: int) -> None:
             """Point the capture at one window (hwnd) or back at the desktop (0).
@@ -1800,7 +1854,12 @@ def main() -> int:
             if not display.is_visible():
                 display.set_visible(True)
             moved = (x, y) != follow_pos
-            if moved:
+            # While the menu is open the user may be dragging it by its title
+            # bar - following the captured window would yank the HUD (and the
+            # menu with it) back onto the window every frame, which is the
+            # "does not grab, stutters, flickers" report. The position is
+            # re-synced on the first frame after the menu closes.
+            if moved and not display.menu.visible:
                 display.move_to(x, y)
                 follow_pos = (x, y)
             # Both windows are topmost, and within that group the one raised
@@ -2335,7 +2394,42 @@ def main() -> int:
                         opened = display.menu.toggle()
                         display.set_menu_opaque(opened)
                         display.set_menu_input(opened)
-                        if not opened:
+                        if opened:
+                            # In one-window mode the HUD layer is the size of
+                            # the captured window - a menu near the edge would
+                            # be clipped by it. Expand the layer to the whole
+                            # monitor while the menu is open, so the menu is
+                            # always fully visible (user: menu lost outside a
+                            # small window).
+                            if window_hwnd is not None:
+                                display.set_fullscreen_layer(mon_w, mon_h)
+                                # The saved offset was computed for the 4K
+                                # desktop and lands the panel outside a small
+                                # captured window - start in the bottom-right
+                                # corner instead, the user drags it where they
+                                # want (user: menu flies off the desktop).
+                                display.menu.place_bottom_right(
+                                    display.screen.get_width(),
+                                    display.screen.get_height())
+                            # The mouse lands on the title bar, so the user
+                            # does not have to hunt for the pointer (user
+                            # request). The layout must be current for the
+                            # title rect to be valid.
+                            try:
+                                display.menu.layout(
+                                    display.screen.get_width(),
+                                    display.screen.get_height())
+                                cx, cy = display.menu.title_center()
+                                ctypes.windll.user32.SetCursorPos(cx, cy)
+                            except Exception:
+                                pass
+                        else:
+                            # The menu closed: put the HUD layer back on the
+                            # captured window.
+                            if window_hwnd is not None:
+                                rect = window_frame_rect(window_hwnd)
+                                if rect is not None:
+                                    display.set_window_layer(*rect)
                             _save_menu_layout()
                         print(f"[main] overlay menu {'opened' if opened else 'closed'}")
                     elif cmd == "toggle":
@@ -2382,22 +2476,29 @@ def main() -> int:
                             display.alert(UI_STRINGS[lang]["record_off"])
                             recorder = None
                     elif cmd == "window_mode":
-                        # Whatever window had the focus last - not the current
-                        # foreground, which may well be our own menu.
+                        # The window under the cursor wins: it works on the
+                        # desktop too (the focused window there is Progman,
+                        # which is not capturable), and it is what the user
+                        # is looking at. Fall back to the last focused
+                        # foreign window when the cursor is over nothing
+                        # capturable (our own overlay, the desktop).
                         if window_hwnd is not None:
                             print("[main] window mode off - back to the whole screen")
                             _switch_window(0)
-                        elif last_foreground:
-                            print(f"[main] window mode on - target hwnd "
-                                  f"0x{last_foreground:X}")
-                            _switch_window(last_foreground)
                         else:
-                            # Nothing but our own windows has had the focus, so
-                            # there is nothing to capture but ourselves.
-                            print("[main] window mode: no window to capture "
-                                  "(only our own windows have had the focus)",
-                                  file=sys.stderr)
-                            display.alert(UI_STRINGS[lang]["win_none"])
+                            target = window_under_cursor() or last_foreground
+                            if target:
+                                print(f"[main] window mode on - target hwnd "
+                                      f"0x{target:X}")
+                                _switch_window(target)
+                            else:
+                                # Nothing but our own windows has had the
+                                # focus, so there is nothing to capture but
+                                # ourselves.
+                                print("[main] window mode: no window to capture "
+                                      "(only our own windows have had the focus)",
+                                      file=sys.stderr)
+                                display.alert(UI_STRINGS[lang]["win_none"])
                     elif cmd in ("scale_up", "scale_down"):
                         delta = WORK_SCALE_STEP if cmd == "scale_up" else -WORK_SCALE_STEP
                         new_scale = min(WORK_SCALE_MAX, max(WORK_SCALE_MIN, work_scale + delta))
@@ -2442,10 +2543,23 @@ def main() -> int:
             # A game that goes fullscreen raises itself above every topmost
             # window, ours included, and then the menu is drawn but not on
             # screen. While it is open we keep coming back up; a SetWindowPos
-            # that changes nothing is cheap, and 5 frames is fast enough that
+            # that changes nothing is cheap, and 30 frames is fast enough that
             # nobody sees the menu disappear.
-            if display.menu.visible and frame_index % 5 == 0:
+            if display.menu.visible and frame_index % 30 == 0:
                 display.raise_topmost()
+            # The same for the HUD even when the menu is closed: a borderless
+            # game (Cyberpunk) keeps itself on top and our HUD stays
+            # underneath it forever. Re-assert only when the topmost window
+            # is NOT ours - in the steady state this is zero SetWindowPos
+            # calls, so no DWM flicker (user: flicker + invisible HUD over
+            # borderless games).
+            if frame_index % 30 == 0:
+                try:
+                    top = ctypes.windll.user32.GetTopWindow(0)
+                    if top and top != display.get_hwnd():
+                        display.raise_topmost()
+                except Exception:
+                    pass
             if window_hwnd is not None:
                 if not ctypes.windll.user32.IsWindow(ctypes.c_void_p(window_hwnd)):
                     print("[main] the captured window closed - back to full screen",

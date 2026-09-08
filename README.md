@@ -66,16 +66,25 @@ game. Closed, clicks go straight through it as if it were not there.
 
 ### One window instead of the screen
 
-**Num5** points everything at a single window - the one that had the focus
-last - and the overlay sits on that window and follows it. **Num5** again goes
-back to the whole screen.
+**Num5** points everything at a single window — the one under the mouse
+cursor (falling back to the last focused window) — and the overlay sits on
+that window and follows it. **Num5** again goes back to the whole screen.
 
 There is one practical reason to use it: in this mode **OBS and the NVIDIA App
 can see the processed picture**. Whole-screen mode has to hide the overlay from
 screen capture, otherwise the program would capture its own output and feed on
-it - and with the NVIDIA App that hiding does not merely make the overlay
+it — and with the NVIDIA App that hiding does not merely make the overlay
 invisible, it stops the recording from starting at all. One window has no such
 loop, so nothing has to hide.
+
+**To record the processed picture with the NVIDIA App:** point the mouse at
+the window you want (a game in windowed/borderless mode, a browser, anything),
+press **Num5**, then start the recording. The overlay and the processed picture
+are now part of the screen capture. Press **Num5** again to go back to the
+whole screen.
+
+The desktop itself is not a window: pressing **Num5** while pointing at the
+wallpaper captures the last real window instead.
 
 Minimise the window and processing stops with it; restore it and the picture
 comes back.

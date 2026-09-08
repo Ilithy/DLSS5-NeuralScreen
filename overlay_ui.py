@@ -289,6 +289,51 @@ class OverlayMenu:
             elif k in self.state:
                 self.state[k] = v
 
+    def title_center(self) -> tuple[int, int]:
+        """The centre of the title bar in screen coordinates.
+
+        The mouse lands here when the menu opens, so the user does not have
+        to hunt for the pointer (user request). Valid after layout().
+        """
+        r = self._title_bar
+        return (r.x + r.w // 2, r.y + r.h // 2)
+
+    def place_bottom_right(self, screen_w: int, screen_h: int,
+                          margin: int = 24) -> None:
+        """Put the panel into the bottom-right corner of the screen.
+
+        The temporary answer to "the menu flies off the desktop in window
+        mode": the offset from the config was computed for the 4K desktop and
+        lands the panel outside a small captured window. On every menu open in
+        window mode the panel starts in the bottom-right corner; the user
+        drags it where they want and the offset is saved on close as usual.
+        """
+        self.layout(screen_w, screen_h)
+        w, h = self.panel_rect.w, self.panel_rect.h
+        # The offset is relative to the screen centre: solve for the corner.
+        self.offset = [screen_w - w - margin - (screen_w - w) // 2,
+                       screen_h - h - margin - (screen_h - h) // 2]
+        self.layout(screen_w, screen_h)
+
+    def _capture_mouse(self, on: bool) -> None:
+        """Capture the mouse while dragging the panel by its title bar.
+
+        Without it the drag dies the moment the cursor leaves the window:
+        pygame stops delivering MOUSEMOTION outside the window, and the
+        release click outside is lost too - the panel "stops and has to be
+        grabbed again" (user report). SetCapture keeps the events coming
+        until the button is released.
+        """
+        try:
+            import ctypes
+            hwnd = pygame.display.get_wm_info()["window"]
+            if on:
+                ctypes.windll.user32.SetCapture(hwnd)
+            else:
+                ctypes.windll.user32.ReleaseCapture()
+        except Exception:
+            pass
+
     # -- layout ------------------------------------------------------------
 
     def layout(self, screen_w: int, screen_h: int) -> None:
@@ -479,7 +524,6 @@ class OverlayMenu:
             items.append(Item("action", "back",
                               pygame.Rect(pad, cy, inner_w, act_h),
                               extra={"label": s["back"],
-                                     "hotkey": self.hotkeys.get("settings", ""),
                                      "filled": False}))
             cy += act_h + pad
         else:
@@ -668,6 +712,7 @@ class OverlayMenu:
                 return out
             if self._title_bar.collidepoint(event.pos):
                 self._move_from = (event.pos, tuple(self.offset))
+                self._capture_mouse(True)
                 return out
             item = self.hit(event.pos)
             if item is None:
@@ -720,6 +765,7 @@ class OverlayMenu:
             self._drag_item = None
             self._move_from = None
             self._resize_from = None
+            self._capture_mouse(False)
             if self._resize_h_from is not None:
                 self._resize_h_from = None
                 # The layout clamps the height by the content and the screen -

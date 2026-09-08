@@ -1515,11 +1515,20 @@ static void FollowCapturedWindow()
 // stay underneath for as long as the game runs. Rare on purpose: the client
 // re-asserts the HUD above us much more often, and doing this every frame
 // would leave the HUD blinking under the picture.
+// The check is "is the topmost window ours?" - in the steady state the
+// answer is yes (both our windows are topmost), so this is zero
+// SetWindowPos calls and no DWM flicker. A borderless game (Cyberpunk)
+// keeps itself on top and would hide the picture forever without this.
 static void ReassertPresentTopmost()
 {
-    if (g_present_hwnd == nullptr || g_wgc_active) return;   // window mode follows instead
+    if (g_present_hwnd == nullptr) return;
     static uint32_t tick = 0;
     if ((++tick % 300) != 0) return;
+    HWND top = GetTopWindow(0);
+    if (top == nullptr || top == g_present_hwnd) return;
+    wchar_t cls[64];
+    if (GetClassNameW(top, cls, 64) > 0 && wcscmp(cls, L"pygame") == 0)
+        return;  // the HUD is on top - leave it there
     SetWindowPos(g_present_hwnd, HWND_TOPMOST, 0, 0, 0, 0,
                  SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
 }
