@@ -41,16 +41,22 @@ TIMEOUT = 600
 # What each test is for, in one line - a failing name should not send anyone
 # digging through the file to find out what broke.
 ABOUT = {
+    "test_bypass.py": "NR OFF shows the raw capture and the pipeline survives",
     "test_capture_visibility.py": "outside capture sees the overlay only without WDA",
+    "test_config.py": "the config loader validates, clamps and resolves",
     "test_hotkey_once.py": "one press of a hotkey fires exactly one command",
     "test_hotkey_rebind.py": "hotkeys can be reassigned from the config",
+    "test_i18n.py": "every language has the same keys, none empty",
     "test_menu_scroll.py": "the menu scrolls and the wheel lands where it should",
+    "test_motion_small.py": "the downscaled motion field is upscaled on the GPU",
     "test_nr_small.py": "the reduced-resolution mode produces a real picture",
     "test_out_shm.py": "the pixel channel through shared memory",
     "test_odd_frame_size.py": "a frame whose row pitch needs padding survives",
     "test_recorder_audio.py": "the audio track keeps up with the video",
     "test_recorder_thread.py": "the encoder thread and a clean close",
     "test_residual.py": "the matched residual composite keeps 1:1 detail at reduced work",
+    "test_residual_split.py": "residual and the wipe compose in the same frame",
+    "test_resize.py": "the on-the-fly resize reconfigures the feature without a restart",
     "test_split.py": "the before/after wipe leaves the left side untouched",
     "test_wgc_capture.py": "the worker captures one window (the single-window input)",
     "test_window_mode.py": "the one-window hotkey switches the pipeline and back",

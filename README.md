@@ -110,10 +110,12 @@ The settings worth touching:
   looking.
 - **Resolution the network runs at** — one slider. At the top it is your whole
   screen, which is the default and the best picture. Every step down hands the
-  network a smaller frame and scales the result back up: with the slider off the
-  default (full screen) the network is already at its best, and every step down
-  means **roughly 50% more frames** at 2560×1440 on a 4K screen, with a softer
-  picture. Look at your own screen and pick a step.
+  network a smaller frame: with the slider off the default (full screen) the
+  network is already at its best, and every step down means **roughly 50% more
+  frames** at 2560×1440 on a 4K screen. The picture stays sharp: the network's
+  result is composed onto the pristine 1:1 native frame (a matched residual
+  composite), so text, edges and UI keep full resolution while the cheap
+  low-res network does the relighting. Look at your own screen and pick a step.
 
 Everything else — which monitor, whether the menu opens on launch, starting
 with Windows, key assignments — is behind the sliders icon.

@@ -4199,7 +4199,18 @@ static int RunVideo()
         }
         else
         {
-            if (!DownloadVideoFrame(v, output)) return 9;
+            // No present window: the pixels go back to the client. In bypass
+            // mode the raw capture (v.color) is the frame - the same choice
+            // the present branch makes above; output would hold the stale
+            // NGX result from the last processed frame.
+            if (bypass)
+            {
+                if (!DownloadVideoFrame(v, output, v.color.tex,
+                                        D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                                        D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE))
+                    return 9;
+            }
+            else if (!DownloadVideoFrame(v, output)) return 9;
             if (!DeliverPixels(output, fh.index, fh.pts)) return 10;
         }
         PhaseAdd(PH_FRAME, t_frame);
