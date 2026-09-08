@@ -56,12 +56,29 @@ it off those keys send Insert/End/arrows instead and nothing happens.
 | **Num3** | screenshot |
 | **Num0** | start / stop recording, with sound |
 | **Num4** / **Num6** | processing resolution down / up |
+| **Num5** | process one window instead of the whole screen |
 | **Ctrl+Alt+Q** | quit |
 
 Every key can be reassigned in the menu, under the sliders icon.
 
 While the menu is open it takes the mouse and keyboard, so it works on top of a
 game. Closed, clicks go straight through it as if it were not there.
+
+### One window instead of the screen
+
+**Num5** points everything at a single window - the one that had the focus
+last - and the overlay sits on that window and follows it. **Num5** again goes
+back to the whole screen.
+
+There is one practical reason to use it: in this mode **OBS and the NVIDIA App
+can see the processed picture**. Whole-screen mode has to hide the overlay from
+screen capture, otherwise the program would capture its own output and feed on
+it - and with the NVIDIA App that hiding does not merely make the overlay
+invisible, it stops the recording from starting at all. One window has no such
+loop, so nothing has to hide.
+
+Minimise the window and processing stops with it; restore it and the picture
+comes back.
 
 ## The menu
 

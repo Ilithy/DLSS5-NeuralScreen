@@ -9,6 +9,43 @@ Every number here was measured on this machine - RTX 5070 Ti, driver
 conclusion turned out to be wrong, the correction is kept rather than
 quietly edited out: the mistakes are the useful part.
 
+## One window: Windows Graphics Capture (WGCW)
+
+`Num5` swaps the input from Desktop Duplication of the whole screen to
+Windows Graphics Capture of one window. Both sources hand the worker the same
+kind of `ID3D11Texture2D`, so everything downstream - the NT-shared texture,
+the fence, the BGRA->RGBA swizzle, the luminance channel for the guides - is
+the same code.
+
+Why it matters, measured rather than assumed:
+
+* A per-window capture is unaffected by what is drawn on top of the window. A
+  fullscreen overlay covering the target contributes **0.0%** of the captured
+  pixels while the window's own content is **100%**. No self-capture loop.
+* So `WDA_EXCLUDEFROMCAPTURE` comes off in this mode, and that is the whole
+  point: with it on, the NVIDIA App writes **no file at all** (0 out of 4
+  attempts); in one-window mode it recorded 26.1 MB of the same desktop.
+* The yellow "this window is being captured" border can be turned off.
+  `GraphicsCaptureSession.IsBorderRequired = false` takes effect for an
+  unpackaged process on Windows 11 26200 even though
+  `GraphicsCaptureAccess.RequestAccessAsync(Borderless)` answers
+  `UserPromptRequired`. Measured against a control run: 12 yellow pixels in
+  the ring around the window with the capture on, 12 with it off.
+
+Sizes are **physical pixels**. `WGCW` is acknowledged with the size the
+capture really produces, and the pipeline is rebuilt for exactly that - a
+window's logical size on a scaled display is a different number, and
+`GetWindowRect` is a third one (it includes the invisible resize border). The
+overlay is placed by `DwmGetWindowAttribute(DWMWA_EXTENDED_FRAME_BOUNDS)`,
+which is the rectangle the capture agrees with.
+
+The capture is event-driven: a window that does not redraw produces one frame
+and then nothing, exactly like `DXGI_ERROR_WAIT_TIMEOUT` on the duplication
+path. The worker keeps the last frame.
+
+A resize rebuilds the worker, the shared memory and every texture, so it waits
+half a second for the new size to settle first. A move only moves the windows.
+
 ## Recording (Num0)
 
 `Num0` starts/stops recording of the **NR-processed frame** into
