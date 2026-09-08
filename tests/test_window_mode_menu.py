@@ -34,6 +34,17 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))  # tests/ (autocheck)
 
 import autocheck  # noqa: E402
 
+# Physical pixels, before pygame loads: SDL freezes the process DPI awareness
+# at import, and a window measured in logical units would not match what the
+# capture produces (960x540 logical = 1200x675 physical at 125%).
+try:
+    ctypes.windll.user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4))
+except Exception:
+    try:
+        ctypes.windll.shcore.SetProcessDpiAwareness(2)
+    except Exception:
+        pass
+
 W, H = 960, 540
 VK_NUMPAD2 = 0x62
 VK_NUMPAD5 = 0x65
