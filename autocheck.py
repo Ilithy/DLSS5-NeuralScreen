@@ -194,31 +194,148 @@ def release_notes_short():
     return True, f"the EN part is {len(en_part)} characters"
 
 
+# --- driving the running program (the GUI and smoke checks share this) ---
+LOG = ROOT / "NeuralScreen.log"
+VK_INSERT = 0x2D
+VK_Q = 0x51
+KEYEVENTF_KEYUP = 0x0002
+
+
+def send_key(vk, mods=()):
+    import ctypes
+    for m in mods:
+        ctypes.windll.user32.keybd_event(m, 0, 0, 0)
+    ctypes.windll.user32.keybd_event(vk, 0, 0, 0)
+    ctypes.windll.user32.keybd_event(vk, 0, KEYEVENTF_KEYUP, 0)
+    for m in reversed(mods):
+        ctypes.windll.user32.keybd_event(m, 0, KEYEVENTF_KEYUP, 0)
+
+
+def log_offset():
+    """Where the log ends right now.
+
+    The log is appended to across runs, so a check that greps the whole file
+    can pass on the previous launch's lines. Everything below reads from the
+    offset taken before the launch.
+    """
+    return LOG.stat().st_size if LOG.exists() else 0
+
+
+def log_since(offset):
+    # main.py opens the log as utf-8; errors="replace" guards a truncated tail.
+    if not LOG.exists():
+        return ""
+    with LOG.open("r", encoding="utf-8", errors="replace") as fh:
+        fh.seek(offset)
+        return fh.read()
+
+
+def running_instances():
+    """Our processes that are already up.
+
+    Nothing stops a second copy of the program from starting, and two copies
+    fight over the screen capture - so a check that launches one has to know
+    the field is clear, otherwise it measures the wrong process.
+    """
+    out = subprocess.run(["tasklist"], capture_output=True).stdout
+    text = out.decode("cp1251", errors="replace")
+    return [l.split()[0] for l in text.splitlines()
+            if "pythonw.exe" in l or "nvngx.dll" in l]
+
+
+def launch():
+    """Start the program the way a user does and return the log offset."""
+    offset = log_offset()
+    subprocess.run(["cscript", "//nologo", "NeuralScreen.vbs"], cwd=ROOT,
+                   capture_output=True)
+    return offset
+
+
+def wait_for(offset, needle, timeout):
+    """Wait for a line to appear in the log written since `offset`."""
+    import time
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        text = log_since(offset)
+        if needle in text:
+            return text
+        time.sleep(0.5)
+    return None
+
+
+def quit_app(timeout=8.0):
+    """Ctrl+Alt+Q, then confirm nothing of ours is left running."""
+    import time
+    send_key(VK_Q, (0x11, 0x12))
+    deadline = time.monotonic() + timeout
+    left = []
+    while time.monotonic() < deadline:
+        out = subprocess.run(["tasklist"], capture_output=True).stdout
+        text = out.decode("cp1251", errors="replace")
+        left = [l for l in text.splitlines()
+                if "pythonw.exe" in l or "nvngx.dll" in l]
+        if not left:
+            return []
+        time.sleep(0.5)
+    return left
+
+
+def smoke_check():
+    """The short one: launch -> is it processing -> exit. ~20 seconds.
+
+    Everything a broken build fails at before recording even matters: the
+    program comes up, the pipeline produces frames, the pixel channel is the
+    shared-memory one (it silently fell back to the pipe once - see the OUTS
+    regression), and Ctrl+Alt+Q leaves nothing running.
+    """
+    import re
+    import time
+
+    MIN_FRAMES, MIN_FPS = 60, 15.0
+    busy = running_instances()
+    if busy:
+        return False, f"NeuralScreen is already running ({busy}) - stop it first"
+    offset = launch()
+    try:
+        # The first FPS line reports the warm-up (frames 2, ~1 FPS), so wait
+        # for the pipeline to have actually run for a while.
+        fps, frames, deadline = 0.0, 0, time.monotonic() + 30.0
+        while time.monotonic() < deadline:
+            text = log_since(offset)
+            stats = re.findall(r"NR ON \| FPS\s+([\d.]+) \| frames (\d+)", text)
+            if stats:
+                fps, frames = float(stats[-1][0]), int(stats[-1][1])
+                if frames >= MIN_FRAMES:
+                    break
+            time.sleep(0.5)
+        text = log_since(offset)
+        if frames == 0:
+            return False, "NeuralScreen did not start processing (no FPS line in the log)"
+        if frames < MIN_FRAMES or fps < MIN_FPS:
+            return False, (f"the pipeline is barely alive: {fps:.1f} FPS, "
+                           f"{frames} frames in 30 s")
+        if "result pixels through shared memory" not in text:
+            pipe = "shared memory for pixels unavailable" in text
+            return False, ("the pixels are not going through shared memory"
+                           + (" - the worker refused the section" if pipe else ""))
+    finally:
+        left = quit_app()
+    if left:
+        return False, f"processes left behind: {left}"
+    return True, f"came up, {fps:.1f} FPS at {frames} frames, shared memory, clean exit"
+
+
 def gui_check():
     """The full GUI cycle: launch -> record -> exit. Requires NeuralScreen not
     to be running. ~40 seconds."""
-    import ctypes
     import time
 
-    VK_INSERT = 0x2D
-    VK_Q = 0x51
-    KEYEVENTF_KEYUP = 0x0002
-
-    def send_key(vk, mods=()):
-        for m in mods:
-            ctypes.windll.user32.keybd_event(m, 0, 0, 0)
-        ctypes.windll.user32.keybd_event(vk, 0, 0, 0)
-        ctypes.windll.user32.keybd_event(vk, 0, KEYEVENTF_KEYUP, 0)
-        for m in reversed(mods):
-            ctypes.windll.user32.keybd_event(m, 0, KEYEVENTF_KEYUP, 0)
-
+    busy = running_instances()
+    if busy:
+        return False, f"NeuralScreen is already running ({busy}) - stop it first"
     # 1. launch
-    subprocess.run(["cscript", "//nologo", "NeuralScreen.vbs"], cwd=ROOT,
-                   capture_output=True)
-    time.sleep(8)
-    # main.py opens the log as utf-8; errors="replace" guards a truncated tail.
-    log = (ROOT / "NeuralScreen.log").read_text(encoding="utf-8", errors="replace")
-    if "NR ON" not in log:
+    offset = launch()
+    if wait_for(offset, "NR ON", timeout=25.0) is None:
         return False, "NeuralScreen did not come up (no 'NR ON' in the log)"
     # 2. record for 5 seconds
     send_key(VK_INSERT)
@@ -238,12 +355,7 @@ def gui_check():
     if frames < 100 or dur < 4:
         return False, f"the recording looks suspicious: {frames} frames / {dur:.1f} s"
     # 3. exit
-    send_key(VK_Q, (0x11, 0x12))  # Ctrl+Alt+Q
-    time.sleep(4)
-    r = subprocess.run(["tasklist"], capture_output=True)
-    out = r.stdout.decode("cp1251", errors="replace")
-    left = [l for l in out.splitlines()
-            if "pythonw.exe" in l or "nvngx.dll" in l]
+    left = quit_app()
     if left:
         return False, f"processes left behind: {left}"
     return True, (f"recording of {frames} frames / {dur:.1f} s, "
@@ -255,6 +367,8 @@ def main():
     print("=" * 60)
     if "--gui" in sys.argv:
         check("GUI: launch -> record -> exit", gui_check)
+    elif "--smoke" in sys.argv:
+        check("smoke: launch -> processing -> exit", smoke_check)
     else:
         check("worker: fresh, with the hook", fresh_worker)
         check("zip: integrity and contents", zip_integrity)
@@ -268,9 +382,10 @@ def main():
         print(f"RESULT: {len(FAILS)} FAIL - {FAILS}")
         return 1
     print("RESULT: all checks PASS")
-    if "--gui" not in sys.argv:
+    if "--gui" not in sys.argv and "--smoke" not in sys.argv:
         print()
-        print("GUI part:  runtime\\python.exe autocheck.py --gui")
+        print("smoke (20 s):  runtime\\python.exe autocheck.py --smoke")
+        print("GUI part:      runtime\\python.exe autocheck.py --gui")
     return 0
 
 
