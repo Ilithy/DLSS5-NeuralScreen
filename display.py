@@ -428,6 +428,12 @@ class Display:
                     user32.AttachThreadInput(my_tid, fg_tid, False)
             except Exception:
                 pass
+        # The pointer is ours while the menu is up: hide the system one over
+        # our window so the two do not sit on top of each other.
+        try:
+            pygame.mouse.set_visible(not enabled)
+        except Exception:
+            pass
         self._click_through = not enabled
 
     def set_menu_opaque(self, opaque: bool) -> None:
@@ -566,20 +572,37 @@ class Display:
         self.menu.set_stats(self._hud)
         self.menu.draw(self.screen)
         self._sync_cursor()
-        if self.menu.visible and not system_cursor_visible():
+        if self.menu.visible:
             self._draw_pointer()
         pygame.display.flip()
 
     def _draw_pointer(self) -> None:
-        """Our own mouse pointer, for when the system has none to show.
+        """Our own mouse pointer, drawn while the menu is open.
 
-        Drawn on the overlay itself, so it does not depend on any other
-        process's cursor state - which is the whole point: a fullscreen game
-        hides the cursor and the menu was unusable without it.
+        Always ours, and the system one is hidden over our window meanwhile
+        (see set_menu_input) - so there is exactly one pointer no matter what
+        the game underneath did with the system cursor. A fullscreen game
+        hides it outright; a windowed one leaves it visible but also draws its
+        OWN cursor inside its frame, which freezes when the game loses focus
+        to our menu. Both looked like "the pointer does not move".
+
+        The position comes from GetCursorPos rather than pygame: SDL's cached
+        position only advances while our window receives motion events, and
+        this window is click-through most of the time.
         """
+        pt = wintypes.POINT()
         try:
-            x, y = pygame.mouse.get_pos()
+            if not user32.GetCursorPos(ctypes.byref(pt)):
+                return
+            hwnd = pygame.display.get_wm_info()["window"]
+            user32.ScreenToClient(hwnd, ctypes.byref(pt))
+            x, y = int(pt.x), int(pt.y)
         except Exception:
+            try:
+                x, y = pygame.mouse.get_pos()
+            except Exception:
+                return
+        if x < 0 or y < 0 or x > self.width or y > self.height:
             return
         s = max(0.9, self.ui_scale) * 1.1
         shape = [(0, 0), (0, 18), (5, 13), (8, 21), (11, 19), (8, 12), (14, 12)]

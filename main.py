@@ -2427,6 +2427,13 @@ def main() -> int:
             fg = foreign_foreground()
             if fg:
                 last_foreground = fg
+            # A game that goes fullscreen raises itself above every topmost
+            # window, ours included, and then the menu is drawn but not on
+            # screen. While it is open we keep coming back up; a SetWindowPos
+            # that changes nothing is cheap, and 5 frames is fast enough that
+            # nobody sees the menu disappear.
+            if display.menu.visible and frame_index % 5 == 0:
+                display.raise_topmost()
             if window_hwnd is not None:
                 if not ctypes.windll.user32.IsWindow(ctypes.c_void_p(window_hwnd)):
                     print("[main] the captured window closed - back to full screen",

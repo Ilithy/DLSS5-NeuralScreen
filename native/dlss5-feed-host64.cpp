@@ -1510,6 +1510,20 @@ static void FollowCapturedWindow()
     }
 }
 
+// Come back on top now and then. A game that goes fullscreen raises its own
+// window above every topmost window, ours included, and the picture would
+// stay underneath for as long as the game runs. Rare on purpose: the client
+// re-asserts the HUD above us much more often, and doing this every frame
+// would leave the HUD blinking under the picture.
+static void ReassertPresentTopmost()
+{
+    if (g_present_hwnd == nullptr || g_wgc_active) return;   // window mode follows instead
+    static uint32_t tick = 0;
+    if ((++tick % 300) != 0) return;
+    SetWindowPos(g_present_hwnd, HWND_TOPMOST, 0, 0, 0, 0,
+                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+}
+
 static bool PresentFrame(VideoState &v)
 {
     ID3D12Resource *bb = nullptr;
@@ -3917,6 +3931,7 @@ static int RunVideo()
             // NR OFF: show the raw capture (v.color is already full-res) - the
             // NGX evaluate is skipped but the pipeline is alive (window, HUD).
             FollowCapturedWindow();
+            ReassertPresentTopmost();
             const bool pres_ok = bypass ? PresentBypass(v) : PresentFrame(v);
             PhaseAdd(PH_PRESENT, t_pres);
             if (!pres_ok) return 9;

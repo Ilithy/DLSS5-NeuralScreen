@@ -1,12 +1,15 @@
-"""With no system cursor, the overlay draws its own - and only then.
+"""While the menu is open the mouse pointer is ours, and there is exactly one.
 
 Reported with DOOM maximised: Num2 brings the menu up and there is no mouse
-pointer at all. A fullscreen game hides the cursor for its own input queue and
-it stays hidden while our menu is open, which leaves the menu unusable.
+pointer at all - a fullscreen game hides the cursor for its own input queue
+and it stays hidden while our menu is over it. Reported again with DOOM
+windowed: a pointer that does not move, which is the game's OWN cursor frozen
+inside the captured frame (an unfocused game pauses).
 
-Two halves, both worth pinning: the pointer appears when the system has none,
-and it does NOT appear when the system cursor is there - a second pointer on a
-normal desktop would be its own bug.
+Asking GetCursorInfo first was not good enough for either case, so the rule is
+simple now: with the menu open we hide the system cursor over our window and
+draw our own. Both halves are worth pinning - the pointer is there while the
+menu is open, and gone when it is closed.
 
 Run:  runtime\\python.exe test_menu_cursor.py
 """
@@ -44,24 +47,24 @@ def main() -> int:
     disp.menu.visible = True
     failures = []
     try:
-        # 1. The system cursor is there: we must not add a second one.
-        D.system_cursor_visible = lambda: True
+        # The menu is open: the pointer is drawn, whatever the system cursor
+        # happens to be doing.
         disp.draw_overlay(0.0)
-        with_system = white_pixels_near_mouse(disp)
+        with_menu = white_pixels_near_mouse(disp)
 
-        # 2. The system cursor is gone (a fullscreen game): draw ours.
-        D.system_cursor_visible = lambda: False
+        # The menu is closed: nothing to point at, no pointer.
+        disp.menu.visible = False
         disp.draw_overlay(0.0)
-        without_system = white_pixels_near_mouse(disp)
+        without_menu = white_pixels_near_mouse(disp)
 
-        print(f"white pixels at the mouse: {with_system} with a system cursor, "
-              f"{without_system} without one")
-        if without_system < 40:
-            failures.append(f"no pointer drawn when the system has none "
-                            f"({without_system} pixels)")
-        if with_system >= without_system:
-            failures.append(f"a pointer is drawn even when the system cursor is "
-                            f"there ({with_system} pixels) - that would be two")
+        print(f"white pixels at the mouse: {with_menu} with the menu open, "
+              f"{without_menu} with it closed")
+        if with_menu < 40:
+            failures.append(f"no pointer drawn while the menu is open "
+                            f"({with_menu} pixels)")
+        if without_menu >= with_menu:
+            failures.append(f"a pointer is still drawn with the menu closed "
+                            f"({without_menu} pixels)")
     finally:
         disp.close()
 
@@ -69,7 +72,7 @@ def main() -> int:
         for f in failures:
             print("FAIL:", f)
         return 1
-    print("OK: the overlay draws a pointer exactly when the system has none")
+    print("OK: one pointer while the menu is open, none when it is closed")
     return 0
 
 
