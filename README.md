@@ -26,11 +26,10 @@ actually doing.*
 ## Install
 
 1. Download the archive from [Releases](https://github.com/perseval-BLR/DLSS5-NeuralScreen/releases)
-   and unpack it anywhere.
-2. From the same release page, download **`nvngx_dlssnr.dll`** and put it in
-   the `native` folder. This is NVIDIA's own file, 165 MB — too big for GitHub
-   to keep in the repository, which is why it is separate.
-3. Run **`NeuralScreen.exe`**.
+   and unpack it anywhere. **Everything is inside** — including NVIDIA's
+   `nvngx_dlssnr.dll` (165 MB, too big for GitHub to keep in the repository,
+   so it ships in the archive instead).
+2. Run **`NeuralScreen.exe`**.
 
 Windows will probably warn you about an unknown publisher the first time — the
 program is not signed with a paid certificate. Click *More info* → *Run
