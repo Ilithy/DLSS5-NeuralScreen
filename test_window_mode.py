@@ -249,7 +249,14 @@ def main() -> int:
             return 1
         pump(1.0)
 
-        # 1. Into window mode.
+        # 1. Into window mode. Num5 now takes the window UNDER THE CURSOR
+        # (falling back to the last focused one), so the mouse is parked in
+        # the middle of the target window first.
+        rect = ctypes.wintypes.RECT()
+        user32.GetWindowRect(hwnd, ctypes.byref(rect))
+        user32.SetCursorPos((rect.left + rect.right) // 2,
+                            (rect.top + rect.bottom) // 2)
+        pump(0.3)
         autocheck.send_key(VK_NUMPAD5)
         text = wait_log(offset, "window capture inside the worker (WGCW)", 30.0)
         if not text:
@@ -359,12 +366,16 @@ def main() -> int:
                 failures.append(f"the {name} layer still hides from capture "
                                 f"in window mode (affinity 0x{aff:X})")
         #    And a real grab: opening the menu has to CHANGE what Desktop
-        #    Duplication sees inside the window. Counting a colour does not
-        #    work - the desktop has amber in it too - but a change does.
-        share = menu_change(cam, frame_rect(hwnd))
+        #    Duplication sees. The menu opens in the bottom-right corner of
+        #    the SCREEN (not of the captured window), so the whole screen is
+        #    the region to compare - the menu covers ~2.7% of it, so a
+        #    visible menu moves well over 0.5% of the pixels. Counting a
+        #    colour does not work (the desktop has amber in it too), but a
+        #    change does.
+        share = menu_change(cam, None)
         print(f"     the menu changes {share * 100:.1f}% of what an outside "
-              f"capture sees of the window")
-        if share < 0.05:
+              f"capture sees of the screen")
+        if share < 0.005:
             failures.append(f"an outside capture does not see the overlay in "
                             f"window mode ({share * 100:.1f}% changed) - the "
                             f"whole point of the mode")
