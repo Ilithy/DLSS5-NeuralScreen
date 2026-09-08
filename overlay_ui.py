@@ -59,6 +59,7 @@ HOTKEY_ROWS = (
     ("settings", "hk_menu"),
     ("screenshot_menu", "hk_shot"),
     ("record", "hk_record"),
+    ("window_mode", "hk_window"),
     ("quit", "hk_quit"),
 )
 

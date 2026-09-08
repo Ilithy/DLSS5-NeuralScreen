@@ -152,6 +152,10 @@ RACK_FMT = "<4Iq"         # magic, ok, ngx_result, reserved, pts (24 bytes)
 # colour goes straight into a GPU texture and Python no longer ships 33 MB per
 # frame. FRM1 frames go out with FRAME_FLAG_NO_COLOR: motion only, no colour.
 DDA_MAGIC = 0x31414444  # 'DDA1'
+WGC_MAGIC = 0x57434757      # 'WGCW' - capture ONE window instead of the desktop
+WGC_ACK_MAGIC = 0x4B414757  # 'WGAK' - its acknowledgement, with the real capture size
+WGC_FMT = "<4IqQ"           # magic, width, height, flags, pts, hwnd
+WGC_ACK_FMT = "<4Iq"        # magic, ok, width, height, pts
 DDA_ACK_MAGIC = 0x4B434144  # 'DACK'
 DDA_FMT = "<4Iq"        # magic, width, height, flags, pts (24 bytes)
 DDA_ACK_FMT = "<4Iq"    # magic, ok, reserved0, reserved1, pts
@@ -646,6 +650,38 @@ def send_dda(worker: subprocess.Popen, width: int, height: int,
     worker.stdin.flush()
 
 
+def send_wgc(worker: subprocess.Popen, hwnd: int, width: int = 0,
+             height: int = 0, pts: int = 0) -> None:
+    """WGCW: ask the worker to capture ONE window instead of the desktop.
+
+    Windows Graphics Capture of a single window is unaffected by whatever is
+    drawn on top of it, so there is no self-capture loop - which is the whole
+    reason for this mode: the overlay no longer has to hide from screen
+    capture, and an outside recorder can see it. hwnd = 0 turns it off.
+    """
+    worker.stdin.write(struct.pack(WGC_FMT, WGC_MAGIC, int(width), int(height),
+                                   0, int(pts), int(hwnd)))
+    worker.stdin.flush()
+
+
+def foreign_foreground() -> int:
+    """The focused window, unless it is one of ours. 0 when there is none.
+
+    "Ours" matters because the hotkey may be pressed while the menu has the
+    focus, and capturing our own overlay is exactly the loop this mode exists
+    to avoid.
+    """
+    user32 = ctypes.windll.user32
+    hwnd = user32.GetForegroundWindow()
+    if not hwnd or not user32.IsWindowVisible(hwnd) or user32.IsIconic(hwnd):
+        return 0
+    pid = ctypes.c_ulong(0)
+    user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+    if pid.value == os.getpid():
+        return 0
+    return int(hwnd)
+
+
 def send_gray(worker: subprocess.Popen, width: int, height: int,
               name: str, flags: int = 0, pts: int = 0) -> None:
     """GRAY: give the worker the name of the reverse mapping for luminance.
@@ -733,6 +769,13 @@ class WorkerReader:
                     rest = _read_exact(self._worker.stdout, struct.calcsize(DDA_ACK_FMT) - 4)
                     _magic, ok, _r0, _r1, _pts = struct.unpack(DDA_ACK_FMT, magic_raw + rest)
                     self._queue.put(("dack", ok))
+                elif magic == WGC_ACK_MAGIC:
+                    # WGAK (24 bytes): acknowledgement of WGCW. It carries the
+                    # size the window capture really produces - physical
+                    # pixels, which is what the pipeline has to be built for.
+                    rest = _read_exact(self._worker.stdout, struct.calcsize(WGC_ACK_FMT) - 4)
+                    _magic, ok, aw, ah, _pts = struct.unpack(WGC_ACK_FMT, magic_raw + rest)
+                    self._queue.put(("wgak", (ok, aw, ah)))
                 elif magic == OUTS_ACK_MAGIC:
                     rest = _read_exact(self._worker.stdout,
                                        struct.calcsize(OUTS_ACK_FMT) - 4)
@@ -845,6 +888,25 @@ class WorkerReader:
                 if not payload:
                     raise RuntimeError("the worker could not enable screen capture")
                 return
+
+    def wait_wgak(self, timeout: float) -> tuple:
+        """Wait for WGAK - the acknowledgement of WGCW; returns the capture size."""
+        deadline = time.monotonic() + timeout
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError(f"the worker did not acknowledge WGCW within {timeout:.0f}s")
+            try:
+                got, payload = self._queue.get(timeout=remaining)
+            except queue.Empty:
+                continue
+            if got is None:
+                raise payload if isinstance(payload, Exception) else EOFError("the worker stopped")
+            if got == "wgak":
+                ok, aw, ah = payload
+                if not ok:
+                    raise RuntimeError("the worker could not capture that window")
+                return aw, ah
 
     def wait_gak(self, timeout: float) -> None:
         """Wait for GAK - the acknowledgement that the reverse gray channel is open."""
@@ -1248,6 +1310,8 @@ def main() -> int:
         present_attempted = False  # already tried for the current worker (do not spam)
         dda_mode = False          # the worker captures the screen itself
         dda_attempted = False     # already tried for the current worker (do not spam)
+        window_hwnd = None        # WGCW target; None = the whole desktop (DDA1)
+        last_foreground = 0       # the last focused window that was not ours
         gray_active = False       # guides take luminance from the worker's gray channel
         pending_shot: Path | None = None  # a screenshot waiting for a frame with pixels
         recorder: VideoRecorder | None = None  # recording (Num0), MP4 AV1 NVENC
@@ -1489,35 +1553,14 @@ def main() -> int:
             Recording stops (the frame size changes). The menu is recreated
             with its theme/language/layout preserved.
             """
-            nonlocal monitor, width, height, work_w, work_h
-            nonlocal shm, worker, worker_logs, reader, worker_stop
-            nonlocal capture, display, guides, buf_full
-            nonlocal frame_index, pts, work_frame, recorder, pending_shot
-            nonlocal output_rgba
-            nonlocal present_mode, present_attempted, dda_mode, dda_attempted
-            nonlocal gray_active, motion_small, motion_attempted, gpu_ok
-            nonlocal out_shm, out_attempted
+            # Everything downstream of the size - the worker, the shm, the
+            # overlay, the flags - is rebuilt by _rebuild_pipeline, which owns
+            # those names; this function only picks the monitor and the size.
+            nonlocal monitor, width, height, work_w, work_h, capture
             if new_monitor == monitor:
                 return
-            # The menu is open - it is where the switch comes from. A new
-            # Display starts with the menu closed, so we remember the state
-            # and put it back.
-            menu_was_open = display.menu.visible
             print(f"[main] monitor change: {monitor} -> {new_monitor}")
-            # Recording: the frame size will change - close it honestly (moov).
-            if recorder is not None:
-                try:
-                    recorder.close()
-                except Exception as exc:
-                    print(f"[main] failed to close the recording: {exc}", file=sys.stderr)
-                recorder = None
-            pending_shot = None
-            # The worker and the shm hold the old sizes.
-            shutdown_worker(worker, worker_stop)
-            try:
-                shm.close()
-            except Exception:
-                pass
+            _teardown_pipeline()
             try:
                 capture.close()
             except Exception:
@@ -1528,6 +1571,44 @@ def main() -> int:
             capture = ScreenCapture(monitor_idx=monitor)
             width, height = capture.resolution
             work_w, work_h = _work_size(width, height, work_scale)
+            _rebuild_pipeline(f"Monitor {monitor}: {width}x{height}")
+
+        def _teardown_pipeline() -> None:
+            """Stop everything that is sized to the current width/height.
+
+            Shared by the monitor switch and the window switch: the worker,
+            the shared memory and a running recording are all built for one
+            frame size and cannot survive a change of it.
+            """
+            nonlocal recorder, pending_shot, worker, worker_stop
+            if recorder is not None:
+                try:
+                    recorder.close()
+                except Exception as exc:
+                    print(f"[main] failed to close the recording: {exc}", file=sys.stderr)
+                recorder = None
+            pending_shot = None
+            shutdown_worker(worker, worker_stop)
+            try:
+                shm.close()
+            except Exception:
+                pass
+
+        def _rebuild_pipeline(note: str) -> None:
+            """Build the worker, the shm and the overlay for the current size.
+
+            The second half of what used to be _switch_monitor: it reads the
+            nonlocal width/height/work_w/work_h and rebuilds everything that
+            depends on them, resetting the per-worker flags so the main loop
+            negotiates DDA1/WGCW, GRAY, OUTS and the window again.
+            """
+            nonlocal shm, worker, worker_logs, reader, worker_stop
+            nonlocal display, guides, buf_full
+            nonlocal frame_index, pts, work_frame, output_rgba
+            nonlocal present_mode, present_attempted, dda_mode, dda_attempted
+            nonlocal gray_active, motion_small, motion_attempted, gpu_ok
+            nonlocal out_shm, out_attempted
+            menu_was_open = display.menu.visible
             full_w = width if (work_w != width or work_h != height) else 0
             full_h = height if (work_w != width or work_h != height) else 0
             shm = SharedFrameBuffer(width, height)
@@ -1579,9 +1660,56 @@ def main() -> int:
             # save it.
             output_rgba = None
             _save_menu_layout()
-            print(f"[main] monitor {monitor}: {width}x{height}, "
-                  f"work {work_w}x{work_h}")
-            display.alert(f"Monitor {monitor}: {width}x{height}")
+            print(f"[main] pipeline rebuilt: {width}x{height}, "
+                  f"work {work_w}x{work_h} - {note}")
+            display.alert(note)
+
+        def _switch_window(hwnd: int) -> None:
+            """Point the capture at one window (hwnd) or back at the desktop (0).
+
+            The window's capture size is not something to guess: GetWindowRect
+            includes the invisible resize borders and the DWM frame, while the
+            capture produces the compositor's own surface. So the running
+            worker is asked first (WGCW answers with the real size), and the
+            pipeline is rebuilt for exactly that.
+            """
+            nonlocal window_hwnd, width, height, work_w, work_h
+            if hwnd and not want_dda:
+                display.alert(UI_STRINGS[lang]["win_fail"])
+                print("[main] window mode needs capture in the worker "
+                      "(capture_in_worker is off)", file=sys.stderr)
+                return
+            if hwnd:
+                try:
+                    aw, ah = _probe_window_capture(hwnd)
+                except Exception as exc:
+                    display.alert(UI_STRINGS[lang]["win_fail"])
+                    print(f"[main] the worker cannot capture that window: {exc}",
+                          file=sys.stderr)
+                    return
+                if aw <= 0 or ah <= 0:
+                    display.alert(UI_STRINGS[lang]["win_fail"])
+                    return
+                _teardown_pipeline()
+                window_hwnd = int(hwnd)
+                width, height = int(aw), int(ah)
+                note = UI_STRINGS[lang]["win_mode_on"]
+            else:
+                _teardown_pipeline()
+                window_hwnd = None
+                width, height = capture.resolution
+                note = UI_STRINGS[lang]["win_mode_off"]
+            work_w, work_h = _work_size(width, height, work_scale)
+            _rebuild_pipeline(note)
+
+        def _probe_window_capture(hwnd: int) -> tuple:
+            """Ask the CURRENT worker for the capture size of a window.
+
+            It switches that worker's source as a side effect, which is
+            harmless: the caller tears it down immediately afterwards.
+            """
+            send_wgc(worker, hwnd)
+            return reader.wait_wgak(timeout=15.0)
 
         def _enable_out_shm() -> None:
             """OUTS: agree that the result pixels will go through a section.
@@ -1722,6 +1850,38 @@ def main() -> int:
                 dda_mode = False
                 print(f"[main] capture inside the worker unavailable ({exc}) - frames through Python",
                       file=sys.stderr)
+
+        def _enable_wgc() -> None:
+            """Ask the worker to capture the target WINDOW (WGCW).
+
+            The same deal as DDA1 - the colour stops going down the pipe and
+            the reverse gray channel feeds the guides - except the source is
+            one window, which is why the overlay will not have to hide from
+            screen capture. If the window has gone (closed, minimised) we drop
+            back to the whole screen rather than freezing on the last frame.
+            """
+            nonlocal dda_mode, dda_attempted, window_hwnd
+            dda_attempted = True
+            if window_hwnd is None:
+                return
+            if not ctypes.windll.user32.IsWindow(window_hwnd):
+                print("[main] the captured window is gone - back to full screen",
+                      file=sys.stderr)
+                _switch_window(0)
+                return
+            try:
+                send_wgc(worker, window_hwnd)
+                aw, ah = reader.wait_wgak(timeout=15.0)
+                dda_mode = True
+                _sync_gray()
+                print(f"[main] window capture inside the worker (WGCW): "
+                      f"{aw}x{ah}, no colour through the pipe")
+            except Exception as exc:
+                dda_mode = False
+                print(f"[main] window capture unavailable ({exc}) - back to full screen",
+                      file=sys.stderr)
+                display.alert(UI_STRINGS[lang]["win_fail"])
+                _switch_window(0)
 
         def _disable_dda() -> None:
             """Turn off capture in the worker and send the frame from Python again."""
@@ -2101,6 +2261,23 @@ def main() -> int:
                                   f"({recorder.written} frames, {secs:.1f}s)")
                             display.alert(UI_STRINGS[lang]["record_off"])
                             recorder = None
+                    elif cmd == "window_mode":
+                        # Whatever window had the focus last - not the current
+                        # foreground, which may well be our own menu.
+                        if window_hwnd is not None:
+                            print("[main] window mode off - back to the whole screen")
+                            _switch_window(0)
+                        elif last_foreground:
+                            print(f"[main] window mode on - target hwnd "
+                                  f"0x{last_foreground:X}")
+                            _switch_window(last_foreground)
+                        else:
+                            # Nothing but our own windows has had the focus, so
+                            # there is nothing to capture but ourselves.
+                            print("[main] window mode: no window to capture "
+                                  "(only our own windows have had the focus)",
+                                  file=sys.stderr)
+                            display.alert(UI_STRINGS[lang]["win_none"])
                     elif cmd in ("scale_up", "scale_down"):
                         delta = WORK_SCALE_STEP if cmd == "scale_up" else -WORK_SCALE_STEP
                         new_scale = min(WORK_SCALE_MAX, max(WORK_SCALE_MIN, work_scale + delta))
@@ -2136,8 +2313,23 @@ def main() -> int:
 
             if want_present and not present_mode and not present_attempted:
                 _enable_present()
+            # Who has the focus, for the window-mode hotkey: by the time it
+            # is pressed the menu may be in front, so the last window that was
+            # not ours is remembered continuously.
+            fg = foreign_foreground()
+            if fg:
+                last_foreground = fg
+            if window_hwnd is not None and frame_index % 60 == 0 and \
+                    not ctypes.windll.user32.IsWindow(window_hwnd):
+                print("[main] the captured window closed - back to full screen",
+                      file=sys.stderr)
+                _switch_window(0)
+                continue
             if want_dda and not dda_mode and not dda_attempted:
-                _enable_dda()
+                if window_hwnd is not None:
+                    _enable_wgc()
+                else:
+                    _enable_dda()
             if want_motion_small and not motion_small and not motion_attempted:
                 motion_attempted = True
                 _sync_motion_size()

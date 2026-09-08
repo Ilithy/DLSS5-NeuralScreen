@@ -98,6 +98,9 @@ DEFAULT_BINDINGS = {
     # is the very Insert that used to start a recording.
     6: (MOD_NOREPEAT, VK_NUMPAD[0], "record", "Num0"),
     7: (MOD_NOREPEAT, VK_NUMPAD[3], "screenshot_menu", "Num3"),
+    # One-window mode: the window that had the focus becomes the only thing
+    # processed. Num5 is the middle of the block and free of any habit.
+    8: (MOD_NOREPEAT, VK_NUMPAD[5], "window_mode", "Num5"),
 }
 
 # Key name -> VK (for parsing the config)
