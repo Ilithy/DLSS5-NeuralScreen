@@ -4,7 +4,7 @@
   "height": 2160,
   "fullscreen": true,
   "warmup": 120,
-  "work_scale": 0.65,
+  "work_scale": 1.0,
   "lang": "en",
   "profile": "Strong / Cinematic",
   "intensity": null,
@@ -14,15 +14,13 @@
   "worker_present": true,
   "motion_on_gpu": true,
   "capture_in_worker": true,
-  "menu_scale": 0.6,
+  "menu_scale": 1.0,
   "menu_offset": [
-    1484,
-    821
+    0,
+    0
   ],
   "open_menu_on_start": true,
-  "split": 1.0,
+  "split": 0.0,
   "record_audio": true,
-  "nr_small": true,
-  "menu_height": null,
-  "theme": "light"
+  "nr_small": false
 }
