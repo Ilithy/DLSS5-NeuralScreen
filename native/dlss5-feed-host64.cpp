@@ -1,4 +1,4 @@
-// dlss5-feed-host64 - the 64-bit half of DLSS5-Feeder for 32-bit games.
+﻿// dlss5-feed-host64 - the 64-bit half of DLSS5-Feeder for 32-bit games.
 //
 // A 32-bit game cannot load NGX or the DLSS 5 add-on (both x64-only). This little
 // process can: it puts ReShade x64 (dxgi.dll) and renodx-dlss5.addon64 next to
@@ -19,6 +19,16 @@
 #include <windows.h>
 #include <d3d11.h>
 #include <d3d11_4.h>
+// Windows Graphics Capture - the per-window input (WGCW). C++/WinRT needs
+// C++17, which is why build-host.bat carries /std:c++17.
+#include <winrt/base.h>
+#include <winrt/Windows.Foundation.h>
+#include <winrt/Windows.Graphics.h>
+#include <winrt/Windows.Graphics.Capture.h>
+#include <winrt/Windows.Graphics.DirectX.h>
+#include <winrt/Windows.Graphics.DirectX.Direct3D11.h>
+#include <windows.graphics.capture.interop.h>
+#include <windows.graphics.directx.direct3d11.interop.h>
 #include <d3d12.h>
 #include <dxgi1_4.h>
 #include <d3dcompiler.h>
@@ -975,6 +985,8 @@ static constexpr uint32_t MOTION_MAGIC     = 0x53544F4Du; // "MOTS" -- client ->
 static constexpr uint32_t MOTION_ACK_MAGIC = 0x4B43414Du; // "MACK" -- worker -> client reply to MOTS
 static constexpr uint32_t DDA_MAGIC        = 0x31414444u; // "DDA1" -- client -> worker: worker takes over capture
 static constexpr uint32_t DDA_ACK_MAGIC    = 0x4B434144u; // "DACK" -- worker -> client reply to DDA1
+static constexpr uint32_t WGC_MAGIC        = 0x57434757u; // "WGCW" -- client -> worker: capture ONE window, not the desktop
+static constexpr uint32_t WGC_ACK_MAGIC    = 0x4B414757u; // "WGAK" -- worker -> client reply to WGCW
 static constexpr uint32_t GRAY_MAGIC       = 0x59415247u; // "GRAY" -- client -> worker: gray goes back into this mapping
 static constexpr uint32_t GRAY_ACK_MAGIC   = 0x4B434147u; // "GAK"  -- worker -> client reply to GRAY
 // OUTS: the reverse channel for PIXELS. A recorded frame weighs 33 MB at 4K,
@@ -1121,6 +1133,26 @@ struct VideoDdaCmd
 struct VideoDdaAck
 {
     uint32_t magic, ok, reserved0, reserved1;
+    int64_t pts;
+};
+// WGCW: client -> worker. "Capture THIS WINDOW instead of the whole desktop."
+// Windows Graphics Capture of a single window is unaffected by whatever is
+// drawn on top of that window (measured: a fullscreen overlay over the target
+// contributes 0% of the captured pixels), so there is no self-capture loop and
+// our overlay no longer has to hide from screen capture - which is what lets
+// OBS see it and the NVIDIA App record at all.
+// hwnd = the target window, 0 stops the capture. width/height are advisory;
+// the ack reports the size the capture actually produces, which on a scaled
+// display is the window's PHYSICAL size, not its logical one.
+struct VideoWgcCmd
+{
+    uint32_t magic, width, height, flags;
+    int64_t pts;
+    uint64_t hwnd;
+};
+struct VideoWgcAck
+{
+    uint32_t magic, ok, width, height;
     int64_t pts;
 };
 // GRAY: client -> worker. "Downsample the captured colour to luminance
@@ -2041,6 +2073,8 @@ static ID3D11Fence            *g_dda_signal11 = nullptr;
 static HANDLE                  g_dda_fence_ev = nullptr;  // event wait for the D3D11 copy
 static UINT64                  g_dda_fence_value = 1;
 static bool                    g_dda_ready = false;      // current frame is in v.color
+// The WGCW command, filled by the dispatcher and read by its handler.
+static VideoWgcCmd             g_wgc_cmd = {};
 // Gray downsample (GRAY): write luminance (flow size) into a client mapping.
 static HANDLE                  g_gray_file = nullptr;   // client's mapping handle
 static BYTE                   *g_gray_map = nullptr;    // mapped view
@@ -2419,11 +2453,38 @@ static bool AreaToGray()
 }
 
 // Open capture. w/h = capture size; the worker keeps its own pipe for motion.
+// The D3D11 device the capture runs on. Desktop Duplication and Windows
+// Graphics Capture both hand their frames to the same bridge into D3D12, so
+// they share one device; CloseDda releases it, and only one source is ever
+// open at a time.
+static bool EnsureCaptureDevice()
+{
+    if (g_dda_d11 != nullptr) return true;
+    IDXGIFactory1 *factory = nullptr;
+    if (FAILED(CreateDXGIFactory1(__uuidof(IDXGIFactory1), (void **)&factory)))
+    { Log("[cap] DXGI factory failed"); return false; }
+    IDXGIAdapter1 *adapter = nullptr;
+    if (FAILED(factory->EnumAdapters1(0, &adapter)))
+    { Log("[cap] no adapter"); factory->Release(); return false; }
+    D3D_FEATURE_LEVEL fl = D3D_FEATURE_LEVEL_11_0;
+    const HRESULT hr = D3D11CreateDevice(adapter, D3D_DRIVER_TYPE_UNKNOWN, nullptr,
+                                         D3D11_CREATE_DEVICE_BGRA_SUPPORT, &fl, 1,
+                                         D3D11_SDK_VERSION, &g_dda_d11, nullptr,
+                                         &g_dda_ctx);
+    adapter->Release(); factory->Release();
+    if (FAILED(hr)) { Log("[cap] D3D11 device failed 0x%08X", hr); return false; }
+    return true;
+}
+
+static void CloseWgc();
+
 static bool OpenDda(UINT w, UINT hgt)
 {
+    CloseWgc();              // one source at a time; this also frees the bridge
     CloseDda();
     if (w == 0 || hgt == 0) { Log("[dda] capture off"); return true; }
     if (!EnsureDdaSwizzle()) return false;
+    if (!EnsureCaptureDevice()) return false;
     IDXGIFactory1 *factory = nullptr;
     HRESULT hr = CreateDXGIFactory1(__uuidof(IDXGIFactory1), (void **)&factory);
     if (FAILED(hr)) { Log("[dda] factory failed 0x%08X", hr); return false; }
@@ -2434,11 +2495,6 @@ static bool OpenDda(UINT w, UINT hgt)
     IDXGIOutput1 *output1 = nullptr;
     if (FAILED(output->QueryInterface(__uuidof(IDXGIOutput1), (void **)&output1)))
     { Log("[dda] no Output1"); output->Release(); adapter->Release(); factory->Release(); return false; }
-    D3D_FEATURE_LEVEL fl = D3D_FEATURE_LEVEL_11_0;
-    hr = D3D11CreateDevice(adapter, D3D_DRIVER_TYPE_UNKNOWN, nullptr,
-                           D3D11_CREATE_DEVICE_BGRA_SUPPORT, &fl, 1, D3D11_SDK_VERSION,
-                           &g_dda_d11, nullptr, &g_dda_ctx);
-    if (FAILED(hr)) { Log("[dda] D3D11 failed 0x%08X", hr); return false; }
     hr = output1->DuplicateOutput(g_dda_d11, &g_dda_dup);
     output1->Release(); output->Release(); adapter->Release(); factory->Release();
     if (FAILED(hr)) { Log("[dda] DuplicateOutput failed 0x%08X", hr); return false; }
@@ -2454,51 +2510,41 @@ static double PhaseNow();
 static void PhaseAdd(int idx, double t0);
 static bool PhaseEnabled();
 
-// Grab the latest desktop frame into v.color.tex (RGBA, GPU-resident).
-static bool DdaGrab(VideoState &v)
+enum class StageResult { Ok, SizeChanged, Failed };
+
+// Everything between "a captured D3D11 texture" and "the bytes are in the
+// shared texture and D3D12 may read them". Desktop Duplication and Windows
+// Graphics Capture produce the same kind of texture, so this half of the path
+// exists once. The caller owns the source frame and releases it afterwards -
+// duplication may only call ReleaseFrame() once the fence below has fired.
+static StageResult StageCapturedFrame(ID3D11Texture2D *frame, UINT *out_w, UINT *out_h)
 {
-    if (!g_dda_active) return false;
-    IDXGIResource *res = nullptr;
-    DXGI_OUTDUPL_FRAME_INFO fi = {};
-    const double t_acq = PhaseNow();
-    HRESULT hr = g_dda_dup->AcquireNextFrame(100, &fi, &res);
-    PhaseAdd(PH_ACQ, t_acq);
-    if (hr == DXGI_ERROR_WAIT_TIMEOUT) return false;      // desktop unchanged
-    if (FAILED(hr))
-    {
-        Log("[dda] acquire failed 0x%08X — recreating", hr);
-        OpenDda(g_dda_w, g_dda_h);
-        return false;
-    }
-    ID3D11Texture2D *frame = nullptr;
-    if (FAILED(res->QueryInterface(__uuidof(ID3D11Texture2D), (void **)&frame)))
-    {
-        g_dda_dup->ReleaseFrame();
-        return false;
-    }
+    D3D11_TEXTURE2D_DESC fd = {};
+    frame->GetDesc(&fd);
+    if (out_w != nullptr) *out_w = fd.Width;
+    if (out_h != nullptr) *out_h = fd.Height;
     if (g_dda_shared == nullptr)
     {
-        D3D11_TEXTURE2D_DESC fd{}; frame->GetDesc(&fd);
         D3D11_TEXTURE2D_DESC sd = {};
         sd.Width = fd.Width; sd.Height = fd.Height; sd.MipLevels = 1; sd.ArraySize = 1;
         sd.Format = fd.Format; sd.SampleDesc.Count = 1; sd.Usage = D3D11_USAGE_DEFAULT;
         sd.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
         sd.MiscFlags = D3D11_RESOURCE_MISC_SHARED | D3D11_RESOURCE_MISC_SHARED_NTHANDLE;
         if (FAILED(g_dda_d11->CreateTexture2D(&sd, nullptr, &g_dda_shared)))
-        { Log("[dda] shared tex failed"); g_dda_dup->ReleaseFrame(); frame->Release(); res->Release(); return false; }
+        { Log("[cap] shared tex failed"); return StageResult::Failed; }
         IDXGIResource1 *r1 = nullptr;
         g_dda_shared->QueryInterface(__uuidof(IDXGIResource1), (void **)&r1);
         if (!r1 || FAILED(r1->CreateSharedHandle(nullptr, DXGI_SHARED_RESOURCE_READ, nullptr, &g_dda_nt)))
-        { Log("[dda] NT handle failed"); g_dda_dup->ReleaseFrame(); frame->Release(); res->Release(); return false; }
+        { Log("[cap] NT handle failed"); if (r1) r1->Release(); return StageResult::Failed; }
         r1->Release();
         if (FAILED(h.dev->OpenSharedHandle(g_dda_nt, __uuidof(ID3D12Resource),
                                            (void **)&g_dda_d12)))
-        { Log("[dda] OpenSharedHandle failed"); g_dda_dup->ReleaseFrame(); frame->Release(); res->Release(); return false; }
+        { Log("[cap] OpenSharedHandle failed"); return StageResult::Failed; }
         // cross-device signal fence
         g_dda_fence_value = 1;
         if (FAILED(h.dev->CreateFence(0, D3D12_FENCE_FLAG_SHARED, __uuidof(ID3D12Fence),
                                       reinterpret_cast<void **>(&g_dda_signal))))
-        { Log("[dda] signal fence failed"); g_dda_dup->ReleaseFrame(); frame->Release(); res->Release(); return false; }
+        { Log("[cap] signal fence failed"); return StageResult::Failed; }
         HANDLE nt_f = nullptr;
         h.dev->CreateSharedHandle(g_dda_signal, nullptr, GENERIC_ALL, nullptr, &nt_f);
         ID3D11Device5 *d5 = nullptr;
@@ -2508,7 +2554,8 @@ static bool DdaGrab(VideoState &v)
             d5->Release();
         }
         if (nt_f) CloseHandle(nt_f);
-        if (!g_dda_signal11) { Log("[dda] no D3D11 fence — capture invalid"); g_dda_dup->ReleaseFrame(); frame->Release(); res->Release(); return false; }
+        if (!g_dda_signal11)
+        { Log("[cap] no D3D11 fence - capture invalid"); return StageResult::Failed; }
         D3D12_HEAP_PROPERTIES def = { D3D12_HEAP_TYPE_DEFAULT };
         D3D12_RESOURCE_DESC td = {};
         td.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
@@ -2520,35 +2567,20 @@ static bool DdaGrab(VideoState &v)
                                                   D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr,
                                                   __uuidof(ID3D12Resource),
                                                   reinterpret_cast<void **>(&g_dda_dst))))
-        { Log("[dda] dst UAV failed"); g_dda_dup->ReleaseFrame(); frame->Release(); res->Release(); return false; }
-        Log("[dda] shared texture %ux%u ready", (UINT)fd.Width, (UINT)fd.Height);
+        { Log("[cap] dst UAV failed"); return StageResult::Failed; }
+        Log("[cap] shared texture %ux%u ready", (UINT)fd.Width, (UINT)fd.Height);
     }
-    // A D3D11 copy with a box of the minimum size: g_dda_shared is created for
-    // the size of the FIRST frame; when the monitor resolution changes,
-    // CopyResource with mismatched sizes gives device removed. A cropped frame
-    // beats a crash (M4 of audit #2). When the sizes differ we recreate the
-    // whole DDA chain instead of copying a cropped frame: a cropped copy would
-    // leave stale pixels in the tail of the texture, and NGX would evaluate
-    // the full texture - garbage in the lower/right part of the frame (M2 of
-    // audit #3).
+    // g_dda_shared is created for the size of the FIRST frame. When the source
+    // changes size (monitor resolution, or the captured window resized), a
+    // CopyResource with mismatched sizes gives device removed, and a cropped
+    // copy would leave stale pixels in the tail that NGX would then evaluate -
+    // garbage in the lower/right part of the frame (M2 of audit #3). So the
+    // caller is told to rebuild the whole chain instead.
     {
-        D3D11_TEXTURE2D_DESC sd{};
+        D3D11_TEXTURE2D_DESC sd = {};
         g_dda_shared->GetDesc(&sd);
-        D3D11_TEXTURE2D_DESC fd{};
-        frame->GetDesc(&fd);
         if (sd.Width != fd.Width || sd.Height != fd.Height)
-        {
-            Log("[dda] monitor resolution changed %ux%u -> %ux%u - recreating",
-                (UINT)sd.Width, (UINT)sd.Height, (UINT)fd.Width, (UINT)fd.Height);
-            g_dda_dup->ReleaseFrame();
-            frame->Release(); res->Release();
-            // Recreate the whole chain: shared texture, NT handle, D3D12
-            // resource, dst UAV, fences. OpenDda starts with CloseDda, which
-            // releases all of them; the next DdaGrab re-creates them at the
-            // NEW size (fd.Width/fd.Height - the frame that just arrived).
-            OpenDda(fd.Width, fd.Height);
-            return false;
-        }
+            return StageResult::SizeChanged;
         D3D11_BOX box = { 0, 0, 0, sd.Width, sd.Height, 1 };
         g_dda_ctx->CopySubresourceRegion(g_dda_shared, 0, 0, 0, 0, frame, 0, &box);
     }
@@ -2559,7 +2591,6 @@ static bool DdaGrab(VideoState &v)
         ctx4->Release();
     }
     g_dda_ctx->Flush();
-    frame->Release(); res->Release();
 
     // Wait for the D3D11 copy with an event, NOT by polling with Sleep(1).
     // At the default Windows timer resolution Sleep(1) sleeps up to 15.6 ms,
@@ -2584,15 +2615,16 @@ static bool DdaGrab(VideoState &v)
         }
     }
     if (g_dda_signal->GetCompletedValue() < want)
-    { Log("[dda] signal fence timeout"); g_dda_dup->ReleaseFrame(); return false; }
+    { Log("[cap] signal fence timeout"); return StageResult::Failed; }
     ++g_dda_fence_value;
-    // Desktop Duplication requires ReleaseFrame() AFTER every read of the
-    // frame has finished. The D3D11 copy is confirmed by the fence above -
-    // only now may the surface be released, otherwise the compositor can
-    // overwrite it while the copy is still running (torn frames on motion).
-    g_dda_dup->ReleaseFrame();
+    return StageResult::Ok;
+}
 
-    // swizzle into g_dda_dst, then copy into v.color.tex
+// The D3D12 half: swizzle BGRA->RGBA out of the shared texture into
+// g_dda_dst, copy that into v.color.tex, and hand the client the luminance
+// frame the optical-flow guides need.
+static bool SwizzleCaptureIntoColor(VideoState &v)
+{
     if (!BeginCommands()) return false;
     D3D12_RESOURCE_BARRIER to_srv = Transition(g_dda_d12, D3D12_RESOURCE_STATE_COMMON,
                                                D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
@@ -2619,21 +2651,20 @@ static bool DdaGrab(VideoState &v)
     src.pResource = g_dda_dst; src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX; src.SubresourceIndex = 0;
     dst.pResource = v.color.tex; dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX; dst.SubresourceIndex = 0;
     // The copy is strictly of the minimum size: g_dda_dst is fixed by the
-    // first desktop frame and v.color.tex by the client work/full size; when
-    // the monitor resolution changes the sizes diverge, and a whole-resource
-    // copy (a nullptr box) gives device removed. A cropped frame for one tick
-    // beats a crash.
+    // first captured frame and v.color.tex by the client work/full size; when
+    // the sizes diverge a whole-resource copy (a nullptr box) gives device
+    // removed. A cropped frame for one tick beats a crash.
     {
         const D3D12_RESOURCE_DESC sd = g_dda_dst->GetDesc();
         const D3D12_RESOURCE_DESC dd = v.color.tex->GetDesc();
         const UINT cw = (UINT)((sd.Width < dd.Width) ? sd.Width : dd.Width);
         const UINT ch = (UINT)((sd.Height < dd.Height) ? sd.Height : dd.Height);
         if (cw != sd.Width || ch != sd.Height)
-            Log("[dda] size mismatch %llux%llu vs %llux%llu — clipped",
+            Log("[cap] size mismatch %llux%llu vs %llux%llu - clipped",
                 (unsigned long long)sd.Width, (unsigned long long)sd.Height,
                 (unsigned long long)dd.Width, (unsigned long long)dd.Height);
         if (cw == 0 || ch == 0)
-        { Log("[dda] zero copy size — skip"); return false; }
+        { Log("[cap] zero copy size - skip"); return false; }
         D3D12_BOX box = { 0, 0, 0, cw, ch, 1 };
         h.list->CopyTextureRegion(&dst, 0, 0, 0, &src, &box);
     }
@@ -2646,11 +2677,211 @@ static bool DdaGrab(VideoState &v)
     D3D12_RESOURCE_BARRIER post_c[3] = { to_uav, to_nps, to_common };
     h.list->ResourceBarrier(3, post_c);
     const UINT64 fence = EndCommands();
-    if (!WaitFenceValue(h.fence, fence, 10000)) { Log("[dda] swizzle fence timeout"); return false; }
+    if (!WaitFenceValue(h.fence, fence, 10000)) { Log("[cap] swizzle fence timeout"); return false; }
     // Hand the client the luminance frame (320x180) for the optical flow
     if (!AreaToGray()) { /* best effort: guides go without a fresh frame */ }
     g_dda_ready = true;
     return true;
+}
+
+// Grab the latest desktop frame into v.color.tex (RGBA, GPU-resident).
+static bool DdaGrab(VideoState &v)
+{
+    if (!g_dda_active) return false;
+    IDXGIResource *res = nullptr;
+    DXGI_OUTDUPL_FRAME_INFO fi = {};
+    const double t_acq = PhaseNow();
+    HRESULT hr = g_dda_dup->AcquireNextFrame(100, &fi, &res);
+    PhaseAdd(PH_ACQ, t_acq);
+    if (hr == DXGI_ERROR_WAIT_TIMEOUT) return false;      // desktop unchanged
+    if (FAILED(hr))
+    {
+        Log("[dda] acquire failed 0x%08X - recreating", hr);
+        OpenDda(g_dda_w, g_dda_h);
+        return false;
+    }
+    ID3D11Texture2D *frame = nullptr;
+    if (FAILED(res->QueryInterface(__uuidof(ID3D11Texture2D), (void **)&frame)))
+    {
+        g_dda_dup->ReleaseFrame();
+        res->Release();
+        return false;
+    }
+    UINT new_w = 0, new_h = 0;
+    const StageResult st = StageCapturedFrame(frame, &new_w, &new_h);
+    frame->Release();
+    res->Release();
+    // Desktop Duplication requires ReleaseFrame() only AFTER every read of the
+    // frame has finished. StageCapturedFrame waits on the fence, so the copy
+    // is done; releasing earlier let the compositor overwrite the surface
+    // mid-copy (torn frames on motion).
+    g_dda_dup->ReleaseFrame();
+    if (st == StageResult::SizeChanged)
+    {
+        Log("[dda] monitor resolution changed -> %ux%u - recreating", new_w, new_h);
+        OpenDda(new_w, new_h);
+        return false;
+    }
+    if (st != StageResult::Ok) return false;
+    return SwizzleCaptureIntoColor(v);
+}
+
+// ---------------------------------------------------------------------------
+// Windows Graphics Capture of ONE window (WGCW). The frames arrive as the
+// same ID3D11Texture2D duplication produces, so only the source differs.
+// ---------------------------------------------------------------------------
+namespace ns_wgc = winrt::Windows::Graphics::Capture;
+namespace ns_wgdx = winrt::Windows::Graphics::DirectX;
+
+// The surface -> ID3D11Texture2D bridge has no C++/WinRT projection; this
+// hand-rolled declaration is the documented way to reach it.
+struct __declspec(uuid("A9B3D012-3DF2-4EE3-B8D1-8695F457D3C1"))
+INsDxgiInterfaceAccess : ::IUnknown
+{
+    virtual HRESULT __stdcall GetInterface(GUID const &id, void **object) = 0;
+};
+
+// The WinRT objects live on the heap and are freed by CloseWgc. As globals
+// with destructors they would be torn down during DLL unload, after WinRT
+// itself is gone.
+struct WgcSession
+{
+    ns_wgc::GraphicsCaptureItem item{nullptr};
+    ns_wgc::Direct3D11CaptureFramePool pool{nullptr};
+    ns_wgc::GraphicsCaptureSession session{nullptr};
+    ns_wgdx::Direct3D11::IDirect3DDevice device{nullptr};
+};
+
+static WgcSession *g_wgc = nullptr;
+static bool        g_wgc_active = false;
+static HWND        g_wgc_hwnd = nullptr;
+
+static void CloseWgc()
+{
+    g_wgc_active = false;
+    if (g_wgc != nullptr)
+    {
+        try
+        {
+            if (g_wgc->session != nullptr) g_wgc->session.Close();
+            if (g_wgc->pool != nullptr) g_wgc->pool.Close();
+        }
+        catch (winrt::hresult_error const &) { /* going away anyway */ }
+        delete g_wgc;
+        g_wgc = nullptr;
+        Log("[wgc] window capture closed");
+    }
+    CloseDda();          // the bridge and the D3D11 device are shared
+}
+
+// Any capture source at all - the pipe path is the alternative.
+static bool CaptureActive()
+{
+    return g_dda_active || g_wgc_active;
+}
+
+static bool OpenWgc(HWND hwnd)
+{
+    CloseWgc();
+    if (hwnd == nullptr) { Log("[wgc] window capture off"); return true; }
+    if (!IsWindow(hwnd)) { Log("[wgc] %p is not a window", (void *)hwnd); return false; }
+    if (!ns_wgc::GraphicsCaptureSession::IsSupported())
+    { Log("[wgc] Windows Graphics Capture is not supported here"); return false; }
+    if (!EnsureDdaSwizzle()) return false;
+    if (!EnsureCaptureDevice()) return false;
+    // WinRT needs an apartment on this thread. The worker initialises none of
+    // its own; a second call on an already-initialised MTA throws and is fine.
+    try { winrt::init_apartment(winrt::apartment_type::multi_threaded); }
+    catch (winrt::hresult_error const &) {}
+
+    WgcSession *s = new WgcSession();
+    try
+    {
+        IDXGIDevice *dxgi = nullptr;
+        if (FAILED(g_dda_d11->QueryInterface(__uuidof(IDXGIDevice), (void **)&dxgi)))
+        { Log("[wgc] no IDXGIDevice"); delete s; return false; }
+        winrt::com_ptr<::IInspectable> insp;
+        const HRESULT hr = CreateDirect3D11DeviceFromDXGIDevice(dxgi, insp.put());
+        dxgi->Release();
+        if (FAILED(hr))
+        { Log("[wgc] device wrap failed 0x%08X", hr); delete s; return false; }
+        s->device = insp.as<ns_wgdx::Direct3D11::IDirect3DDevice>();
+        auto interop = winrt::get_activation_factory<ns_wgc::GraphicsCaptureItem>()
+                           .as<::IGraphicsCaptureItemInterop>();
+        const HRESULT ir = interop->CreateForWindow(
+            hwnd, winrt::guid_of<ns_wgc::GraphicsCaptureItem>(),
+            winrt::put_abi(s->item));
+        if (FAILED(ir) || s->item == nullptr)
+        { Log("[wgc] CreateForWindow failed 0x%08X", ir); delete s; return false; }
+        const auto size = s->item.Size();
+        if (size.Width <= 0 || size.Height <= 0)
+        { Log("[wgc] the window has no size (minimised?)"); delete s; return false; }
+        s->pool = ns_wgc::Direct3D11CaptureFramePool::CreateFreeThreaded(
+            s->device, ns_wgdx::DirectXPixelFormat::B8G8R8A8UIntNormalized, 2, size);
+        s->session = s->pool.CreateCaptureSession(s->item);
+        try { s->session.IsCursorCaptureEnabled(false); }
+        catch (winrt::hresult_error const &) { Log("[wgc] cursor capture stays on"); }
+        // The yellow "this window is being captured" outline. Measured: the
+        // setter takes effect for an unpackaged process on Windows 11 26200
+        // even though GraphicsCaptureAccess(Borderless) answers
+        // UserPromptRequired. Where it does not, the overlay covers the
+        // window anyway.
+        try { s->session.IsBorderRequired(false); }
+        catch (winrt::hresult_error const &) { Log("[wgc] capture border stays on"); }
+        s->session.StartCapture();
+        g_wgc = s;
+        g_wgc_hwnd = hwnd;
+        g_wgc_active = true;
+        g_dda_w = (UINT)size.Width;
+        g_dda_h = (UINT)size.Height;
+        Log("[wgc] capturing window %p, %dx%d", (void *)hwnd, size.Width, size.Height);
+        return true;
+    }
+    catch (winrt::hresult_error const &e)
+    {
+        Log("[wgc] open threw 0x%08X", (unsigned)e.code());
+        delete s;
+        return false;
+    }
+}
+
+// Grab the latest frame of the captured WINDOW into v.color.tex.
+static bool WgcGrab(VideoState &v)
+{
+    if (!g_wgc_active || g_wgc == nullptr) return false;
+    try
+    {
+        const double t_acq = PhaseNow();
+        auto frame = g_wgc->pool.TryGetNextFrame();
+        PhaseAdd(PH_ACQ, t_acq);
+        // Nothing new: the window has not redrawn. Same meaning as
+        // DXGI_ERROR_WAIT_TIMEOUT on the duplication path - the caller keeps
+        // the previous frame.
+        if (frame == nullptr) return false;
+        auto access = frame.Surface().as<INsDxgiInterfaceAccess>();
+        ID3D11Texture2D *tex = nullptr;
+        if (FAILED(access->GetInterface(__uuidof(ID3D11Texture2D), (void **)&tex)) ||
+            tex == nullptr)
+        { frame.Close(); return false; }
+        UINT new_w = 0, new_h = 0;
+        const StageResult st = StageCapturedFrame(tex, &new_w, &new_h);
+        tex->Release();
+        frame.Close();
+        if (st == StageResult::SizeChanged)
+        {
+            Log("[wgc] the window resized -> %ux%u - recreating", new_w, new_h);
+            OpenWgc(g_wgc_hwnd);
+            return false;
+        }
+        if (st != StageResult::Ok) return false;
+        return SwizzleCaptureIntoColor(v);
+    }
+    catch (winrt::hresult_error const &e)
+    {
+        Log("[wgc] grab threw 0x%08X - capture closed", (unsigned)e.code());
+        CloseWgc();
+        return false;
+    }
 }
 
 static bool UploadVideoFrame(VideoState &v, const BYTE *color, const BYTE *mv, bool motion_small)
@@ -3039,17 +3270,21 @@ static int ReadVideoMessage(VideoState &v, VideoFrameHeader &fh, std::vector<BYT
     if (fh.magic == FRAME_MAGIC)
     {
         bool no_color = (fh.reserved & FRAME_FLAG_NO_COLOR) != 0;
-        if (no_color && !g_dda_active)
+        if (no_color && !CaptureActive())
         {
-            // The client thinks DDA is active but the capture died (recreate
-            // failed). We try to reopen once; if that fails or the sizes are
-            // zero (DDA was never active - a protocol desync) we exit: the
-            // client will restart the worker and send DDA1 again. Otherwise we
+            // The client thinks a capture is active but it died (recreate
+            // failed). We try to reopen once; if that fails or there is
+            // nothing to reopen (a protocol desync) we exit: the client will
+            // restart the worker and set the capture up again. Otherwise we
             // would read colour from the pipe that is not there - a
             // "truncated frame".
-            if (g_dda_w == 0 || g_dda_h == 0)
-            { Log("[dda] NO_COLOR without DDA sizes — protocol desync"); return 0; }
-            if (!OpenDda(g_dda_w, g_dda_h) || !g_dda_active) return 0;
+            if (g_wgc_hwnd != nullptr)
+            {
+                if (!OpenWgc(g_wgc_hwnd) || !g_wgc_active) return 0;
+            }
+            else if (g_dda_w == 0 || g_dda_h == 0)
+            { Log("[cap] NO_COLOR with no capture to reopen - protocol desync"); return 0; }
+            else if (!OpenDda(g_dda_w, g_dda_h) || !g_dda_active) return 0;
         }
         const size_t cw = v.upscale ? v.full_w : v.w;
         const size_t ch = v.upscale ? v.full_h : v.hgt;
@@ -3109,6 +3344,16 @@ static int ReadVideoMessage(VideoState &v, VideoFrameHeader &fh, std::vector<BYT
     {
         memcpy(&dc, &fh, sizeof(dc));
         return 6;
+    }
+    if (fh.magic == WGC_MAGIC)
+    {
+        // 32 bytes: the 24-byte header is in fh, the HWND follows. It lands in
+        // a file-scope command rather than another out-parameter - this
+        // dispatcher already carries six of them.
+        BYTE *p = reinterpret_cast<BYTE *>(&g_wgc_cmd);
+        memcpy(p, &fh, sizeof(fh));
+        if (!ReadExact(stdin, p + sizeof(fh), sizeof(g_wgc_cmd) - sizeof(fh))) return 0;
+        return 9;
     }
     if (fh.magic == GRAY_MAGIC)
     {
@@ -3493,13 +3738,30 @@ static int RunVideo()
             if (!WriteExact(stdout, &ack, sizeof(ack))) return 10;
             continue;
         }
-        const double t_frame = PhaseNow();
-        if (g_dda_active)
+        if (msg == 9)
         {
-            // DDA mode: the colour comes from Desktop Duplication straight on
-            // the GPU, motion from the frame sent in (the client keeps sending pairs).
+            // WGCW: capture one window instead of the desktop (hwnd == 0 off).
+            const HWND hwnd = reinterpret_cast<HWND>((uintptr_t)g_wgc_cmd.hwnd);
+            uint32_t ok = 0;
+            if (hwnd == nullptr) { CloseWgc(); ok = 1; }
+            else ok = OpenWgc(hwnd) ? 1u : 0u;
+            // The size the capture really produces - physical pixels, which is
+            // what the client has to size its textures for.
+            VideoWgcAck ack = { WGC_ACK_MAGIC, ok, ok ? g_dda_w : 0u,
+                                ok ? g_dda_h : 0u, g_wgc_cmd.pts };
+            Log("[video] WGCW %s (%p -> %ux%u)", ok ? "OK" : "FAIL",
+                (void *)hwnd, ack.width, ack.height);
+            if (!WriteExact(stdout, &ack, sizeof(ack))) return 10;
+            continue;
+        }
+        const double t_frame = PhaseNow();
+        if (CaptureActive())
+        {
+            // Capture mode: the colour comes from the desktop (DDA1) or from
+            // one window (WGCW) straight on the GPU, motion from the frame
+            // sent in (the client keeps sending pairs).
             const double t_dda = PhaseNow();
-            const bool got = DdaGrab(v);
+            const bool got = g_wgc_active ? WgcGrab(v) : DdaGrab(v);
             PhaseAdd(PH_DDA, t_dda);
             if (!got && !g_dda_ready)
             {
