@@ -46,6 +46,7 @@ ABOUT = {
     "test_menu_scroll.py": "the menu scrolls and the wheel lands where it should",
     "test_nr_small.py": "the reduced-resolution mode produces a real picture",
     "test_out_shm.py": "the pixel channel through shared memory",
+    "test_odd_frame_size.py": "a frame whose row pitch needs padding survives",
     "test_recorder_audio.py": "the audio track keeps up with the video",
     "test_recorder_thread.py": "the encoder thread and a clean close",
     "test_split.py": "the before/after wipe leaves the left side untouched",

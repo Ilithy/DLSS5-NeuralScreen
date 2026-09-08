@@ -20,12 +20,19 @@ and get out of the way when it is minimised. A resize means rebuilding the
 pipeline, and that must happen once the size settles rather than on every
 pixel of a drag.
 
+And the point of the whole mode: with one window as the input there is no
+self-capture loop, so the overlay stops hiding from screen capture. That is
+checked both ways - the display affinity of both layers, and an actual Desktop
+Duplication grab that has to show the open menu in window mode and must not
+show it on the whole screen, where hiding is still mandatory.
+
 Requires NeuralScreen not to be running. ~40 seconds.
 
 Run:  runtime\\python.exe test_window_mode.py
 """
 import ctypes
 import ctypes.wintypes
+import os
 import sys
 import time
 from pathlib import Path
@@ -90,6 +97,33 @@ def frame_rect(hwnd: int):
     if hr != 0:
         ctypes.windll.user32.GetWindowRect(ctypes.c_void_p(int(hwnd)), ctypes.byref(r))
     return (int(r.left), int(r.top), int(r.right - r.left), int(r.bottom - r.top))
+
+
+def grab_region(cam, rect):
+    """One Desktop Duplication frame, optionally cropped to (x, y, w, h)."""
+    frame = None
+    deadline = time.monotonic() + 3.0
+    while frame is None and time.monotonic() < deadline:
+        frame = cam.grab()
+        if frame is None:
+            time.sleep(0.05)
+    if frame is None or rect is None:
+        return frame
+    x, y, w, h = rect
+    fh, fw = frame.shape[:2]
+    x0, y0 = max(0, x), max(0, y)
+    x1, y1 = min(fw, x + w), min(fh, y + h)
+    if x1 <= x0 or y1 <= y0:
+        return None
+    return frame[y0:y1, x0:x1].copy()
+
+
+def display_affinity(hwnd: int) -> int:
+    """WDA_NONE (0) or WDA_EXCLUDEFROMCAPTURE (0x11) for a window."""
+    aff = ctypes.c_ulong(0xFFFF)
+    ctypes.windll.user32.GetWindowDisplayAffinity(ctypes.c_void_p(int(hwnd)),
+                                                  ctypes.byref(aff))
+    return int(aff.value)
 
 
 def numlock_on() -> bool:
@@ -161,6 +195,26 @@ def main() -> int:
                 return True
         return False
 
+    def menu_change(cam, rect) -> float:
+        """How much of a region changes when the menu is opened.
+
+        The differential is the marker. The menu is drawn only by the overlay,
+        so if an outside capture can see the overlay, opening it moves a lot of
+        pixels; if the overlay is hidden, the region is left alone apart from
+        the target window's own wobble.
+        """
+        import numpy as np
+        before = grab_region(cam, rect)
+        autocheck.send_key(VK_NUMPAD2)
+        pump(2.0)
+        after = grab_region(cam, rect)
+        autocheck.send_key(VK_NUMPAD2)
+        pump(1.0)
+        if before is None or after is None or before.shape != after.shape:
+            return -1.0
+        diff = np.abs(before.astype(np.int16) - after.astype(np.int16)).max(axis=2)
+        return float((diff > 40).mean())
+
     def wait_log(offset: int, needle: str, timeout: float) -> str:
         end = time.monotonic() + timeout
         while time.monotonic() < end:
@@ -177,6 +231,8 @@ def main() -> int:
         toggle_numlock()
         restore_numlock = True
 
+    import dxcam
+    cam = dxcam.create(output_idx=0, output_color="RGB")
     failures = []
     offset = autocheck.launch()
     try:
@@ -221,7 +277,6 @@ def main() -> int:
             failures.append("window mode dropped itself back to full screen")
 
         # 2. Geometry: both layers sit on the window.
-        import os
         pres = find_window("NeuralScreenPresent")
         hud = find_window("pygame", exclude_pid=os.getpid())
         if not pres:
@@ -282,7 +337,39 @@ def main() -> int:
             if not wait_log(mark, f"pipeline rebuilt: {new_w}x{new_h}", 30.0):
                 failures.append("the pipeline did not come back at the new size")
 
-        # 6. And back out.
+        # 6. The point of the mode: an outside capture can see the overlay.
+        #    The resize above rebuilt the pipeline, so the windows are new
+        #    ones - the handles have to be found again, and the worker needs a
+        #    moment to raise its picture window after a rebuild.
+        pres = hud = 0
+        deadline = time.monotonic() + 12.0
+        while time.monotonic() < deadline and not (pres and hud):
+            pres = pres or find_window("NeuralScreenPresent")
+            hud = hud or find_window("pygame", exclude_pid=os.getpid())
+            if pres and hud:
+                break
+            pump(0.4)
+        for name, w in (("picture", pres), ("HUD", hud)):
+            if not w:
+                failures.append(f"the {name} layer was not found after the resize")
+                continue
+            aff = display_affinity(w)
+            print(f"     affinity of the {name} layer in window mode: 0x{aff:X}")
+            if aff != 0:
+                failures.append(f"the {name} layer still hides from capture "
+                                f"in window mode (affinity 0x{aff:X})")
+        #    And a real grab: opening the menu has to CHANGE what Desktop
+        #    Duplication sees inside the window. Counting a colour does not
+        #    work - the desktop has amber in it too - but a change does.
+        share = menu_change(cam, frame_rect(hwnd))
+        print(f"     the menu changes {share * 100:.1f}% of what an outside "
+              f"capture sees of the window")
+        if share < 0.05:
+            failures.append(f"an outside capture does not see the overlay in "
+                            f"window mode ({share * 100:.1f}% changed) - the "
+                            f"whole point of the mode")
+
+        # 7. And back out.
         mark = autocheck.log_offset()
         autocheck.send_key(VK_NUMPAD5)
         text = wait_log(mark, "pipeline rebuilt", 30.0)
@@ -297,7 +384,31 @@ def main() -> int:
         pump(4.0)
         if "NR ON | FPS" not in autocheck.log_since(mark):
             failures.append("no frames after switching back")
+
+        # 8. On the whole screen the hiding is mandatory again: the input is
+        #    the desktop, and without the flag the pipeline would capture its
+        #    own output.
+        pres = find_window("NeuralScreenPresent")
+        hud = find_window("pygame", exclude_pid=os.getpid())
+        for name, w in (("picture", pres), ("HUD", hud)):
+            if not w:
+                failures.append(f"the {name} layer disappeared after switching back")
+                continue
+            aff = display_affinity(w)
+            print(f"     affinity of the {name} layer on the whole screen: 0x{aff:X}")
+            if aff != 0x11:
+                failures.append(f"the {name} layer does not hide from capture on "
+                                f"the whole screen (affinity 0x{aff:X}) - the "
+                                f"self-capture loop is back")
+        share = menu_change(cam, None)
+        print(f"     the menu changes {share * 100:.1f}% of what an outside "
+              f"capture sees of the screen")
+        if share > 0.02:
+            failures.append(f"an outside capture sees the overlay on the whole "
+                            f"screen ({share * 100:.1f}% changed) - it must stay "
+                            f"hidden there or the pipeline captures itself")
     finally:
+        del cam
         left = autocheck.quit_app()
         pygame.quit()
         if restore_numlock:

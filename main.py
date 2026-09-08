@@ -1650,6 +1650,11 @@ def main() -> int:
             except Exception:
                 pass
             display = Display(width, height, fullscreen=bool(cfg["fullscreen"]))
+            # In one-window mode the overlay stops hiding from screen capture:
+            # the input is that window, not the desktop, so there is no
+            # self-capture loop to break - and an outside recorder can see the
+            # result. The worker does the same for its picture window.
+            display.set_excluded_from_capture(window_hwnd is None)
             display.set_lang(lang)
             display.menu.set_user_scale(float(cfg.get("menu_scale", 1.0)))
             display.menu.set_hotkeys(hotkey_labels(hotkey_bindings))
@@ -1762,9 +1767,18 @@ def main() -> int:
                 return
             if not display.is_visible():
                 display.set_visible(True)
-            if (x, y) != follow_pos:
+            moved = (x, y) != follow_pos
+            if moved:
                 display.move_to(x, y)
                 follow_pos = (x, y)
+            # Both windows are topmost, and within that group the one raised
+            # last is on top. The worker re-asserts its picture window every
+            # time the target moves, so the HUD has to keep coming back up -
+            # otherwise the menu ends up UNDER the picture, invisible both to
+            # the user and to a recorder. Measured: without this the menu
+            # changed 0% of what an outside capture saw.
+            if moved or frame_index % 30 == 0:
+                display.raise_topmost()
             if (w, h) != (width, height):
                 now = time.monotonic()
                 if follow_resize is None or follow_resize[0] != (w, h):

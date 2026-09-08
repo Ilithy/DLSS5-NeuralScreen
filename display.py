@@ -324,17 +324,30 @@ class Display:
         Makes the window invisible to screen capture (dxcam, OBS, etc.).
         Best-effort: warn on failure, never crash.
         """
+        return self.set_excluded_from_capture(True)
+
+    def set_excluded_from_capture(self, hide: bool) -> bool:
+        """Hide the overlay from screen capture, or stop hiding it.
+
+        Hiding is mandatory while the input is Desktop Duplication of the whole
+        screen: without it the pipeline would capture its own output. With one
+        window as the input there is no such loop, and then hiding is pure
+        loss - it is what stops OBS from seeing the overlay and stops the
+        NVIDIA App from recording at all.
+        """
         try:
             hwnd = pygame.display.get_wm_info()["window"]
             user32 = ctypes.windll.user32
-            ok = user32.SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE)
+            want = WDA_EXCLUDEFROMCAPTURE if hide else 0  # 0 = WDA_NONE
+            ok = user32.SetWindowDisplayAffinity(hwnd, want)
             if not ok:
-                print("Display: WARNING SetWindowDisplayAffinity failed "
-                      "(window may be visible to screen capture)")
+                print(f"Display: WARNING SetWindowDisplayAffinity({want}) failed "
+                      f"(the overlay may be visible to screen capture)")
                 return False
+            self._excluded = bool(hide)
             return True
         except Exception as exc:
-            print(f"Display: WARNING cannot exclude window from capture: {exc}")
+            print(f"Display: WARNING cannot change the capture affinity: {exc}")
             return False
 
     # -- public API -------------------------------------------------------

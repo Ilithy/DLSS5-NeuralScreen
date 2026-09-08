@@ -1266,11 +1266,34 @@ static RECT                       g_present_follow = {};   // where the target w
 // file is compiled top to bottom.
 static bool                       g_wgc_active = false;
 static HWND                       g_wgc_hwnd = nullptr;
+
+
 static IDXGISwapChain3           *g_present_swap;
 static HANDLE                     g_present_thread;
 static DWORD                      g_present_tid;
 static UINT                       g_present_w, g_present_h;
 static bool                       g_present_capturable;  // debug flag from WNDO
+
+// Whether the picture window hides itself from screen capture.
+//
+// With Desktop Duplication as the input it MUST hide: otherwise the pipeline
+// captures its own output and feeds on itself. With one window as the input
+// there is no loop - the capture of a window is unaffected by anything drawn
+// on top of it - so the flag comes off and an outside recorder can finally
+// see the overlay. Called wherever the mode changes; a flag baked in at
+// window creation would go stale on the next switch.
+static void ApplyPresentAffinity()
+{
+    if (g_present_hwnd == nullptr) return;
+    const bool hide = !(g_wgc_active || g_present_capturable);
+    const DWORD want = hide ? WDA_EXCLUDEFROMCAPTURE : 0u /* WDA_NONE */;
+    if (!SetWindowDisplayAffinity(g_present_hwnd, want))
+        Log("[present] SetWindowDisplayAffinity(%lu) failed, err=%lu",
+            want, GetLastError());
+    else
+        Log("[present] %s screen capture", hide ? "hidden from" : "VISIBLE to");
+}
+
 static volatile LONG              g_present_state;       // 0 = pending, 1 = window up, -1 = failed
 
 static LRESULT CALLBACK PresentWndProc(HWND w, UINT m, WPARAM wp, LPARAM lp)
@@ -1316,15 +1339,9 @@ static DWORD WINAPI PresentWindowThread(LPVOID)
         InterlockedExchange(&g_present_state, -1);
         return 0;
     }
-    if (!g_present_capturable)
-    {
-        // Without this Desktop Duplication captures our own output and the
-        // pipeline feeds on itself.
-        if (!SetWindowDisplayAffinity(g_present_hwnd, WDA_EXCLUDEFROMCAPTURE))
-            Log("[present] SetWindowDisplayAffinity failed, err=%lu", GetLastError());
-    }
-    else
-        Log("[present] capturable window (debug): NOT hidden from screen capture");
+    // Hidden from screen capture unless a single window is the input (or the
+    // debug flag says otherwise) - see ApplyPresentAffinity.
+    ApplyPresentAffinity();
 
     ShowWindow(g_present_hwnd, SW_SHOWNOACTIVATE);
     SetWindowPos(g_present_hwnd, HWND_TOPMOST, 0, 0, 0, 0,
@@ -2815,6 +2832,9 @@ static void CloseWgc()
 {
     g_wgc_active = false;
     g_present_follow = RECT{};
+    // Back to the desktop as the input: hide again or the pipeline would
+    // capture its own output.
+    ApplyPresentAffinity();
     if (!g_present_shown && g_present_hwnd != nullptr)
     {
         // It was hidden because the target was minimised; the next mode must
@@ -2895,6 +2915,9 @@ static bool OpenWgc(HWND hwnd)
         g_wgc = s;
         g_wgc_hwnd = hwnd;
         g_wgc_active = true;
+        // No self-capture loop in this mode, so stop hiding: this is what
+        // makes the overlay visible to OBS and lets the NVIDIA App record.
+        ApplyPresentAffinity();
         g_dda_w = (UINT)size.Width;
         g_dda_h = (UINT)size.Height;
         Log("[wgc] capturing window %p, %dx%d", (void *)hwnd, size.Width, size.Height);
@@ -3282,7 +3305,18 @@ static bool DownloadVideoFrame(VideoState &v, std::vector<BYTE> &packed,
     if (!WaitFenceValue(h.fence, fence, 60000)) return false;
 
     BYTE *mapped = nullptr;
-    D3D12_RANGE read_range = { 0, static_cast<SIZE_T>(v.out_fp.Footprint.RowPitch) * v.hgt };
+    // The readback buffer is RowPitch*(rows-1) + row_size bytes: D3D12 pads
+    // every row of a copyable footprint to 256 bytes EXCEPT the last one.
+    // Asking Map for RowPitch*rows reaches past the end of the resource and
+    // Map simply fails - which killed the worker (exit 9, nothing logged) for
+    // every frame width that is not a multiple of 64, those being the only
+    // ones whose pitch needs no padding. Screen resolutions all are, so this
+    // only surfaced when one-window mode made arbitrary widths normal.
+    const UINT rb_rows = v.out_rows != 0 ? v.out_rows : v.hgt;
+    const SIZE_T rb_bytes =
+        static_cast<SIZE_T>(v.out_fp.Footprint.RowPitch) * (rb_rows - 1) +
+        static_cast<SIZE_T>(v.out_row_size);
+    D3D12_RANGE read_range = { 0, rb_bytes };
     if (FAILED(v.readback->Map(0, &read_range, reinterpret_cast<void **>(&mapped)))) return false;
     const UINT ow = v.upscale ? v.full_w : v.w;
     const UINT oh = v.upscale ? v.full_h : v.hgt;
