@@ -162,6 +162,27 @@ of its slider.
 **A key does nothing.** Something else on the machine has claimed it. Reassign
 it in the menu under the sliders icon.
 
+**The menu is slow to react in a heavy game.** At 4K with a demanding scene
+the pipeline can take up to a second per frame, and the hotkeys are processed
+between frames — a press may feel lost. The picture itself is the priority;
+the menu catches up when the load drops.
+
+## Known limitations
+
+- **True fullscreen games** cannot have the overlay drawn over them — that is
+  a Windows rule. Borderless or windowed only.
+- **A second instance of the program is not guarded.** Two copies fight over
+  the screen capture; the tests refuse to run while one is up, but the
+  program itself does not stop you. Close the first one before starting
+  another.
+- **The window list is not in the menu yet.** Num5 takes the window under the
+  cursor (or the last focused one); choosing from a list is planned.
+- **A second monitor** is supported but was not tested with a window between
+  monitors.
+- **The menu position in window mode** starts in the bottom-right corner of
+  the screen on every open; drag it where you want and it is remembered on
+  close.
+
 ## Under the hood
 
 How it works, what was measured and why the decisions went the way they did:
