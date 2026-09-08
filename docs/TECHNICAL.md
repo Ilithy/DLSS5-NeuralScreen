@@ -125,7 +125,7 @@ not.
 | `fullscreen` | borderless fullscreen window |
 | `warmup` | NGX warmup frames at start |
 | `work_scale` | 0.25–1.0, the resolution the network runs at, relative to the screen. Only has an effect with `nr_small` on |
-| `nr_small` | process at a reduced resolution and scale the result back up: faster, softer. Default `false` |
+| `nr_small` | process at a reduced resolution and compose the result onto the native frame: faster, sharp (the residual composite). Default `true` |
 | `profile` | `Faithful`, `Natural`, `Strong / Cinematic`, `Extreme / Overdrive` |
 | `intensity`, `local_tone`, `local_structure`, `skin_structure` | `null` = take from profile |
 | `lang` | `ru` / `en` |
@@ -223,10 +223,11 @@ attributed to transport.
 The 1440p figures previously published here (64 FPS) predate the DDA fence
 fix and understate current performance; they have not been re-measured.
 
-### work_scale costs nothing
+### work_scale costs nothing (in upscale mode)
 
-NGX evaluation time does not depend on the work resolution at all. Measured
-across the whole slider range on a 4K desktop:
+In the legacy upscale mode (nr_small off) NGX evaluation time does not depend
+on the work resolution at all. Measured across the whole slider range on a 4K
+desktop:
 
 ```
 work          MPix   eval ms    FPS
@@ -241,13 +242,10 @@ Fit: `eval = 15.97 ms + (-0.01) ms/MPix`, R² = 0.011 — i.e. noise, not a
 trend. Seven times more input pixels cost 0.2 ms, which is within the
 measurement spread.
 
-**So run the slider at its maximum — the default is now `1.0`.** Lowering
-`work_scale` buys no performance and only costs sharpness. 1.0 is safe on any
-monitor because the work size is clamped to the 2560×1440 NGX cap anyway, so
-the slider always lands exactly at the cap: 2560×1440 from a 4K desktop,
-2304×1440 from 2560×1600. The previous default of 0.65 was picked to sit just
-under the cap **on a 4K screen** — on anything smaller it quietly threw
-resolution away.
+**So in upscale mode the slider is a quality control, not a speed control.**
+Lowering `work_scale` buys no performance and only costs sharpness. The work
+size is clamped to the 2560×1440 NGX cap anyway, so the slider always lands
+exactly at the cap: 2560×1440 from a 4K desktop, 2304×1440 from 2560×1600.
 
 Re-confirmed with D3D12 timestamps on the queue, i.e. GPU time inside
 `Evaluate` rather than time around the submit, on two desktop resolutions:
@@ -306,15 +304,33 @@ full screen       16.05     42.9
 reduced            7.25     65.3
 ```
 
-**Off by default**, and deliberately so: it is 52% faster and visibly softer,
-because a plain bilinear upscale gives back none of the detail the network
-just added. In a game the add-on above gets away with the same trick because
-the game's own DLSS Super Resolution does the upscaling; on a desktop there is
-no such thing. Turn it on, look at your own screen, decide.
+**On by default** (the user's working setup), and the softness that used to
+come with it is gone: the result is composed onto the pristine 1:1 native
+frame by the **matched residual composite** (see below), so text and edges
+keep full resolution while the cheap low-res network does the relighting.
+Measured end to end on the 4K desktop: 47.9 FPS at full screen vs 71.9 FPS at
+work_scale 0.65 with the composite — a 50% gain with the native anchor intact.
 
 With it on, **Work scale** finally does something — it is the resolution the
 network actually sees. With it off the slider is inert, which is exactly what
 the measurements at the top of this section were showing all along.
+
+### Matched residual composite
+
+The composite is the DLSSNR-Cost-Scaler principle applied to the desktop:
+instead of stretching the low-res network result up, the worker writes
+
+```
+result = native + (nr_out - nr_in) * strength
+```
+
+at full resolution — the neural delta (what the network changed) lands on the
+pristine 1:1 native frame. The native frame stays the anchor, so text, edges
+and UI keep full sharpness while the network runs at the cheap work
+resolution. Measured on a synthetic detail pattern (test_residual.py):
+Laplacian detail 983 with the composite vs 88 with the plain bilinear
+upscale (input 951), and a hard edge 87.8 vs 59.1. `strength` is fixed at
+1.0; `NS_NR_RESIDUAL=0` forces the plain upscale path for the tests.
 
 
 ## Before / after wipe
