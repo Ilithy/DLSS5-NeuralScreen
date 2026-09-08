@@ -1529,6 +1529,9 @@ static void ReassertPresentTopmost()
     wchar_t cls[64];
     if (GetClassNameW(top, cls, 64) > 0 && wcscmp(cls, L"pygame") == 0)
         return;  // the HUD is on top - leave it there
+    RECT r;
+    if (GetWindowRect(top, &r) && r.right == r.left && r.bottom == r.top)
+        return;  // zero-sized (IME, helpers) cannot cover the picture
     SetWindowPos(g_present_hwnd, HWND_TOPMOST, 0, 0, 0, 0,
                  SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
 }
