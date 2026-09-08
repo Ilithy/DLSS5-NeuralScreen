@@ -1780,6 +1780,18 @@ def main() -> int:
                 display.menu.visible = True
                 display.set_menu_opaque(True)
                 display.set_menu_input(True)
+                # The saved offset was computed for the full desktop and lands
+                # the panel outside a small captured window - the same problem
+                # the settings handler solves with place_bottom_right. A menu
+                # restored across a window-mode switch must get the same
+                # treatment, otherwise it comes back clipped off the right
+                # edge (user: menu cut off on the first activation in window
+                # mode).
+                if window_hwnd is not None:
+                    display.set_fullscreen_layer(mon_w, mon_h)
+                    display.menu.place_bottom_right(
+                        display.screen.get_width(),
+                        display.screen.get_height())
             # guides and the buffers follow the new resolution.
             guides = TemporalGuideGenerator(work_w, work_h, emit_small=motion_small)
             buf_full = np.empty((height, width, 4), dtype=np.uint8)

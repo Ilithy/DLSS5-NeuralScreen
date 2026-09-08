@@ -60,6 +60,7 @@ ABOUT = {
     "test_split.py": "the before/after wipe leaves the left side untouched",
     "test_wgc_capture.py": "the worker captures one window (the single-window input)",
     "test_window_mode.py": "the one-window hotkey switches the pipeline and back",
+    "test_window_mode_menu.py": "the menu stays fully visible across the window-mode switch",
 }
 
 
