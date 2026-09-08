@@ -44,7 +44,6 @@ ABOUT = {
     "test_capture_visibility.py": "outside capture sees the overlay only without WDA",
     "test_hotkey_once.py": "one press of a hotkey fires exactly one command",
     "test_hotkey_rebind.py": "hotkeys can be reassigned from the config",
-    "test_menu_cursor.py": "the overlay draws a pointer when the system has none",
     "test_menu_scroll.py": "the menu scrolls and the wheel lands where it should",
     "test_nr_small.py": "the reduced-resolution mode produces a real picture",
     "test_out_shm.py": "the pixel channel through shared memory",

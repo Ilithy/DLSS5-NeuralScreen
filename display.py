@@ -55,7 +55,12 @@ CURSOR_SHOWING = 0x00000001
 
 
 def system_cursor_visible() -> bool:
-    """Is there a mouse pointer on screen right now?
+    """Is there a mouse pointer on screen right now? (Nothing uses this yet.)
+
+    Kept for the open problem it belongs to: a fullscreen game hides the
+    cursor and our menu is then unusable. Drawing our own pointer was tried
+    and reverted - it produced a SECOND pointer in real use, which is worse
+    than none. See the limitations section of the README.
 
     A fullscreen game hides it (ShowCursor(FALSE) on its own input queue) and
     it stays hidden while our menu is up. When it is gone the overlay draws
@@ -428,12 +433,6 @@ class Display:
                     user32.AttachThreadInput(my_tid, fg_tid, False)
             except Exception:
                 pass
-        # The pointer is ours while the menu is up: hide the system one over
-        # our window so the two do not sit on top of each other.
-        try:
-            pygame.mouse.set_visible(not enabled)
-        except Exception:
-            pass
         self._click_through = not enabled
 
     def set_menu_opaque(self, opaque: bool) -> None:
@@ -572,45 +571,7 @@ class Display:
         self.menu.set_stats(self._hud)
         self.menu.draw(self.screen)
         self._sync_cursor()
-        if self.menu.visible:
-            self._draw_pointer()
         pygame.display.flip()
-
-    def _draw_pointer(self) -> None:
-        """Our own mouse pointer, drawn while the menu is open.
-
-        Always ours, and the system one is hidden over our window meanwhile
-        (see set_menu_input) - so there is exactly one pointer no matter what
-        the game underneath did with the system cursor. A fullscreen game
-        hides it outright; a windowed one leaves it visible but also draws its
-        OWN cursor inside its frame, which freezes when the game loses focus
-        to our menu. Both looked like "the pointer does not move".
-
-        The position comes from GetCursorPos rather than pygame: SDL's cached
-        position only advances while our window receives motion events, and
-        this window is click-through most of the time.
-        """
-        pt = wintypes.POINT()
-        try:
-            if not user32.GetCursorPos(ctypes.byref(pt)):
-                return
-            hwnd = pygame.display.get_wm_info()["window"]
-            user32.ScreenToClient(hwnd, ctypes.byref(pt))
-            x, y = int(pt.x), int(pt.y)
-        except Exception:
-            try:
-                x, y = pygame.mouse.get_pos()
-            except Exception:
-                return
-        if x < 0 or y < 0 or x > self.width or y > self.height:
-            return
-        s = max(0.9, self.ui_scale) * 1.1
-        shape = [(0, 0), (0, 18), (5, 13), (8, 21), (11, 19), (8, 12), (14, 12)]
-        pts = [(x + int(px * s), y + int(py * s)) for px, py in shape]
-        # White with a dark outline: legible over a game, a desktop and our
-        # own panel alike.
-        pygame.draw.polygon(self.screen, (255, 255, 255), pts)
-        pygame.draw.polygon(self.screen, (16, 20, 26), pts, max(1, int(2 * s)))
 
     def set_hud(self, data: dict) -> None:
         """Update HUD data: fps, status, resolution, params, frames."""
