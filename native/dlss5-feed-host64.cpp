@@ -2253,25 +2253,25 @@ static bool OpenOut(const VideoOutCmd &oc)
     g_out_file = OpenFileMappingA(FILE_MAP_WRITE, FALSE, name);
     if (g_out_file == nullptr)
     { Log("[outs] OpenFileMapping('%s') failed %lu", name, GetLastError()); return false; }
-    // The client created the section; check its size BEFORE mapping: a
-    // section smaller than the frame would make MapViewOfFile fail with a
-    // confusing error, and a larger one is fine (we map exactly `need`).
-    // (audit #3, O5)
-    {
-        LARGE_INTEGER sz{};
-        if (!GetFileSizeEx(g_out_file, &sz) || sz.QuadPart < (LONGLONG)need)
-        {
-            Log("[outs] section '%s' is %lld bytes, need %zu - ignoring",
-                name, sz.QuadPart, need);
-            CloseHandle(g_out_file); g_out_file = nullptr;
-            return false;
-        }
-    }
-    g_out_map = static_cast<BYTE *>(MapViewOfFile(g_out_file, FILE_MAP_WRITE, 0, 0, need));
+    // The client created the section and we must not write past its end.
+    // The size cannot be asked with GetFileSizeEx: a section object is not a
+    // file, and a pagefile-backed one answers 0 - that rejected every client
+    // outright (the audit #3 check, caught by test_out_shm). So map the whole
+    // section and ask the size of the mapped region instead.
+    g_out_map = static_cast<BYTE *>(MapViewOfFile(g_out_file, FILE_MAP_WRITE, 0, 0, 0));
     if (g_out_map == nullptr)
     {
-        Log("[outs] MapViewOfFile(%zu) failed %lu", need, GetLastError());
+        Log("[outs] MapViewOfFile('%s') failed %lu", name, GetLastError());
         CloseHandle(g_out_file); g_out_file = nullptr;
+        return false;
+    }
+    MEMORY_BASIC_INFORMATION mbi = {};
+    const size_t have = (VirtualQuery(g_out_map, &mbi, sizeof(mbi)) == sizeof(mbi))
+                            ? static_cast<size_t>(mbi.RegionSize) : 0u;
+    if (have < need)
+    {
+        Log("[outs] section '%s' is %zu bytes, need %zu - ignoring", name, have, need);
+        CloseOut();
         return false;
     }
     g_out_bytes = need;

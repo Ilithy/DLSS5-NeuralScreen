@@ -94,8 +94,10 @@ def main() -> int:
                          float(params["skin_structure"]), 0, 0)
 
     name = f"NeuralScreenTestOut_{os.getpid()}_{uuid.uuid4().hex[:6]}"
-    mm = mmap.mmap(-1, W * H * 4, tagname=name)
-    view = np.ndarray((H, W, 4), dtype=np.uint8, buffer=mm)
+    # The layout matches main.py: a seqlock in the first 8 bytes, then the
+    # frame. The worker refuses a section with no room for both.
+    mm = mmap.mmap(-1, W * H * 4 + 8, tagname=name)
+    view = np.ndarray((H, W, 4), dtype=np.uint8, buffer=mm, offset=8)
 
     worker = subprocess.Popen([str(WORKER_EXE), "--live"],
                               cwd=str(WORKER_EXE.parent),
