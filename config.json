@@ -14,13 +14,13 @@
   "worker_present": true,
   "motion_on_gpu": true,
   "capture_in_worker": true,
-  "menu_scale": 0.6,
+  "menu_scale": 0.81,
   "menu_offset": [
-    1484,
-    821
+    1522,
+    235
   ],
   "open_menu_on_start": true,
-  "split": 1.0,
+  "split": 0.0,
   "record_audio": true,
   "nr_small": true,
   "menu_height": null,
