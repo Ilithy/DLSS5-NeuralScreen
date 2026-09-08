@@ -456,7 +456,10 @@ class Display:
             # was clipped and could not be dragged above the captured window).
             self.screen = pygame.display.set_mode((full_w, full_h), self._flags)
             self.width, self.height = full_w, full_h
-            self._move_to_origin()
+            # set_mode alone does NOT resize the physical window in SDL2 -
+            # force it, exactly like __init__ does (SWP_NOZORDER, with size).
+            hwnd = pygame.display.get_wm_info()['window']
+            user32.SetWindowPos(hwnd, 0, 0, 0, full_w, full_h, 0x0004)
             self._set_topmost()
             # The recreated window lost EVERYTHING: the layered attributes
             # (colorkey + alpha), the capture affinity and the input styles.
@@ -473,7 +476,9 @@ class Display:
             self.screen = pygame.display.set_mode((w, h), self._flags)
             self.width, self.height = w, h
             hwnd = pygame.display.get_wm_info()['window']
-            user32.SetWindowPos(hwnd, -1, int(x), int(y), 0, 0, 0x0001 | 0x0010)
+            # Force the physical size AND the position in one call (set_mode
+            # alone does not resize the window in SDL2).
+            user32.SetWindowPos(hwnd, -1, int(x), int(y), w, h, 0x0010)
             # Restore everything the recreated window lost (see
             # set_fullscreen_layer).
             self.set_hud_only(self._hud_only, force=True)
