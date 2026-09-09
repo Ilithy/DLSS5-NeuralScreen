@@ -101,10 +101,6 @@
 <td><img src="docs/menu-light.png" alt="Основная страница" width="380"></td>
 <td><img src="docs/menu-settings.png" alt="Страница настроек" width="380"></td>
 </tr>
-<tr>
-<td><img src="docs/screenshot-main-dark.png" alt="Тёмная тема" width="380"></td>
-<td><img src="docs/screenshot-windows.png" alt="Список окон" width="380"></td>
-</tr>
 </table>
 
 Точка рядом с названием видеокарты зелёная, когда обработка на ней реально

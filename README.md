@@ -102,10 +102,6 @@ comes back.
 <td><img src="docs/menu-light.png" alt="Main page" width="380"></td>
 <td><img src="docs/menu-settings.png" alt="Settings page" width="380"></td>
 </tr>
-<tr>
-<td><img src="docs/screenshot-main-dark.png" alt="Dark theme" width="380"></td>
-<td><img src="docs/screenshot-windows.png" alt="Window list" width="380"></td>
-</tr>
 </table>
 
 The dot next to your graphics card is green when neural rendering is actually
