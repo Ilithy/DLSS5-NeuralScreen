@@ -346,22 +346,34 @@ class HotkeyController:
         while not self._poll_stop.wait(POLL_INTERVAL):
             if not self._active:
                 continue                  # suspended (or not yet registered)
-            with self._lock:
-                bindings = dict(self._bindings)
-            now = time.monotonic()
-            for hk_id, (mods, vk, cmd, _name) in bindings.items():
-                down = _pressed(vk)
-                was_down = self._poll_down.get(vk, False)
-                self._poll_down[vk] = down
-                if not down or was_down:
-                    continue                      # not a fresh press
-                if not _mods_down(mods) or not _mods_clear(mods):
-                    continue
-                last = self._poll_last.get(vk, 0.0)
-                if now - last < POLL_COOLDOWN:
-                    continue                      # WM_HOTKEY already did it
-                self._poll_last[vk] = now
-                self._commands.put(cmd)
+            self._poll_tick()
+
+    def _poll_tick(self) -> None:
+        """One poller sample: fire commands for fresh press edges.
+
+        Split out of the loop so a test can drive it directly.
+        """
+        with self._lock:
+            bindings = dict(self._bindings)
+        now = time.monotonic()
+        for hk_id, (mods, vk, cmd, _name) in bindings.items():
+            down = _pressed(vk)
+            # A key held down at startup (a stuck key, a game holding
+            # Num1) must not fire: the poller only triggers on a fresh
+            # press EDGE, and the first sample is the baseline, not an
+            # event (user: "NR OFF (bypass NGX)" right after every start
+            # while Num1 was physically held).
+            was_down = self._poll_down.get(vk, down)
+            self._poll_down[vk] = down
+            if not down or was_down:
+                continue                      # not a fresh press
+            if not _mods_down(mods) or not _mods_clear(mods):
+                continue
+            last = self._poll_last.get(vk, 0.0)
+            if now - last < POLL_COOLDOWN:
+                continue                      # WM_HOTKEY already did it
+            self._poll_last[vk] = now
+            self._commands.put(cmd)
 
     def _unregister(self) -> None:
         if not self._active:
