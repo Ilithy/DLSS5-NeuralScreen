@@ -1439,6 +1439,12 @@ def main() -> int:
         buf_full = np.empty((height, width, 4), dtype=np.uint8)
 
         paused = False
+        # The worker died and exhausted the restart budget: the pipeline is
+        # stopped (no send/recv, no more restarts) and the overlay is hidden
+        # so the desktop is not covered by a black window (issue #3: black
+        # screen on a GPU where feature 18 cannot be created). Cleared when
+        # the user turns NR back on.
+        worker_failed = False
         frame_index = 0
         pts = 0
         guide = None  # initialised before the loop: Num1 before the first NR frame must not raise NameError
@@ -1933,6 +1939,11 @@ def main() -> int:
             """
             nonlocal follow_pos, follow_resize
             if window_hwnd is None:
+                return
+            # The worker is dead: the overlay must stay hidden (issue #3) -
+            # nothing would fill it, and showing it covers the desktop with
+            # a black window.
+            if worker_failed:
                 return
             rect = window_frame_rect(window_hwnd)
             if rect is None:
@@ -2508,7 +2519,7 @@ def main() -> int:
             stay responsive while main waits for the worker (user: "NR toggle
             does not always fire in Cyberpunk").
             """
-            nonlocal running, paused, recorder, window_hwnd, work_frame, last_foreground, work_scale, params, lang, width, height, mon_w, mon_h, frame_index, pending_apply, last_restart, split_pos, startup_menu, nr_small, work_h, work_w, monitor, dda_mode, dda_attempted, present_mode, present_attempted, out_shm, out_attempted, motion_small, motion_attempted, gray_active, follow_pos, follow_resize, pts, output_rgba, pending_shot, consecutive_restarts, guide_fails, buf_full, guides, shm, worker, worker_logs, reader, worker_stop, display, tray, hotkeys, cfg
+            nonlocal running, paused, worker_failed, recorder, window_hwnd, work_frame, last_foreground, work_scale, params, lang, width, height, mon_w, mon_h, frame_index, pending_apply, last_restart, split_pos, startup_menu, nr_small, work_h, work_w, monitor, dda_mode, dda_attempted, present_mode, present_attempted, out_shm, out_attempted, motion_small, motion_attempted, gray_active, follow_pos, follow_resize, pts, output_rgba, pending_shot, consecutive_restarts, guide_fails, buf_full, guides, shm, worker, worker_logs, reader, worker_stop, display, tray, hotkeys, cfg
             try:
                 while True:
                     cmd = tray_commands.get_nowait()
@@ -2565,6 +2576,30 @@ def main() -> int:
                         paused = not paused
                         if not paused:
                             work_frame = None  # a fresh grab after the pause
+                            if worker_failed:
+                                # The worker died and was shut down (issue #3):
+                                # revive it - a fresh process may succeed (a
+                                # transient GPU conflict, a driver hiccup).
+                                worker_failed = False
+                                print("[main] reviving the worker after the failure")
+                                try:
+                                    worker, worker_logs, reader, worker_stop = restart_worker(
+                                        worker, params, work_w, work_h, warmup,
+                                        width if (work_w != width or work_h != height) else 0,
+                                        height if (work_w != width or work_h != height) else 0,
+                                        worker_stop, shm)
+                                    _forget_present()
+                                    _forget_dda()
+                                    _forget_out()
+                                    _sync_motion_size()
+                                    frame_index = 0
+                                    pts = 0
+                                except Exception as exc:
+                                    print(f"[main] worker revive failed ({exc}) - "
+                                          f"staying NR OFF", file=sys.stderr)
+                                    paused = True
+                                    worker_failed = True
+                            display.set_visible(True)
                         print(f"[main] NR {'OFF (bypass NGX)' if paused else 'ON'}")
                         display.alert(UI_STRINGS[lang]["nr_off" if paused else "nr_on"])
                         tray._set_state(nr=not paused)
@@ -2646,6 +2681,15 @@ def main() -> int:
 
             if not _drain_commands():
                 break
+
+            # The worker is gone (restart budget exhausted): the pipeline is
+            # stopped. Commands still run (Num1 revives it), but no frame is
+            # grabbed or sent - the worker is dead and would only be
+            # restarted in vain (issue #3: endless restart loop on a GPU
+            # where feature 18 cannot be created).
+            if worker_failed:
+                time.sleep(0.05)
+                continue
 
             # Deferred apply (coalescing): if a restart happened recently, we
             # apply the last value once the pause is over
@@ -2802,10 +2846,20 @@ def main() -> int:
                 if consecutive_restarts >= MAX_CONSECUTIVE_RESTARTS:
                     print(f"[main] the worker died {consecutive_restarts} times in a row - NR OFF")
                     paused = True
+                    worker_failed = True
                     display.alert(UI_STRINGS[lang]["nr_off"])
                     tray._set_state(nr=False)
                     consecutive_restarts = 0
                     work_frame = None
+                    # The worker is gone and will not come back on its own:
+                    # stop hammering it, hide the overlay so the desktop is
+                    # not covered by a black window (issue #3), and wait for
+                    # the user to turn NR back on.
+                    try:
+                        shutdown_worker(worker, worker_stop)
+                    except Exception:
+                        pass
+                    display.set_visible(False)
                     continue
                 print(f"[main] worker lost while sending ({exc}) - restarting "
                       f"({consecutive_restarts}/{MAX_CONSECUTIVE_RESTARTS})")
@@ -2891,6 +2945,7 @@ def main() -> int:
                 if consecutive_restarts >= MAX_CONSECUTIVE_RESTARTS:
                     print(f"[main] worker silent/dying {consecutive_restarts} times in a row - NR OFF")
                     paused = True
+                    worker_failed = True
                     display.alert(UI_STRINGS[lang]["nr_off"])
                     tray._set_state(nr=False)
                     consecutive_restarts = 0
@@ -2899,6 +2954,13 @@ def main() -> int:
                     # hang over the desktop forever (audit M2: the veil is
                     # removed only on a received frame).
                     display.exit_switch_mode()
+                    # Same for the overlay itself: hide it so the desktop is
+                    # not covered by a black window (issue #3).
+                    try:
+                        shutdown_worker(worker, worker_stop)
+                    except Exception:
+                        pass
+                    display.set_visible(False)
                     continue
                 print(f"[main] worker silent/dead on frame {frame_index} ({exc}) - restarting "
                       f"({consecutive_restarts}/{MAX_CONSECUTIVE_RESTARTS})")
