@@ -59,6 +59,22 @@ DEV_ONLY = {
     "autocheck.py",
     "run_tests.py",
     "build_release_zip.py",
+    # Spout2 SDK dev baggage: the headers, the test tools and the build
+    # scripts are for the repository, not for the end user. The release
+    # needs only the two DLLs (Spout.dll, SpoutDX.dll) and the bridge
+    # sources that the worker links.
+    "native/include/spout/",
+    "native/spout_bridge.h",
+    "native/spout_bridge.cpp",
+    "native/spout_sender.cpp",
+    "native/spout_receiver.cpp",
+    "native/spout_roundtrip.cpp",
+    "native/spout_compile_check.cpp",
+    "native/spout_adapter_check.cpp",
+    "native/build-spout-test.bat",
+    "native/build-spout-check.bat",
+    "native/build-spout-adapter.bat",
+    "native/SpoutDX.lib",
 }
 
 
@@ -85,6 +101,15 @@ def _skip(path: str) -> bool:
     # folders that ship inside site-packages (pygame/tests, comtypes/test,
     # win32ctypes/tests, numpy/testing) - library developer baggage.
     if norm in DEV_ONLY or norm.startswith("tests/") or norm.startswith("test_"):
+        return True
+    # Spout2 SDK dev baggage: the headers, the test tools and the build
+    # scripts are for the repository, not for the end user. The release
+    # needs only the two DLLs (Spout.dll, SpoutDX.dll).
+    if norm.startswith("native/include/spout/") or norm.startswith("native/spout_"):
+        return True
+    if norm.startswith("native/build-spout-"):
+        return True
+    if norm == "native/SpoutDX.lib":
         return True
     if "/test/" in norm or "/tests/" in norm or "/testing/" in norm:
         return True
