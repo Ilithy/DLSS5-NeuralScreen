@@ -486,9 +486,12 @@ def _drain_stderr(worker, logs: list[str], stop: threading.Event) -> None:
             # buffer and is seen only when something crashed. Besides the
             # phase measurements we let [pure]/[host] through: they carry the
             # NGX result code and the chosen model preset, and without them
-            # there is no telling what was actually created.
-            if os.environ.get("NS_PHASE") == "1" and (
-                    "[phase]" in line or "[pure]" in line or "[host]" in line):
+            # there is no telling what was actually created. [present] is
+            # let through too: the overlay window lifecycle (created, hidden,
+            # revealed, resize) is part of the startup/shutdown diagnostics.
+            if "[present]" in line or (
+                    os.environ.get("NS_PHASE") == "1" and (
+                        "[phase]" in line or "[pure]" in line or "[host]" in line)):
                 print(line)
     except Exception:
         pass
@@ -1761,11 +1764,20 @@ def main() -> int:
             worker, worker_logs, reader, worker_stop = start_worker(
                 params, work_w, work_h, warmup, full_w, full_h, shm)
             # The window and the menu are rebuilt, keeping the user settings.
+            # A soft resize instead of close()+recreate: the old code went
+            # through pygame.quit() and built a fresh window - the screen went
+            # black for a moment on every Num5 (user: screen flashes on mode
+            # switches). The worker and the shm MUST be torn down and rebuilt
+            # (new size), the SDL window does not have to be.
             try:
-                display.close()
-            except Exception:
-                pass
-            display = Display(width, height, fullscreen=bool(cfg["fullscreen"]))
+                display.resize(width, height)
+            except Exception as exc:
+                print(f"[main] soft resize failed ({exc}) - recreating the window")
+                try:
+                    display.close()
+                except Exception:
+                    pass
+                display = Display(width, height, fullscreen=bool(cfg["fullscreen"]))
             # In one-window mode the overlay stops hiding from screen capture:
             # the input is that window, not the desktop, so there is no
             # self-capture loop to break - and an outside recorder can see the
@@ -2922,6 +2934,7 @@ def main() -> int:
                     # flicker of the frame in the HUD layer above the worker's
                     # window. The HUD is refreshed by draw_overlay() with
                     # throttling (not every frame).
+                    display.reveal()  # a real frame exchange happened
                     if pending_shot is not None and output_rgba is not None:
                         _save_screenshot(pending_shot, output_rgba)
                         pending_shot = None
@@ -2930,6 +2943,7 @@ def main() -> int:
                     # The frame is already on screen - the worker showed it, only the HUD here
                     display.draw_overlay()
                 else:
+                    display.reveal()  # a real frame exchange happened
                     display.show(output_rgba)
                     if pending_shot is not None:
                         _save_screenshot(pending_shot, output_rgba)

@@ -165,8 +165,31 @@ class Display:
         # looks the same but is stable, and click-through works.
         flags = pygame.NOFRAME
         self._flags = flags
-        self.screen = pygame.display.set_mode((width, height), flags)
+        # pygame.HIDDEN (128, SDL_WINDOW_HIDDEN): create the window invisible.
+        # NOTE: the raw SDL flag 0x8 is IGNORED by pygame 2.6 (verified
+        # experimentally) - the window comes up visible. pygame.HIDDEN works;
+        # the explicit SW_HIDE below is a belt-and-suspenders fallback. Shown
+        # only once the first real frame arrives - otherwise a blank window
+        # sits over the desktop during the NGX warm-up (user: screen flashes
+        # on startup / on mode switches because a new window pops up empty).
+        hidden = pygame.NOFRAME | pygame.HIDDEN
+        self.screen = pygame.display.set_mode((width, height), hidden)
         self.width, self.height = self.screen.get_size()
+        # The window starts hidden; reveal() shows it after the first real
+        # frame. set_visible/is_visible interplay: is_visible() is consulted
+        # by _follow_window before any show/hide decision, so the initial
+        # state must match the real (hidden) window.
+        self._visible = False
+        self._reveal_pending = True
+        # pygame 2.6 ignores SDL_WINDOW_HIDDEN (verified experimentally: the
+        # window is VISIBLE right after set_mode with the 0x8 flag) - hide it
+        # explicitly or a blank window flashes over the desktop during the
+        # NGX warm-up (user: translucent/blank flash on startup).
+        try:
+            hwnd = pygame.display.get_wm_info()["window"]
+            ctypes.windll.user32.ShowWindow(hwnd, 0)  # SW_HIDE
+        except Exception:
+            pass
         self._move_to_origin()
         # Force the physical window size: even if DPI awareness did not apply
         # (a 3072x1728 window instead of 3840x2160), we stretch the window to
@@ -203,7 +226,8 @@ class Display:
         if click_through:
             self._set_click_through()
         self._lang = "ru"  # HUD language (NR ON/NR OFF), see set_lang()
-        self._visible = True
+        # NOTE: _visible/_reveal_pending are set right after set_mode - the
+        # window starts hidden and reveal() shows it after the first frame.
         # HUD mode: the worker draws the frame, the window shows only the HUD
         self._hud_only = False
         self._last_overlay = 0.0
@@ -253,12 +277,35 @@ class Display:
         With NR OFF the window is hidden completely so the desktop does not
         slow down (no capture/blit/flip). With NR ON it is shown again.
         """
+        if visible and self._reveal_pending:
+            # The first frame has not arrived yet (the window is hidden on
+            # purpose - SDL_WINDOW_HIDDEN at creation to avoid the blank
+            # flash). _follow_window would happily show it early; only
+            # reveal() may show the window for the first time.
+            return
         try:
             hwnd = pygame.display.get_wm_info()["window"]
             user32.ShowWindow(hwnd, 5 if visible else 0)  # SW_SHOW=5, SW_HIDE=0
             self._visible = visible
         except Exception:
             pass
+
+    def reveal(self) -> None:
+        """Show the window once a real frame has arrived.
+
+        The window is created hidden (SDL_WINDOW_HIDDEN) to avoid a blank
+        flash over the desktop during the NGX warm-up. Called after the
+        first successful frame exchange in main; idempotent - after the
+        first call the window is simply visible and the mode switches go
+        through set_visible() (which hides it for minimised windows etc).
+        """
+        if self._reveal_pending:
+            try:
+                hwnd = pygame.display.get_wm_info()["window"]
+                user32.ShowWindow(hwnd, 5)  # SW_SHOW
+                self._visible = True
+            finally:
+                self._reveal_pending = False
 
     def is_visible(self) -> bool:
         return getattr(self, "_visible", True)
@@ -291,8 +338,12 @@ class Display:
         """Move the window to (0,0) - the monitor's top left corner."""
         try:
             hwnd = pygame.display.get_wm_info()["window"]
+            # NO SWP_SHOWWINDOW here: the window is created hidden
+            # (SDL_WINDOW_HIDDEN) and revealed only after the first real
+            # frame - otherwise the blank window flashes over the desktop
+            # during the NGX warm-up.
             ctypes.windll.user32.SetWindowPos(hwnd, 0, 0, 0, 0, 0,
-                                              0x0001 | 0x0002 | 0x0040)  # SWP_NOSIZE|NOMOVE|SHOWWINDOW
+                                              0x0001 | 0x0002 | 0x0010)  # SWP_NOSIZE|NOMOVE|NOACTIVATE
         except Exception:
             pass
 
@@ -438,6 +489,29 @@ class Display:
                 pass
         self._click_through = not enabled
 
+    def resize(self, w: int, h: int) -> None:
+        """Resize the HUD layer WITHOUT destroying the SDL window.
+
+        pygame.display.set_mode() on the same display reuses the existing
+        window (a soft resize), which is what a one-window mode switch needs:
+        the old code went through display.close() -> pygame.quit() and rebuilt
+        the whole window from scratch - the screen went black for a moment on
+        every Num5 (user: screen flashes on mode switches).
+
+        set_mode returns a NEW surface - it must become self.screen,
+        otherwise main keeps drawing on the old (window-sized) surface and
+        the layer never actually resizes. set_mode alone does NOT resize the
+        physical window in SDL2, so the caller forces it with SetWindowPos.
+        The recreated window loses EVERYTHING (layered attributes, capture
+        affinity, input styles) - restore them here, once.
+        """
+        self.screen = pygame.display.set_mode((w, h), self._flags)
+        self.width, self.height = w, h
+        self.set_hud_only(self._hud_only, force=True)
+        self.set_menu_opaque(self.menu.visible)
+        self.set_excluded_from_capture(self._excluded)
+        self.set_menu_input(self._menu_input)
+
     def set_fullscreen_layer(self, full_w: int, full_h: int) -> None:
         """Expand the HUD layer to the whole screen (menu open in window mode).
 
@@ -473,18 +547,11 @@ class Display:
     def set_window_layer(self, x: int, y: int, w: int, h: int) -> None:
         """Shrink the HUD layer back onto the captured window."""
         try:
-            self.screen = pygame.display.set_mode((w, h), self._flags)
-            self.width, self.height = w, h
+            self.resize(w, h)
             hwnd = pygame.display.get_wm_info()['window']
             # Force the physical size AND the position in one call (set_mode
             # alone does not resize the window in SDL2).
             user32.SetWindowPos(hwnd, -1, int(x), int(y), w, h, 0x0010)
-            # Restore everything the recreated window lost (see
-            # set_fullscreen_layer).
-            self.set_hud_only(self._hud_only, force=True)
-            self.set_menu_opaque(self.menu.visible)
-            self.set_excluded_from_capture(self._excluded)
-            self.set_menu_input(self._menu_input)
         except Exception as exc:
             print(f'Display: WARNING cannot shrink the layer: {exc}')
 

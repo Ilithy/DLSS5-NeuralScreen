@@ -1265,7 +1265,8 @@ static D3D12_RESOURCE_BARRIER Transition(ID3D12Resource *r, D3D12_RESOURCE_STATE
                                          D3D12_RESOURCE_STATES after);
 
 static HWND                       g_present_hwnd;
-static bool                       g_present_shown = true;  // window mode hides it when the target is minimised
+static bool                       g_present_shown = false;      // visible right now (minimised target hides it)
+static bool                       g_present_revealed = false;   // the first Present already happened
 static RECT                       g_present_follow = {};   // where the target window was last seen
 // Defined here rather than with the capture code below: the present window
 // has to know whether one window is being captured, and which one, and this
@@ -1349,9 +1350,12 @@ static DWORD WINAPI PresentWindowThread(LPVOID)
     // debug flag says otherwise) - see ApplyPresentAffinity.
     ApplyPresentAffinity();
 
-    ShowWindow(g_present_hwnd, SW_SHOWNOACTIVATE);
+    // The window stays HIDDEN until the first successful Present: showing a
+    // blank topmost window during the NGX warm-up flashes black over the
+    // desktop on every start and on every one-window mode switch (user:
+    // screen flashes black). Revealed by RevealOnFirstPresent below.
     SetWindowPos(g_present_hwnd, HWND_TOPMOST, 0, 0, 0, 0,
-                 SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
+                 SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE | SWP_HIDEWINDOW);
     InterlockedExchange(&g_present_state, 1);
 
     MSG msg;
@@ -1374,6 +1378,10 @@ static void ClosePresent()
     g_present_tid = 0;
     g_present_w = g_present_h = 0;
     g_present_state = 0;
+    // A fresh OpenPresent starts a fresh window: the reveal-on-first-Present
+    // logic must run again (user: blank flash on mode switches).
+    g_present_shown = false;
+    g_present_revealed = false;
 }
 
 static bool OpenPresent(UINT width, UINT height, uint32_t flags)
@@ -1501,7 +1509,7 @@ static void FollowCapturedWindow()
                                      &r, sizeof(r))) &&
         !GetWindowRect(g_wgc_hwnd, &r))
         return;
-    if (!g_present_shown)
+    if (!g_present_shown && g_present_revealed)
     {
         ShowWindow(g_present_hwnd, SW_SHOWNOACTIVATE);
         g_present_shown = true;
@@ -1542,6 +1550,22 @@ static void ReassertPresentTopmost()
                  SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
 }
 
+// Show the present window on its first successful Present.
+//
+// The window is created hidden (PresentWindowThread) so a blank topmost
+// window never flashes over the desktop during the NGX warm-up. The first
+// frame that actually presents is the moment the window becomes visible -
+// it appears with a picture already on it (user: screen flashes black on
+// startup and on one-window mode switches).
+static void RevealOnFirstPresent()
+{
+    if (g_present_hwnd == nullptr || g_present_revealed) return;
+    ShowWindow(g_present_hwnd, SW_SHOWNOACTIVATE);
+    g_present_shown = true;
+    g_present_revealed = true;
+    Log("[present] window revealed on the first Present");
+}
+
 static bool PresentFrame(VideoState &v)
 {
     ID3D12Resource *bb = nullptr;
@@ -1571,6 +1595,7 @@ static bool PresentFrame(VideoState &v)
             Log("[present] fence wait timed out");
     }
     bb->Release();
+    if (ok) RevealOnFirstPresent();
     return ok;
 }
 
@@ -1608,6 +1633,7 @@ static bool PresentBypass(VideoState &v)
             Log("[present] bypass fence wait timed out");
     }
     bb->Release();
+    if (ok) RevealOnFirstPresent();
     return ok;
 }
 
@@ -3083,10 +3109,12 @@ static void CloseWgc()
     // Back to the desktop as the input: hide again or the pipeline would
     // capture its own output.
     ApplyPresentAffinity();
-    if (!g_present_shown && g_present_hwnd != nullptr)
+    if (!g_present_shown && g_present_hwnd != nullptr && g_present_revealed)
     {
         // It was hidden because the target was minimised; the next mode must
-        // not inherit an invisible overlay.
+        // not inherit an invisible overlay. Only after the first Present:
+        // before that the window has no picture yet and must stay hidden
+        // until RevealOnFirstPresent (user: blank flash on mode switches).
         ShowWindow(g_present_hwnd, SW_SHOWNOACTIVATE);
         g_present_shown = true;
     }

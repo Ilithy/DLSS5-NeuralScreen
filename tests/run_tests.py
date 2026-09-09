@@ -57,6 +57,7 @@ ABOUT = {
     "test_residual.py": "the matched residual composite keeps 1:1 detail at reduced work",
     "test_residual_split.py": "residual and the wipe compose in the same frame",
     "test_resize.py": "the on-the-fly resize reconfigures the feature without a restart",
+    "test_reveal.py": "the present window stays hidden until the first Present",
     "test_split.py": "the before/after wipe leaves the left side untouched",
     "test_wgc_capture.py": "the worker captures one window (the single-window input)",
     "test_window_mode.py": "the one-window hotkey switches the pipeline and back",
