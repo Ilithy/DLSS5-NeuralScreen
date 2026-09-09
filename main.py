@@ -790,11 +790,35 @@ def window_under_cursor() -> int:
     return int(top)
 
 
+def _is_taskbar_window(hwnd: int) -> bool:
+    """A window that shows in the taskbar: top-level, not owned, not a tool
+    window.
+
+    Background processes keep hidden helper windows (owned or tool
+    windows) that EnumWindows still reports - they are not real desktop
+    apps and must not appear in the window list (user report: "сторонние
+    процессы попадают в список").
+    """
+    user32 = ctypes.windll.user32
+    if user32.GetWindow(hwnd, 4):  # GW_OWNER
+        return False
+    ex = user32.GetWindowLongW(hwnd, -20)  # GWL_EXSTYLE
+    if ex & 0x00000080:  # WS_EX_TOOLWINDOW
+        return False
+    cloaked = ctypes.c_int(0)
+    if ctypes.windll.dwmapi.DwmGetWindowAttribute(
+            hwnd, 14, ctypes.byref(cloaked), 4) == 0 and cloaked.value:
+        return False  # DWM_CLOAKED: hidden from the taskbar (TextInputHost,
+        # the Settings helper windows, ...)
+    return True
+
+
 def list_capturable_windows() -> list[tuple[int, str]]:
     """Visible top-level windows that can be captured: (hwnd, title).
 
     The window list for the menu. Excludes our own windows, the desktop
-    (Progman/WorkerW) and windows without a title.
+    (Progman/WorkerW), windows without a title and windows that do not
+    show in the taskbar (owned/tool windows of background processes).
     """
     user32 = ctypes.windll.user32
     out: list[tuple[int, str]] = []
@@ -807,7 +831,7 @@ def list_capturable_windows() -> list[tuple[int, str]]:
         user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
         if pid.value == os.getpid():
             return True
-        if _is_desktop_window(hwnd):
+        if _is_desktop_window(hwnd) or not _is_taskbar_window(hwnd):
             return True
         length = user32.GetWindowTextLengthW(hwnd)
         if length <= 0:
