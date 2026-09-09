@@ -23,27 +23,19 @@ actually doing.*
   | Cards | Status |
   |---|---|
   | **RTX 50** (Blackwell) | ✅ works - the officially supported generation |
-  | **RTX 40** (Ada) | ✅ works - through the built-in architecture hook (the bundled runtime is NVIDIA's own sm_120 build; the hook makes it run on Ada) |
-  | **RTX 30** (Ampere) | ❌ not in this release - no sm_86 kernels. See *Trying RTX 30/20* below. |
-  | **RTX 20** (Turing) | ❌ cannot run the neural pass at all - below the minimum architecture (DLSS5-Feeder issue #73) |
+  | **RTX 40** (Ada) | ✅ works - through the built-in architecture hook |
+  | **RTX 30** (Ampere) | ✅ works - restored in v1.5.1 (the universal runtime + spoof 0x1B0, same stack as v1.3.0) |
+  | **RTX 20** (Turing) | ❌ cannot run the neural pass at all - below the minimum architecture (DLSS5-Feeder issue #73). See *Trying RTX 20* below. |
   | **Laptops with hybrid graphics (Optimus)** | ⚠️ works only when the display is driven by the NVIDIA GPU - force the dGPU (MUX switch, or an external monitor on the dGPU port). On the iGPU it fails on the first frame |
 
 - **Nothing installed.** The release archive brings its own Python.
 
-### Trying RTX 30/20
+### Trying RTX 20
 
-The runtime is compiled per GPU architecture. The bundled build covers
-RTX 40/50; the community **310.8.SF** builds add RTX 30 kernels (RTX 20
-cannot work - below the minimum architecture). To try: download
-`nvngx_dlssnr_310.8.SF-v2.zip` from https://github.com/RankFTW/rhi-repo/releases,
-replace `native\nvngx_dlssnr.dll` (back up first), run and check the menu:
-the GPU dot goes green only when feature 18 was actually created.
-
-**If you try it on an RTX 30 card, please report back** - open an issue
-with your card model and whether the dot went green. Every data point
-helps us keep the support table honest.
-
-**Speed warning:** on RTX 30 the pass is slow - single digits to ~20 FPS at 1440p. Lower the *Resolution the network runs at* slider.
+Turing is below the minimum architecture - no runtime build makes the
+neural pass run on it (0xBAD00001, FeatureNotSupported). The program
+will start and the menu works; the picture is not processed. No workaround
+exists.
 
 ## Install
 
@@ -175,12 +167,12 @@ second per frame; a press may feel lost. The picture is the priority.
 - **The window list** shows every visible window; Num5 takes the one under the cursor. **A second monitor** works but was not tested with a window between them; the menu position in window mode starts bottom-right.
 - **HDR displays** are not supported: switch to SDR (Win+Alt+B).
 - **Pipeline latency** is 40–60 ms — fine interactively, not competitively; **processing resolution is capped at 2560×1440** (the network refuses 4K), output is always your full native resolution.
-- **The bundled `nvngx_dlssnr.dll` is NVIDIA's own leaked pre-release build** (310.8.0, sm_120 kernels) — see License below.
+- **The bundled `nvngx_dlssnr.dll` is the leaked 310.8.0 runtime carrying sm_75/86/89/120 kernels (RTX 20-50)** — see License below.
 
 ## Under the hood — how it works, what was measured and why: **[docs/TECHNICAL.md](docs/TECHNICAL.md)**. Русская версия: **[README.ru.md](README.ru.md)**.
 
 ## License
 
-The code here is MIT. NVIDIA's `nvngx_dlssnr.dll` is NVIDIA's own leaked
-pre-release build (310.8.0, sm_120 kernels for RTX 50). Included as-is,
-unmodified by us, no guarantees; research-only.
+The code here is MIT. NVIDIA's `nvngx_dlssnr.dll` is the leaked 310.8.0
+runtime (sm_75/86/89/120 kernels, RTX 20-50). Included as-is, no
+guarantees; research-only.
