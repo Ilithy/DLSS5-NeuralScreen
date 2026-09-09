@@ -23,7 +23,7 @@ actually doing.*
   | Cards | Status |
   |---|---|
   | **RTX 50** (Blackwell) | ✅ works - the officially supported generation |
-  | **RTX 40** (Ada) | ✅ works - the bundled runtime carries sm_89 kernels |
+  | **RTX 40** (Ada) | ✅ works - through the built-in architecture hook (the bundled runtime is NVIDIA's own sm_120 build; the hook makes it run on Ada) |
   | **RTX 30** (Ampere) | ❌ not in this release - no sm_86 kernels. See *Trying RTX 30/20* below. |
   | **RTX 20** (Turing) | ❌ cannot run the neural pass at all - below the minimum architecture (DLSS5-Feeder issue #73) |
 
@@ -187,13 +187,12 @@ second per frame; a press may feel lost. The picture is the priority.
 - **The window list** shows every visible window; Num5 takes the one under the cursor. **A second monitor** works but was not tested with a window between them; the menu position in window mode starts bottom-right.
 - **HDR displays** are not supported: switch to SDR (Win+Alt+B).
 - **Pipeline latency** is 40–60 ms — fine interactively, not competitively; **processing resolution is capped at 2560×1440** (the network refuses 4K), output is always your full native resolution.
-- **The bundled `nvngx_dlssnr.dll` is a community re-targeted build** of NVIDIA's leaked pre-release 310.8.0 runtime (sm_89 + sm_120: RTX 40 and RTX 50) — see License below.
+- **The bundled `nvngx_dlssnr.dll` is NVIDIA's own leaked pre-release build** (310.8.0, sm_120 kernels) — see License below.
 
 ## Under the hood — how it works, what was measured and why: **[docs/TECHNICAL.md](docs/TECHNICAL.md)**. Русская версия: **[README.ru.md](README.ru.md)**.
 
 ## License
 
-The code here is MIT. NVIDIA's `nvngx_dlssnr.dll` is a community
-re-targeted build of NVIDIA's leaked pre-release 310.8.0 runtime (the
-original carries sm_120 kernels for RTX 50 only; this build adds sm_89 for
-RTX 40). Included as-is, unmodified by us, no guarantees; research-only.
+The code here is MIT. NVIDIA's `nvngx_dlssnr.dll` is NVIDIA's own leaked
+pre-release build (310.8.0, sm_120 kernels for RTX 50). Included as-is,
+unmodified by us, no guarantees; research-only.

@@ -357,11 +357,11 @@ and it carries the message
 DLSSNR: Unsupported GPU architecture 0x%x, minimum required 0x%x
 ```
 
-The original NVIDIA build carries kernels for `sm_120` (Blackwell) only. The
-bundled build is the community re-targeted **310.8.0-RTX40** (from the
-RankFTW/rhi-repo mirror): parsing its fatbin headers shows `sm_89` (Ada)
-and `sm_120` (Blackwell) — so it runs on RTX 40 and RTX 50. The refusal on
-older cards is a policy check, not missing code.
+The bundled build is NVIDIA's own leaked pre-release **310.8.0** (from the
+RankFTW/rhi-repo mirror): parsing its fatbin headers shows `sm_120`
+(Blackwell) kernels only. On RTX 40 the architecture hook (below) makes
+the feature create succeed - confirmed by a user on a 4080 Super. The
+refusal on older cards is a policy check, not missing code.
 
 The library learns the architecture through nvapi — it loads `nvapi64.dll`,
 takes its single export `nvapi_QueryInterface` and asks for
