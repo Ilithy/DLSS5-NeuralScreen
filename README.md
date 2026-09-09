@@ -21,8 +21,8 @@ actually doing.*
 - **An NVIDIA RTX card.** 50-series is the officially supported one. 20, 30 and
   40-series work too — the kernels are there and NVIDIA's own check is what
   blocks them; NeuralScreen works around it. Confirmed working on a 40-series.
+  **Speed warning:** on 20/30-series the neural pass is slow — single digits to ~20 FPS at 1440p, not the 60+ of a 50-series. The effect is real, the frame rate is not. Lower the *Resolution the network runs at* slider — it is the main speed lever.
 - **Nothing installed.** The release archive brings its own Python.
-
 ## Install
 
 1. Download the archive from [Releases](https://github.com/perseval-BLR/DLSS5-NeuralScreen/releases)
