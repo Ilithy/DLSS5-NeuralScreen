@@ -36,11 +36,22 @@ def main() -> int:
         failures.append("the taskbar window was not created")
     else:
         ex = user32.GetWindowLongW(hwnd, -20)  # GWL_EXSTYLE
-        print(f"exstyle: 0x{ex & 0xFFFFFFFF:08X}")
+        st = user32.GetWindowLongW(hwnd, -16)  # GWL_STYLE
+        print(f"exstyle: 0x{ex & 0xFFFFFFFF:08X}, style: 0x{st & 0xFFFFFFFF:08X}")
         if not (ex & taskbar.WS_EX_APPWINDOW):
             failures.append("the window must carry WS_EX_APPWINDOW")
         if not user32.IsWindowVisible(hwnd):
             failures.append("the window must be visible (the taskbar button)")
+        # The caption/sysmenu/minimize styles are what make the taskbar
+        # button behaviour work: without them clicking an already-active
+        # button sends nothing (no SC_MINIMIZE) and the toggle dies
+        # (user: "залипает"). The window procedure converts SC_MINIMIZE
+        # into the menu toggle instead of minimizing.
+        need = taskbar.WS_CAPTION | taskbar.WS_SYSMENU | taskbar.WS_MINIMIZEBOX
+        if (st & need) != need:
+            failures.append(f"the window must carry caption/sysmenu/minimize "
+                            f"styles (0x{need:X}), got 0x{st & 0xFFFFFFFF:X}")
+
         # Activate it the way a taskbar click does.
         user32.SendMessageW(hwnd, taskbar.WM_ACTIVATE, taskbar.WA_CLICKACTIVE, 0)
         time.sleep(0.2)
@@ -50,6 +61,57 @@ def main() -> int:
         print(f"commands after activate: {got}")
         if "settings" not in got:
             failures.append("activating the window should emit the settings command")
+
+        # 2. System activations must NOT open the menu: WA_ACTIVE without the
+        #    cursor over the taskbar is the system (another window
+        #    minimized/closed, Alt+Tab) - the menu popped up by itself
+        #    (user: "сворачиваю другую программу - прога опять показывается").
+        #    WA_ACTIVE WITH the cursor over the taskbar is a button click.
+        win._cursor_over_taskbar = lambda: False
+        time.sleep(0.6)  # past the 0.5 s dedup
+        user32.SendMessageW(hwnd, taskbar.WM_ACTIVATE, taskbar.WA_ACTIVE, 0)
+        time.sleep(0.2)
+        got = []
+        while not commands.empty():
+            got.append(commands.get_nowait())
+        print(f"commands after system activate (cursor elsewhere): {got}")
+        if got:
+            failures.append("a system activation (cursor not over the "
+                            f"taskbar) must not emit anything, got {got}")
+
+        win._cursor_over_taskbar = lambda: True
+        time.sleep(0.6)
+        user32.SendMessageW(hwnd, taskbar.WM_ACTIVATE, taskbar.WA_ACTIVE, 0)
+        time.sleep(0.2)
+        got = []
+        while not commands.empty():
+            got.append(commands.get_nowait())
+        print(f"commands after taskbar activate (cursor over it): {got}")
+        if "settings" not in got:
+            failures.append("a taskbar click (WA_ACTIVE with the cursor over "
+                            "the taskbar) should emit the settings command")
+
+        # 3. SC_MINIMIZE / SC_RESTORE: the taskbar button sends these on a
+        #    minimize/restore request. The 1x1 window must not actually
+        #    minimize (the button would vanish and toggling would break on
+        #    the second click) - both are converted to the same settings
+        #    toggle instead. The dedup window is 0.5 s (one click may deliver
+        #    several messages), so the sends are spaced beyond it.
+        for sc in (taskbar.SC_MINIMIZE, taskbar.SC_RESTORE):
+            time.sleep(0.6)
+            user32.SendMessageW(hwnd, taskbar.WM_SYSCOMMAND, sc, 0)
+        time.sleep(0.2)
+        # The window must stay restored (not minimized) through both.
+        if user32.IsIconic(hwnd):
+            failures.append("SC_MINIMIZE/SC_RESTORE must not minimize the "
+                            "1x1 window (the taskbar button would vanish)")
+        while not commands.empty():
+            got.append(commands.get_nowait())
+        print(f"commands after syscommand: {got}")
+        if got.count("settings") < 2:
+            failures.append("SC_MINIMIZE and SC_RESTORE should each emit a "
+                            "settings toggle, got "
+                            f"{got.count('settings')} settings command(s)")
     win.stop()
     time.sleep(0.2)
     if win.hwnd is not None:

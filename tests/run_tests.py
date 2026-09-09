@@ -52,6 +52,7 @@ ABOUT = {
     "test_header_footer.py": "the header collapse icon and the one-window footer button",
     "test_i18n.py": "every language has the same keys, none empty",
     "test_menu_scroll.py": "the menu scrolls and the wheel lands where it should",
+    "test_overlay_toolwindow.py": "the overlay is a tool window - one taskbar button only",
     "test_motion_small.py": "the downscaled motion field is upscaled on the GPU",
     "test_nr_small.py": "the reduced-resolution mode produces a real picture",
     "test_out_shm.py": "the pixel channel through shared memory",

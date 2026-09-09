@@ -32,10 +32,17 @@ user32.DefWindowProcW.restype = ctypes.c_ssize_t
 
 WS_POPUP = 0x80000000
 WS_VISIBLE = 0x10000000
+WS_CAPTION = 0x00C00000
+WS_SYSMENU = 0x00080000
+WS_MINIMIZEBOX = 0x00020000
 WS_EX_APPWINDOW = 0x00040000
 WM_ACTIVATE = 0x0006
+WM_NCACTIVATE = 0x0086
 WA_CLICKACTIVE = 0x2
 WA_ACTIVE = 0x1
+WM_SYSCOMMAND = 0x0112
+SC_MINIMIZE = 0xF020
+SC_RESTORE = 0xF120
 WM_QUIT = 0x0012
 WM_SETICON = 0x0080
 ICON_SMALL = 0
@@ -80,26 +87,76 @@ class TaskbarWindow:
 
     def _wnd_proc(self, hwnd, msg, wparam, lparam) -> int:
         if msg == WM_ACTIVATE:
-            # The user clicked the taskbar button (or Alt+Tab'd to us):
-            # open the overlay menu, the same command the tray's left
-            # click sends. WA_CLICKACTIVE is the click, WA_ACTIVE covers
-            # Alt+Tab - both are the user asking for the program.
-            # A single click can deliver both (the click activates, then
-            # the system re-activates with WA_ACTIVE) - dedupe, or the
-            # menu would open and immediately close.
-            if wparam in (WA_CLICKACTIVE, WA_ACTIVE):
-                now = time.monotonic()
-                if now - self._last_cmd > 0.5:
-                    self._last_cmd = now
-                    try:
-                        self._commands.put("settings")
-                    except Exception:
-                        pass
+            # A click on the taskbar button arrives as WA_ACTIVE here (not
+            # WA_CLICKACTIVE - measured on Win11 26200). System activations
+            # (another window minimized/closed, Alt+Tab, Win+D) arrive the
+            # same way, so wparam alone cannot tell them apart. The reliable
+            # cue is the cursor: a click on the taskbar button happens IN the
+            # taskbar rectangle; system activations leave the cursor
+            # elsewhere (user: menu popped up by itself when another program
+            # was minimized).
+            if wparam == WA_CLICKACTIVE or (
+                    wparam == WA_ACTIVE and self._cursor_over_taskbar()):
+                self._emit("settings")
+            return 0
+        if msg == WM_NCACTIVATE:
+            # The click on an ALREADY-active taskbar button arrives as
+            # WM_NCACTIVATE(WA_ACTIVE), not WM_ACTIVATE (measured on Win11
+            # 26200: the button click delivered 0x86 wp=1 with the cursor
+            # over the taskbar and nothing else). Without handling it the
+            # second click was dead (user: "залипает"). wparam=0 is a
+            # deactivation - never a user click, ignore it.
+            if wparam == 1 and self._cursor_over_taskbar():
+                self._emit("settings")
+            return 0
+        if msg == WM_SYSCOMMAND and (wparam & 0xFFF0) in (SC_MINIMIZE, SC_RESTORE):
+            # The taskbar button sends these when the window is already
+            # minimized (restore) or when the user asks to minimize it. The
+            # 1x1 window must NEVER actually minimize: the taskbar button
+            # disappears with it, and the button becomes a toggle for the
+            # overlay menu - clicking it must always reach the menu command.
+            # So SC_MINIMIZE/SC_RESTORE are turned into the same menu
+            # toggle instead of letting the system minimize the window
+            # (user: the button stopped responding on the second click).
+            self._emit("settings")
             return 0
         if msg == WM_QUIT:
             user32.PostQuitMessage(0)
             return 0
         return user32.DefWindowProcW(hwnd, msg, wparam, lparam)
+
+    def _cursor_over_taskbar(self) -> bool:
+        """Whether the cursor is inside the taskbar rectangle.
+
+        The only reliable way to tell a taskbar-button click (WA_ACTIVE with
+        the cursor over the taskbar) from a system activation (WA_ACTIVE with
+        the cursor anywhere else): the two are indistinguishable by wparam.
+        """
+        try:
+            tb = user32.FindWindowW("Shell_TrayWnd", None)
+            if not tb:
+                return False
+            rect = wt.RECT()
+            if not user32.GetWindowRect(tb, ctypes.byref(rect)):
+                return False
+            pt = wt.POINT()
+            if not user32.GetCursorPos(ctypes.byref(pt)):
+                return False
+            return (rect.left <= pt.x < rect.right
+                    and rect.top <= pt.y < rect.bottom)
+        except Exception:
+            return False
+
+    def _emit(self, command: str) -> None:
+        """Queue a command, deduped: one click can deliver both
+        WA_CLICKACTIVE and WA_ACTIVE, and SC_RESTORE may follow a click."""
+        now = time.monotonic()
+        if now - self._last_cmd > 0.5:
+            self._last_cmd = now
+            try:
+                self._commands.put(command)
+            except Exception:
+                pass
 
     def start(self) -> None:
         """Create the window in its own thread (the message loop blocks)."""
@@ -121,12 +178,23 @@ class TaskbarWindow:
             # Already registered (a second instance in the same process).
             pass
         # A 1x1 window at the corner: visible to the system (so the
-        # taskbar button exists) but nothing the eye can catch.
+        # taskbar button exists) but nothing the eye can catch. The caption
+        # style bits matter: without WS_CAPTION/WS_SYSMENU/WS_MINIMIZEBOX
+        # the taskbar button has no minimize behaviour at all - clicking an
+        # ALREADY-active button sends nothing (no WM_ACTIVATE, no
+        # SC_MINIMIZE), which made the second click dead (user: "залипает").
+        # With the styles the system sends SC_MINIMIZE on the active button,
+        # which the window procedure converts into the menu toggle.
         self._hwnd = user32.CreateWindowExW(
-            WS_EX_APPWINDOW, cls, self._title, WS_POPUP | WS_VISIBLE,
+            WS_EX_APPWINDOW, cls, self._title,
+            WS_POPUP | WS_VISIBLE | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
             0, 0, 1, 1, None, None, hinst, None)
         if not self._hwnd:
             return
+        # CreateWindowExW may drop WS_VISIBLE for a popup with caption styles
+        # until the first ShowWindow - force it, or the taskbar button never
+        # appears (measured: window came up hidden without it).
+        user32.ShowWindow(self._hwnd, 5)  # SW_SHOW
         self._set_icon(hinst)
         msg = wt.MSG()
         while user32.GetMessageW(ctypes.byref(msg), None, 0, 0) > 0:

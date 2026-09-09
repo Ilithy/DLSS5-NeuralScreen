@@ -397,6 +397,7 @@ class Display:
             WS_EX_TRANSPARENT = 0x00000020
             WS_EX_NOACTIVATE = 0x08000000
             WS_EX_LAYERED = 0x00080000
+            WS_EX_TOOLWINDOW = 0x00000080
             LWA_ALPHA = 0x2
             SWP_NOMOVE = 0x0002
             SWP_NOSIZE = 0x0001
@@ -404,7 +405,8 @@ class Display:
             SWP_FRAMECHANGED = 0x0020
             style = user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
             user32.SetWindowLongW(hwnd, GWL_EXSTYLE,
-                                  style | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE | WS_EX_LAYERED)
+                                  style | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE
+                                  | WS_EX_LAYERED | WS_EX_TOOLWINDOW)
             # Activate layered mode: alpha=255 (an opaque window, only hit
             # testing changes, visually we touch nothing)
             user32.SetLayeredWindowAttributes(hwnd, 0, 255, LWA_ALPHA)
@@ -470,12 +472,19 @@ class Display:
         GWL_EXSTYLE = -20
         WS_EX_TRANSPARENT = 0x00000020
         WS_EX_NOACTIVATE = 0x08000000
+        WS_EX_TOOLWINDOW = 0x00000080
         SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SWP_FRAMECHANGED = 0x2, 0x1, 0x4, 0x20
         style = user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
         if enabled:
             style &= ~(WS_EX_TRANSPARENT | WS_EX_NOACTIVATE)
         else:
             style |= WS_EX_TRANSPARENT | WS_EX_NOACTIVATE
+        # WS_EX_TOOLWINDOW stays on in both states: the overlay is an
+        # instrument window, not an application - it must never create a
+        # second taskbar button / Alt+Tab entry next to the 1x1 APPWINDOW
+        # button (user: two thumbnails in the taskbar, a narrow settings one
+        # and the big overlay one).
+        style |= WS_EX_TOOLWINDOW
         user32.SetWindowLongW(hwnd, GWL_EXSTYLE, style)
         user32.SetWindowPos(hwnd, 0, 0, 0, 0, 0,
                             SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED)
