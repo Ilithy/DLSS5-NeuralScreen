@@ -140,33 +140,27 @@ see the processed picture. Full-screen mode keeps hiding it.
 
 ## If something is not working
 
-**Nothing appears after launch.** Check `NeuralScreen.log` next to the program;
-it says what happened in plain text. The most common cause is a missing
-`native\nvngx_dlssnr.dll`.
+**Nothing appears after launch.** Check `NeuralScreen.log` next to the
+program; the most common cause is a missing `native\nvngx_dlssnr.dll`.
 
-**The overlay is invisible in a game.** Games running in true fullscreen cannot
-have anything drawn over them — that is a Windows rule, not a bug here. Switch
-the game to *borderless* or *windowed fullscreen*, which almost all modern
-games have.
+**The overlay is invisible in a game.** True fullscreen cannot have anything
+drawn over it — a Windows rule. Switch the game to *borderless* or
+*windowed fullscreen*.
 
 **The menu pointer is missing or frozen.** A fullscreen game hides the system
-cursor, and the game's own cursor (drawn into its frames) freezes when the
-game loses focus to the menu. The overlay only shows the system cursor; a
-game that hides it leaves the menu without a pointer. Borderless fixes it.
+cursor; the overlay only shows the system cursor. Borderless fixes it.
 
 **The numpad hotkeys do nothing.** They need *Num Lock* to be on. With Num
 Lock off the numpad sends Insert/End/arrows and the keys simply do not exist.
-The program writes this to the log and shows it on screen.
 
 **The picture is soft.** Put *Resolution the network runs at* back to the top
-of its slider; only the very bottom of the slider starts to soften.
+of its slider.
 
-**A key does nothing.** Something else on the machine has claimed it.
-Reassign it in the menu under the sliders icon.
+**A key does nothing.** Something else claimed it; reassign it in the menu
+under the sliders icon.
 
 **The menu is slow in a heavy game.** At 4K the pipeline can take up to a
-second per frame; hotkeys are processed between frames, so a press may feel
-lost. The picture is the priority.
+second per frame; a press may feel lost. The picture is the priority.
 
 ## Known limitations
 
@@ -186,6 +180,8 @@ lost. The picture is the priority.
 - **Pipeline latency** is 40–60 ms — fine interactively, not competitively.
 - **Processing resolution is capped at 2560×1440** (the network refuses 4K);
   output is always your full native resolution.
+- **The bundled `nvngx_dlssnr.dll` is a leaked pre-release build** (310.8.0)
+  — see License below.
 
 ## Under the hood
 
@@ -198,3 +194,7 @@ How it works, what was measured and why the decisions went the way they did:
 
 The code here is MIT. NVIDIA's `nvngx_dlssnr.dll` is not mine — it is
 included in the release archive and comes from NVIDIA under their own terms.
+It is a pre-release/internal build (310.8.0) that leaked into the modding
+ecosystem; it is redistributed as-is, unmodified, with no guarantees from
+NVIDIA. Its Authenticode signature no longer matches (the file was
+re-packaged), so treat it as research-only software.
