@@ -1757,6 +1757,12 @@ def main() -> int:
             nonlocal present_mode, present_attempted, dda_mode, dda_attempted
             nonlocal gray_active, motion_small, motion_attempted, gpu_ok
             nonlocal out_shm, out_attempted
+            # Freeze the last picture with a spinner before the old worker
+            # dies: the rebuild takes ~1 s (new worker, NGX warm-up) and the
+            # bare desktop would flash underneath (user: mode-switch flashes).
+            # The overlay spans the whole monitor even when the next mode is
+            # one window - no bare desktop at the edges of the spinner.
+            display.enter_switch_mode(output_rgba, *capture.resolution)
             menu_was_open = display.menu.visible
             full_w = width if (work_w != width or work_h != height) else 0
             full_h = height if (work_w != width or work_h != height) else 0
@@ -2850,6 +2856,10 @@ def main() -> int:
                         # A heavy 4K scene can take ~1 s per NGX frame -
                         # keep the hotkeys alive while main waits (user:
                         # "NR toggle does not always fire in Cyberpunk").
+                        # The switch overlay's spinner must keep animating
+                        # while the new worker warms up.
+                        if display.is_switch_active():
+                            display.draw_overlay(0.0)
                         if not _drain_commands():
                             running = False
                             break
@@ -2934,6 +2944,7 @@ def main() -> int:
                     # flicker of the frame in the HUD layer above the worker's
                     # window. The HUD is refreshed by draw_overlay() with
                     # throttling (not every frame).
+                    display.exit_switch_mode()  # the new worker is presenting
                     display.reveal()  # a real frame exchange happened
                     if pending_shot is not None and output_rgba is not None:
                         _save_screenshot(pending_shot, output_rgba)
@@ -2941,8 +2952,14 @@ def main() -> int:
                     display.draw_overlay()
                 elif output_rgba is None:
                     # The frame is already on screen - the worker showed it, only the HUD here
+                    # (WGCW/DDA without want_pixels: no colour reaches Python).
+                    # This is still a live exchange with the rebuilt worker: the
+                    # switch overlay must come down or the menu stays hidden
+                    # behind the veil forever (user: clipped/blank after Num5).
+                    display.exit_switch_mode()
                     display.draw_overlay()
                 else:
+                    display.exit_switch_mode()  # the next frame replaces the overlay
                     display.reveal()  # a real frame exchange happened
                     display.show(output_rgba)
                     if pending_shot is not None:

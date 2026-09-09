@@ -21,6 +21,7 @@ Usage:
 from __future__ import annotations
 
 import ctypes
+import math
 import os
 import sys
 import time
@@ -104,6 +105,7 @@ from i18n import STRINGS
 # --- Brand palette (DLSS5-Video-Converter) -------------------------------
 BG_COLOR = (0x0D, 0x11, 0x17)      # #0D1117 dark background
 BG_ALPHA = 235                     # HUD panel translucency (nearly opaque, so text stays readable)
+SWITCH_ALPHA = 170                 # mode-switch overlay: the live desktop shows through it
 WDA_EXCLUDEFROMCAPTURE = 0x00000011
 
 # Chroma key for HUD mode: pixels of exactly this colour are not drawn at all
@@ -232,6 +234,15 @@ class Display:
         self._hud_only = False
         self._last_overlay = 0.0
         self._last_alert_count = 0
+        # The mode-switch overlay (blur + spinner): shown while the pipeline
+        # is rebuilt and the new worker warms up, so the screen does not sit
+        # bare for a second on every Num5 (user: mode-switch flashes).
+        self._switch_active = False
+        self._switch_bg: "pygame.Surface | None" = None
+        self._switch_dim: "pygame.Surface | None" = None
+        self._switch_t0 = 0.0
+        self._switch_ret = (0, 0)  # layer size to restore on exit
+        self._switch_pending = None  # deferred resize (w, h) while active
 
     def _sync_cursor(self) -> None:
         """Cursor over the menu area: move and resize arrows.
@@ -504,7 +515,15 @@ class Display:
         physical window in SDL2, so the caller forces it with SetWindowPos.
         The recreated window loses EVERYTHING (layered attributes, capture
         affinity, input styles) - restore them here, once.
+
+        While the mode-switch overlay is up the resize is DEFERRED: the
+        overlay spans the full monitor on purpose (no bare desktop around the
+        spinner), and exit_switch_mode() applies the pipeline size when the
+        overlay comes down.
         """
+        if self._switch_active:
+            self._switch_pending = (w, h)
+            return
         self.screen = pygame.display.set_mode((w, h), self._flags)
         self.width, self.height = w, h
         self.set_hud_only(self._hud_only, force=True)
@@ -623,6 +642,140 @@ class Display:
         """
         self._set_topmost()
 
+    def enter_switch_mode(self, last_frame: "np.ndarray | None" = None,
+                          full_w: int = 0, full_h: int = 0) -> None:
+        """Freeze a blurred copy of the screen with a spinner on top.
+
+        Called when the pipeline is being rebuilt (window-mode switch, monitor
+        change, resolution change): the previous worker dies, the next one
+        warms up for ~1 s and the desktop would sit bare underneath. The layer
+        is expanded to the full screen (full_w/full_h) and made opaque - the
+        blur of the last frame (darkened) plus a spinner hide the gap (user:
+        mode-switch flashes black/translucent).
+        """
+        if self._switch_active:
+            return
+        cw, ch = self.screen.get_size()
+        fw = full_w if full_w > 0 else cw
+        fh = full_h if full_h > 0 else ch
+        self._switch_active = True
+        self._switch_t0 = time.monotonic()
+        self._switch_ret = (cw, ch)
+        try:
+            bg = None
+            if last_frame is not None:
+                frame = pygame.image.frombuffer(
+                    last_frame, (last_frame.shape[1], last_frame.shape[0]), "RGBX")
+                # Blur cheaply: downscale to a small target in one step,
+                # upscale back. The downscale ratio sets the blur radius.
+                small = pygame.transform.smoothscale(
+                    frame, (max(8, fw // 3), max(8, fh // 3)))
+                bg = pygame.transform.smoothscale(small, (fw, fh))
+            if bg is not None:
+                # Darken the frozen frame: the pipeline is being rebuilt, the
+                # picture is stale. A 40% veil reads as "transition" rather
+                # than "frozen desktop".
+                dim = bg.copy()
+                dim.fill((96, 96, 96), special_flags=pygame.BLEND_RGB_MULT)
+                self._switch_dim = dim
+        except Exception:
+            self._switch_dim = None
+        # Expand the layer to the full screen. The overlay is SEMI-transparent
+        # (LWA_ALPHA): the live desktop stays visible behind it, so when no
+        # frozen frame exists (WNDO mode - the pixels never come to Python)
+        # the user sees the desktop through a light veil instead of a black
+        # screen (user: the switch overlay must not go dark). The window is
+        # set directly - set_hud_only() would rewrite self._hud_only, which
+        # must keep the pipeline's state for exit_switch_mode().
+        try:
+            self.screen = pygame.display.set_mode((fw, fh), self._flags)
+            hwnd = pygame.display.get_wm_info()["window"]
+            ctypes.windll.user32.SetWindowPos(hwnd, 0, 0, 0, fw, fh, 0x0004)
+            self._set_topmost()
+            user32.SetLayeredWindowAttributes(hwnd, 0, SWITCH_ALPHA, LWA_ALPHA)
+        except Exception as exc:
+            print(f"Display: WARNING cannot set the switch overlay up: {exc}")
+        self.draw_overlay(0.0)
+
+    def exit_switch_mode(self) -> None:
+        """Drop the switch overlay - the first frame of the new pipeline is
+        on its way (the caller shows it right after)."""
+        if not self._switch_active:
+            return
+        self._switch_active = False
+        self._switch_bg = None
+        self._switch_dim = None
+        # The resize that was deferred while the overlay was up (the pipeline
+        # rebuilt underneath, the window size changed); apply it now, before
+        # the layered attributes are re-asserted. NOT while the menu is open:
+        # the menu keeps the layer expanded to the full screen
+        # (set_fullscreen_layer owns the size in that state) - shrinking it
+        # here is exactly the clipped-menu regression (user: menu cut off
+        # near the middle after a window-mode switch).
+        pending = self._switch_pending
+        self._switch_pending = None
+        if pending is not None and not self.menu.visible and \
+                (self.screen.get_width(), self.screen.get_height()) != pending:
+            self.resize(pending[0], pending[1])
+        else:
+            ret = self._switch_ret
+            # The layer was expanded to the full screen for the overlay; put
+            # it back on the size the pipeline expects when no explicit
+            # resize came in (resize also re-applies the layered attributes
+            # and the capture affinity). Still not while the menu is open -
+            # the same clipped-menu rule as above.
+            if not self.menu.visible and \
+                    (self.screen.get_width(), self.screen.get_height()) != ret:
+                self.resize(ret[0], ret[1])
+        # The layer is back to its regular appearance: transparent for the HUD
+        # mode, or an opaque fullscreen layer, whatever the pipeline wants.
+        self.set_hud_only(self._hud_only, force=True)
+        if not self._hud_only:
+            self.set_menu_opaque(self.menu.visible)
+        self._last_overlay = 0.0  # the next draw_overlay redraws immediately
+
+    def is_switch_active(self) -> bool:
+        """True while the mode-switch overlay (blur + spinner) is up."""
+        return self._switch_active
+
+    def _draw_switch(self) -> None:
+        """Blit the frozen blurred frame and the spinner (time-based)."""
+        w, h = self.screen.get_size()
+        if self._switch_dim is not None:
+            # The frozen blurred frame, darkened slightly. The window itself
+            # is translucent (SWITCH_ALPHA), so the live desktop also shows
+            # through it - and with a real frame there is no black at all.
+            self.screen.blit(self._switch_dim, (0, 0))
+        else:
+            # No frozen frame (WNDO mode - pixels never reach Python): fill
+            # with a light semi-opaque veil, NOT black - the live desktop
+            # keeps showing through (user: the switch overlay is too dark).
+            self.screen.fill((36, 34, 38))
+        cx, cy = w // 2, h // 2
+        r = 44  # spinner radius (in 4K pixels, scaled down via ui_scale)
+        r = int(r * self.ui_scale)
+        t = time.monotonic() - self._switch_t0
+        # 12 dots around a circle, all but the trailing ones dimmed: a
+        # simple rotating spinner, one full turn per ~1.2 seconds.
+        for i in range(12):
+            ang = i * (2 * math.pi / 12) + t * 1.6
+            dx = math.cos(ang) * r
+            dy = math.sin(ang) * r
+            # Brightness: the dot i ticks in 12 steps; the brightest is i=0
+            # at ang=0, fading towards the tail (i=11). The phase trick:
+            # brightness = 0.35 + 0.65 * cos(i * 2pi/12 + t*1.6) would light
+            # ALL dots; a cleaner fade is the arc approach below.
+            shade = max(0, min(255, int(255 * (i / 12))))
+            pygame.draw.circle(self.screen, (shade, shade, shade),
+                               (cx + int(dx), cy + int(dy)), max(4, r // 10))
+        # A bright leading dot on top.
+        ang = t * 1.6
+        pygame.draw.circle(self.screen, (255, 255, 255),
+                           (cx + int(math.cos(ang) * r),
+                            cy + int(math.sin(ang) * r)),
+                           max(5, r // 8))
+
+
     def refresh_colorkey(self) -> None:
         """Reapply LWA_COLORKEY on the pygame window (the HUD layer).
 
@@ -686,6 +839,13 @@ class Display:
             return
         self._last_overlay = now
         self._last_alert_count = alerts
+        if self._switch_active:
+            # The switch overlay replaces everything else: no menu, no HUD,
+            # no cursor - just the frozen frame and the spinner. The spinner
+            # animates, so the throttle must not skip the redraw.
+            self._draw_switch()
+            pygame.display.flip()
+            return
         self.screen.fill(CHROMA_KEY)
         self._draw_alerts()
         self.menu.set_stats(self._hud)
