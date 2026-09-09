@@ -81,12 +81,26 @@ def _skip(path: str) -> bool:
     # Dev-only files: the tests, the test runner and the release builder are
     # for the repository, not for the end user. The archive must contain
     # exactly what the program needs to run (user rule 2026-09-08).
-    # '/test/'-style paths catch the third-party 'tests' folders that ship
-    # inside site-packages (pygame/tests, comtypes/test, win32ctypes/tests) -
-    # they are library developer baggage, not program code.
+    # '/test/' and '/tests/'-style paths catch the third-party testing
+    # folders that ship inside site-packages (pygame/tests, comtypes/test,
+    # win32ctypes/tests, numpy/testing) - library developer baggage.
     if norm in DEV_ONLY or norm.startswith("tests/") or norm.startswith("test_"):
         return True
-    if "/test/" in norm or norm.startswith(SP + "pygame/tests/"):
+    if "/test/" in norm or "/tests/" in norm or "/testing/" in norm:
+        return True
+    # numpy's C test modules (_multiarray_tests.pyd etc.) ship next to the
+    # real modules inside numpy/_core - same rule, they are developer
+    # baggage, not program code.
+    if "_tests." in norm or norm.startswith(SP + "pygame/tests/"):
+        return True
+    # pygame demo/docs folders and numpy pytest config: not program code.
+    # NOTE: numpy/_pytesttester.py itself MUST stay - numpy/__init__.py
+    # imports it unconditionally (verified).
+    if norm.startswith(SP + "pygame/examples/") or norm.startswith(SP + "pygame/docs/"):
+        return True
+    if norm == SP + "numpy/conftest.py" or norm.startswith(SP + "numpy/ma/testutils"):
+        return True
+    if norm == SP + "numpy/_pytesttester.pyi":
         return True
     # .pyc/__pycache__ is dead weight (~13 MB in the zip): pythonw regenerates
     # them on the fly, a distribution does not need them.
