@@ -18,13 +18,28 @@ actually doing.*
 ## What you need
 
 - **Windows 11**
-- **An NVIDIA RTX card.** 50-series is the officially supported one. 20, 30 and
-  40-series work too — the kernels are there and NVIDIA's own check is what
-  blocks them; NeuralScreen works around it. Confirmed working on a 40-series.
-  **Speed warning:** on 20/30-series the neural pass is slow — single digits to
-  ~20 FPS at 1440p, not the 60+ of a 50-series. Lower the *Resolution the
-  network runs at* slider — the main speed lever.
+- **An NVIDIA RTX card.** What works, honestly:
+
+  | Cards | Status |
+  |---|---|
+  | **RTX 50** (Blackwell) | ✅ works - the officially supported generation |
+  | **RTX 40** (Ada) | ✅ works - the bundled runtime carries sm_89 kernels |
+  | **RTX 30** (Ampere) | ❌ not in this release - no sm_86 kernels. See *Trying RTX 30/20* below. |
+  | **RTX 20** (Turing) | ❌ cannot run the neural pass at all - below the minimum architecture (DLSS5-Feeder issue #73) |
+
 - **Nothing installed.** The release archive brings its own Python.
+
+### Trying RTX 30/20
+
+The runtime is compiled per GPU architecture. The bundled build covers
+RTX 40/50; the community **310.8.SF** builds add RTX 30 kernels (RTX 20
+cannot work - below the minimum architecture). To try: download
+`nvngx_dlssnr_310.8.SF-v2.zip` from https://github.com/RankFTW/rhi-repo/releases,
+replace `native\nvngx_dlssnr.dll` (back up first), run and check the menu:
+the GPU dot goes green only when feature 18 was actually created.
+
+**Speed warning:** on RTX 30 the pass is slow - single digits to ~20 FPS at 1440p. Lower the *Resolution the network runs at* slider.
+
 ## Install
 
 1. Download the archive from [Releases](https://github.com/perseval-BLR/DLSS5-NeuralScreen/releases)
@@ -88,13 +103,9 @@ all. One window has no such loop, so nothing has to hide.
 the window you want (a game in windowed/borderless mode, a browser, anything),
 press **Num5**, then start the recording. The overlay and the processed picture
 are now part of the screen capture. Press **Num5** again to go back to the
-whole screen.
-
-The desktop itself is not a window: pressing **Num5** while pointing at the
-wallpaper captures the last real window instead.
-
-Minimise the window and processing stops with it; restore it and the picture
-comes back.
+whole screen. The desktop itself is not a window: pressing **Num5** while
+pointing at the wallpaper captures the last real window instead. Minimise the
+window and processing stops with it; restore it and the picture comes back.
 
 ## The menu
 
@@ -140,12 +151,10 @@ both, on purpose.
 Recording has to be done from inside the program: OBS, ShadowPlay and NVIDIA
 App cannot see the overlay. That is deliberate — the program captures your
 screen in order to process it, so if its own output were visible to capture it
-would feed on itself.
-
-In **one-window mode** (Num5) the input is a single window instead of the
-desktop, so there is no self-capture loop: the overlay stops hiding from
-screen capture, and external recorders (OBS display capture, NVIDIA App)
-see the processed picture. Full-screen mode keeps hiding it.
+would feed on itself. In **one-window mode** (Num5) the input is a single
+window instead of the desktop, so there is no self-capture loop: the overlay
+stops hiding from screen capture, and external recorders (OBS display capture,
+NVIDIA App) see the processed picture. Full-screen mode keeps hiding it.
 
 ## If something is not working
 
@@ -173,28 +182,18 @@ second per frame; a press may feel lost. The picture is the priority.
 
 ## Known limitations
 
-- **True fullscreen games** cannot have the overlay drawn over them — a
-  Windows rule. Borderless or windowed only.
+- **True fullscreen games** cannot have the overlay drawn over them — a Windows rule. Borderless or windowed only.
 - **A second instance is not guarded** — close the first one first.
-- **The window list** shows every visible window; Num5 takes the one under
-  the cursor. **A second monitor** works but was not tested with a window
-  between them; the menu position in window mode starts bottom-right.
+- **The window list** shows every visible window; Num5 takes the one under the cursor. **A second monitor** works but was not tested with a window between them; the menu position in window mode starts bottom-right.
 - **HDR displays** are not supported: switch to SDR (Win+Alt+B).
-- **Laptops with hybrid graphics** (Optimus) are not supported - the
-  evaluation fails on the first frame. Force dGPU / MUX / dGPU monitor.
-- **Pipeline latency** is 40–60 ms — fine interactively, not competitively;
-  **processing resolution is capped at 2560×1440** (the network refuses 4K),
-  output is always your full native resolution.
-- **The bundled `nvngx_dlssnr.dll` is a community re-targeted build** of
-  NVIDIA's leaked pre-release 310.8.0 runtime (sm_89 + sm_120: RTX 40 and
-  RTX 50) — see License below.
+- **Pipeline latency** is 40–60 ms — fine interactively, not competitively; **processing resolution is capped at 2560×1440** (the network refuses 4K), output is always your full native resolution.
+- **The bundled `nvngx_dlssnr.dll` is a community re-targeted build** of NVIDIA's leaked pre-release 310.8.0 runtime (sm_89 + sm_120: RTX 40 and RTX 50) — see License below.
 
-## Under the hood
-
-How it works, what was measured and why: **[docs/TECHNICAL.md](docs/TECHNICAL.md)**. Русская версия: **[README.ru.md](README.ru.md)**.
+## Under the hood — how it works, what was measured and why: **[docs/TECHNICAL.md](docs/TECHNICAL.md)**. Русская версия: **[README.ru.md](README.ru.md)**.
 
 ## License
 
 The code here is MIT. NVIDIA's `nvngx_dlssnr.dll` is a community
 re-targeted build of NVIDIA's leaked pre-release 310.8.0 runtime (the
-original carries sm_120 kernels for RTX 50 only; this build adds sm_89 for RTX 40). Included as-is, unmodified by us, no guarantees; research-only.
+original carries sm_120 kernels for RTX 50 only; this build adds sm_89 for
+RTX 40). Included as-is, unmodified by us, no guarantees; research-only.
