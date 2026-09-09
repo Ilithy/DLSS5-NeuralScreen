@@ -8,6 +8,7 @@ __pycache__/
 # Build artefacts (native/build-host.bat, native/build-launcher.bat)
 *.obj
 native/nvngx.dll
+native/nvngx.dll.manifest
 native/launcher.res
 NeuralScreen.exe
 
