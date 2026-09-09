@@ -1470,6 +1470,11 @@ static bool PresentModeActive(const VideoState &v)
             Log("[present] output %ux%u does not match overlay %ux%u -- falling back to "
                 "sending pixels to the client", ow, oh, g_present_w, g_present_h);
         }
+        // A size change makes the overlay stale, not the pipeline: the client
+        // rebuilds on its own when the window moves/resizes, and a one-time
+        // warning is enough. The overlay must stay hidden rather than show a
+        // stale-sized picture (audit C++ M1).
+        g_present_shown = false;
         return false;
     }
     return true;
@@ -2420,6 +2425,11 @@ static void CloseGray()
     g_gray_mapped = false;
     if (g_gray_map) { UnmapViewOfFile(g_gray_map); g_gray_map = nullptr; }
     if (g_gray_file) { CloseHandle(g_gray_file); g_gray_file = nullptr; }
+    // The D3D12 resources created in OpenGray leak on every channel reopen
+    // otherwise (audit C++ L4). OpenGray always re-creates them, so a plain
+    // release is safe.
+    if (g_gray_uav) { g_gray_uav->Release(); g_gray_uav = nullptr; }
+    if (g_gray_readback) { g_gray_readback->Release(); g_gray_readback = nullptr; }
     g_gray_bytes = 0;
     g_gray_w = g_gray_h = 0;
 }
@@ -3778,6 +3788,13 @@ static void ReleaseVideoTextures(VideoState &v)
     // reissued or the next frame samples freed memory.
     g_scale4_src_bound = g_scale4_dst_bound = nullptr;
     g_scale4_src_bound2 = g_scale4_dst_bound2 = nullptr;
+    // Same for the matched residual pass: its descriptor set references the
+    // nr_in/nr_out/native/output textures. Without the reset, an RNSZ whose
+    // new allocations land at the just-freed addresses would make
+    // BindResidualDescriptors skip the rebuild (pointer equality) and
+    // dispatch against freed GPU memory (audit C++ H1).
+    g_res_native_bound = g_res_in_bound = nullptr;
+    g_res_out_bound = g_res_dst_bound = nullptr;
     if (v.nr_in != nullptr) { v.nr_in->Release(); v.nr_in = nullptr; }
     if (v.nr_out != nullptr) { v.nr_out->Release(); v.nr_out = nullptr; }
     v.nr_small = false;
