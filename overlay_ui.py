@@ -357,12 +357,15 @@ class OverlayMenu:
         inner_w = w - pad * 2
 
         items: list[Item] = []
-        # Header icons: help and settings. There is deliberately no close
-        # cross - it hid the menu while sitting next to "quit the program".
+        # Header icons: help, settings and the collapse button. The collapse
+        # used to be a footer button next to "quit the program" - the two
+        # looked equally harmless, even though one hides the menu and the
+        # other unloads the program. A real window has its collapse in the
+        # title bar, so it moved here: [help] [gear] [min].
         iw = self._u(ICON_W)
         igap = self._u(8)
         iy = self._u(TITLE_H) // 2 - iw // 2
-        order = ["help", "gear"] if self.page != "settings" else ["close"]
+        order = ["help", "gear", "min"] if self.page != "settings" else ["close"]
         # Laid out right to left: the right edge is the last icon.
         for idx, kind in enumerate(reversed(order)):
             ix = pad + inner_w - iw - idx * (iw + igap)
@@ -551,7 +554,7 @@ class OverlayMenu:
             row = [("screenshot", s["screenshot"], self.hotkeys.get("screenshot_menu", ""), False),
                    ("record", s["record_stop"] if self.state.get("recording")
                     else s["record"], self.hotkeys.get("record", ""), True),
-                   ("collapse", s["collapse"], self.hotkeys.get("settings", ""), False)]
+                   ("window", s["one_window"], self.hotkeys.get("window_mode", ""), False)]
             bgap = self._u(BTN_GAP)
             bw = (inner_w - bgap * (len(row) - 1)) // len(row)
             for idx, (key, label, hk, filled) in enumerate(row):
@@ -799,7 +802,7 @@ class OverlayMenu:
         return out
 
     def _icon_click(self, key: str) -> list[tuple]:
-        """The header: help, entering settings, returning from them."""
+        """The header: help, settings, collapse, returning from settings."""
         if key == "help":
             return [("button", "github")]
         if key == "gear":
@@ -807,6 +810,10 @@ class OverlayMenu:
             self.scroll = 0
             self.capturing = None
             return [("capture", None)]
+        if key == "min":
+            # The collapse button: hide the menu, exactly like the old
+            # footer "Collapse" did.
+            return [("button", "close")]
         if key == "close":
             self.page = "main"
             self.scroll = 0
@@ -815,16 +822,19 @@ class OverlayMenu:
         return []
 
     def _action_click(self, key: str) -> list[tuple]:
-        """The footer. "Collapse" hides the menu, "Exit" unloads the program -
-        which is why they are different actions with different captions rather
-        than a single cross."""
+        """The footer. "One window" points the capture at a window, "Exit"
+        unloads the program - which is why they are different actions with
+        different captions rather than a single cross."""
         if key == "back":
             self.page = "main"
             self.scroll = 0
             self.capturing = None
             return [("capture", None)]
-        if key == "collapse":
-            return [("button", "close")]
+        if key == "window":
+            # The one-window button: the same action as the Num5 hotkey -
+            # the window under the cursor wins, with the last focused
+            # window as the fallback.
+            return [("button", "window_mode")]
         if key == "screenshot":
             return [("button", "screenshot")]
         return [("button", key)]
@@ -1268,6 +1278,12 @@ class OverlayMenu:
                              (cx + d, cy + d), lw)
             pygame.draw.line(surface, _rgb(col), (cx + d, cy - d),
                              (cx - d, cy + d), lw)
+        elif item.key == "min":
+            # The collapse button: a short horizontal bar, like a window's
+            # minimise glyph.
+            half = max(5, self._u(7))
+            pygame.draw.line(surface, _rgb(col), (cx - half, cy),
+                             (cx + half, cy), lw)
         else:
             # Three sliders: a full-width line with a knob at its own place on
             # each. It reads smaller than a gear and draws without
