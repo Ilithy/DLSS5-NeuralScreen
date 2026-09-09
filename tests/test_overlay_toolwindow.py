@@ -80,6 +80,23 @@ def main() -> int:
             failures.append("set_menu_input(False) dropped WS_EX_TOOLWINDOW")
         if ex & WS_EX_APPWINDOW:
             failures.append("set_menu_input(False) added WS_EX_APPWINDOW")
+
+        # 4. enter/exit_switch_mode re-create the window via set_mode - the
+        #    only re-creation path that used to lose EVERY exstyle bit
+        #    (TOOLWINDOW/TRANSPARENT/NOACTIVATE/LAYERED), putting the
+        #    double taskbar thumbnail back and making the overlay eat
+        #    clicks (audit 10.09 HIGH: fullscreen->fullscreen Num5 with the
+        #    menu closed lost the styles until the next menu open).
+        disp.enter_switch_mode(None, w, h)
+        disp.exit_switch_mode()
+        ex = exstyle(disp.get_hwnd())
+        print(f"after enter+exit switch-mode exstyle: 0x{ex:08X}")
+        if not (ex & WS_EX_TOOLWINDOW):
+            failures.append("enter/exit_switch_mode dropped WS_EX_TOOLWINDOW")
+        if ex & WS_EX_APPWINDOW:
+            failures.append("enter/exit_switch_mode added WS_EX_APPWINDOW")
+        if not (ex & 0x00080000):  # WS_EX_LAYERED
+            failures.append("enter/exit_switch_mode dropped WS_EX_LAYERED")
     finally:
         disp.close()
 

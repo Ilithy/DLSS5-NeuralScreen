@@ -10,6 +10,7 @@ import hashlib
 import os
 import subprocess
 import zipfile
+from datetime import datetime, timezone
 from pathlib import Path
 
 # The script must work from any directory: every path is relative to git.
@@ -244,7 +245,7 @@ version_txt = (
     f"runtime: nvngx_dlssnr.dll sha256 {dll_sha}\n"
     f"kernel archs: {', '.join(sorted(SM_NAMES.get(a, f'sm_{a}') for a in archs))}\n"
     f"targets: {TARGET_ARCHS}\n"
-    f"built: {subprocess.check_output(['git', 'log', '-1', '--format=%cd', '--date=iso'], text=True).strip()}\n"
+    f"built: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}\n"
 )
 
 with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as z:

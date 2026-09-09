@@ -453,7 +453,11 @@ static bool InitDirectNr(const wchar_t *data_path)
     g_nr_create = reinterpret_cast<PFN_NR_Create>(GetProcAddress(g_nr_module, "NVSDK_NGX_D3D12_CreateFeature"));
     g_nr_evaluate = reinterpret_cast<PFN_NR_Evaluate>(GetProcAddress(g_nr_module, "NVSDK_NGX_D3D12_EvaluateFeature"));
     g_nr_release = reinterpret_cast<PFN_NR_Release>(GetProcAddress(g_nr_module, "NVSDK_NGX_D3D12_ReleaseFeature"));
-    if (!g_nr_init_ext || !g_nr_create || !g_nr_evaluate || !g_nr_release) return false;
+    if (!g_nr_init_ext || !g_nr_create || !g_nr_evaluate || !g_nr_release)
+    { Log("[pure] missing direct exports in nvngx_dlssnr.dll: Init_Ext=%s Create=%s Evaluate=%s Release=%s (GetLastError=%lu)",
+         g_nr_init_ext ? "ok" : "MISSING", g_nr_create ? "ok" : "MISSING",
+         g_nr_evaluate ? "ok" : "MISSING", g_nr_release ? "ok" : "MISSING",
+         GetLastError()); return false; }
     const auto r = g_nr_init_ext(0x1000000ULL, data_path, h.dev, NVSDK_NGX_Version_API, h.params);
     Log("[pure] direct DLSSNR Init_Ext -> 0x%08X (%s)", r, NgxResultName(r));
     return NVSDK_NGX_SUCCEED(r);

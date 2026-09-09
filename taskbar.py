@@ -43,6 +43,7 @@ WA_ACTIVE = 0x1
 WM_SYSCOMMAND = 0x0112
 SC_MINIMIZE = 0xF020
 SC_RESTORE = 0xF120
+SC_CLOSE = 0xF060
 WM_QUIT = 0x0012
 WM_SETICON = 0x0080
 ICON_SMALL = 0
@@ -120,30 +121,43 @@ class TaskbarWindow:
             # (user: the button stopped responding on the second click).
             self._emit("settings")
             return 0
+        if msg == WM_SYSCOMMAND and (wparam & 0xFFF0) == SC_CLOSE:
+            # 'Close window' in the thumbnail's right-click menu destroys
+            # the 1x1 window and the taskbar button is gone for the session.
+            # The user must quit through the tray (Exit) - ignore SC_CLOSE
+            # (audit 10.09 F3).
+            return 0
         if msg == WM_QUIT:
             user32.PostQuitMessage(0)
             return 0
         return user32.DefWindowProcW(hwnd, msg, wparam, lparam)
 
     def _cursor_over_taskbar(self) -> bool:
-        """Whether the cursor is inside the taskbar rectangle.
+        """Whether the cursor is inside a taskbar rectangle.
 
         The only reliable way to tell a taskbar-button click (WA_ACTIVE with
         the cursor over the taskbar) from a system activation (WA_ACTIVE with
         the cursor anywhere else): the two are indistinguishable by wparam.
+        The primary taskbar is Shell_TrayWnd; on Windows 11 a secondary
+        monitor's taskbar is a separate top-level window, Shell_SecondaryTrayWnd
+        - both are checked (audit 10.09 F1: multi-monitor users could not use
+        the button on the second screen).
         """
         try:
-            tb = user32.FindWindowW("Shell_TrayWnd", None)
-            if not tb:
-                return False
-            rect = wt.RECT()
-            if not user32.GetWindowRect(tb, ctypes.byref(rect)):
-                return False
             pt = wt.POINT()
             if not user32.GetCursorPos(ctypes.byref(pt)):
                 return False
-            return (rect.left <= pt.x < rect.right
-                    and rect.top <= pt.y < rect.bottom)
+            for cls in ("Shell_TrayWnd", "Shell_SecondaryTrayWnd"):
+                tb = user32.FindWindowW(cls, None)
+                if not tb:
+                    continue
+                rect = wt.RECT()
+                if not user32.GetWindowRect(tb, ctypes.byref(rect)):
+                    continue
+                if (rect.left <= pt.x < rect.right
+                        and rect.top <= pt.y < rect.bottom):
+                    return True
+            return False
         except Exception:
             return False
 
