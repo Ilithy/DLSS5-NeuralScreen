@@ -48,6 +48,7 @@ ABOUT = {
     "test_hotkey_once.py": "one press of a hotkey fires exactly one command",
     "test_hotkey_rebind.py": "hotkeys can be reassigned from the config",
     "test_hotkey_bindings.py": "parsing, aliases and defaults survive binding changes",
+    "test_header_footer.py": "the header collapse icon and the one-window footer button",
     "test_i18n.py": "every language has the same keys, none empty",
     "test_menu_scroll.py": "the menu scrolls and the wheel lands where it should",
     "test_motion_small.py": "the downscaled motion field is upscaled on the GPU",
