@@ -660,7 +660,17 @@ class Display:
         every raise of its overlay the HUD has to be brought back up, otherwise
         it ends up under the frame and becomes invisible.
         """
-        self._set_topmost()
+        # SWP_NOACTIVATE: the 30-frame re-assert must not steal the keyboard
+        # focus back from the user (audit 10.09 F2: with the menu open the
+        # overlay has WS_EX_NOACTIVATE removed, and a SetWindowPos that
+        # activates re-steals focus <=0.5 s after Alt+Tab / minimizing
+        # another window).
+        try:
+            hwnd = pygame.display.get_wm_info()["window"]
+            ctypes.windll.user32.SetWindowPos(hwnd, -1, 0, 0, 0, 0,
+                                              0x0001 | 0x0002 | 0x0010)
+        except Exception:
+            pass
 
     def enter_switch_mode(self, last_frame: "np.ndarray | None" = None,
                           full_w: int = 0, full_h: int = 0) -> None:
@@ -715,6 +725,14 @@ class Display:
             ctypes.windll.user32.SetWindowPos(hwnd, 0, 0, 0, fw, fh, 0x0004)
             self._set_topmost()
             user32.SetLayeredWindowAttributes(hwnd, 0, SWITCH_ALPHA, LWA_ALPHA)
+            # set_mode re-created the window: every exstyle bit is gone
+            # (TOOLWINDOW/TRANSPARENT/NOACTIVATE/LAYERED). Re-assert them or
+            # the overlay gets a taskbar thumbnail again and eats clicks
+            # during the switch (audit 10.09: enter/exit_switch_mode was the
+            # only re-creation path that never restored the styles - a
+            # fullscreen->fullscreen Num5 with the menu closed lost them
+            # until the next menu open or pipeline resize).
+            self.set_menu_input(self._menu_input)
         except Exception as exc:
             print(f"Display: WARNING cannot set the switch overlay up: {exc}")
         self.draw_overlay(0.0)

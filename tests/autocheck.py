@@ -110,7 +110,21 @@ def zip_integrity():
                 leak.append(f"{key}={cfg.get(key)!r} != HEAD {head_cfg[key]!r}")
         if leak:
             return False, "a personal config in the archive: " + ", ".join(leak)
-    return True, f"{zpath.stat().st_size} bytes, all files, the hook, a default config"
+        # VERSION.txt must tell the truth (audit 10.09 H1): the commit is
+        # HEAD, the runtime sha matches the DLL inside, and the version
+        # matches the file name. A manifest that lies is worse than none.
+        vt = z.read("VERSION.txt").decode("utf-8", "replace")
+        head = subprocess.check_output(["git", "rev-parse", "HEAD"],
+                                       cwd=ROOT, text=True).strip()
+        if f"commit: {head}" not in vt:
+            return False, "VERSION.txt commit != HEAD - rebuilt from a dirty tree?"
+        zip_dll = z.read("native/nvngx_dlssnr.dll")
+        zsha = hashlib.sha256(zip_dll).hexdigest()
+        if f"sha256 {zsha}" not in vt:
+            return False, "VERSION.txt runtime sha != the DLL inside the archive"
+        if "NeuralScreen 1.5.1" not in vt:
+            return False, "VERSION.txt version does not match v1.5.1"
+    return True, f"{zpath.stat().st_size} bytes, all files, the hook, a default config, a truthful manifest"
 
 
 def gpuinfo_works():

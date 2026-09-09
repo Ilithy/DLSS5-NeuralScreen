@@ -112,6 +112,44 @@ def main() -> int:
             failures.append("SC_MINIMIZE and SC_RESTORE should each emit a "
                             "settings toggle, got "
                             f"{got.count('settings')} settings command(s)")
+
+        # 4. SC_CLOSE ('Close window' in the right-click menu) must be
+        #    ignored: destroying the 1x1 window kills the taskbar button for
+        #    the session (audit 10.09 F3).
+        user32.SendMessageW(hwnd, taskbar.WM_SYSCOMMAND, taskbar.SC_CLOSE, 0)
+        time.sleep(0.2)
+        if not user32.IsWindow(hwnd):
+            failures.append("SC_CLOSE must not destroy the taskbar window "
+                            "(the button would vanish for the session)")
+
+        # 5. The cursor gate must accept BOTH taskbars: the primary
+        #    (Shell_TrayWnd) and a secondary monitor's one
+        #    (Shell_SecondaryTrayWnd) - multi-monitor users could not use
+        #    the button on the second screen (audit 10.09 F1).
+        for name, cls in (("primary", "Shell_TrayWnd"),
+                          ("secondary", "Shell_SecondaryTrayWnd")):
+            tb = user32.FindWindowW(cls, None)
+            if not tb:
+                print(f"{name} taskbar not present - skipped")
+                continue
+            r = wt.RECT()
+            user32.GetWindowRect(tb, ctypes.byref(r))
+            cx, cy = (r.left + r.right) // 2, (r.top + r.bottom) // 2
+            user32.SetCursorPos(cx, cy)
+            time.sleep(0.1)
+            if not win._cursor_over_taskbar():
+                failures.append(f"cursor over the {name} taskbar must count "
+                                f"as a taskbar click")
+        # Restore the cursor somewhere neutral (the previous position is
+        # unknown; move it to the centre of the screen).
+        user32.SetCursorPos(user32.GetSystemMetrics(0) // 2,
+                            user32.GetSystemMetrics(1) // 2)
+        time.sleep(0.6)  # past the dedup before any further sends
+        got = []
+        while not commands.empty():
+            got.append(commands.get_nowait())
+        print(f"commands after SC_CLOSE + cursor checks: {got} (dedup-affected "
+              f"cursor moves emit up to one settings command)")
     win.stop()
     time.sleep(0.2)
     if win.hwnd is not None:
