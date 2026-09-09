@@ -464,8 +464,24 @@ static bool BeginCommands()
         if (WaitForSingleObject(h.fence_event, 2000) != WAIT_OBJECT_0)
         { Log("[host] GPU did not retire allocator slot %d", slot); return false; }
     }
-    if (FAILED(h.alloc[slot]->Reset())) return false;
-    return SUCCEEDED(h.list->Reset(h.alloc[slot], nullptr));
+    if (FAILED(h.alloc[slot]->Reset()))
+    {
+        // The device is likely removed: Reset() returns the removal HRESULT
+        // (DXGI_ERROR_DEVICE_REMOVED) instead of setting GetLastError.
+        const HRESULT ahr = h.alloc[slot]->Reset();
+        const HRESULT hres = h.dev ? h.dev->GetDeviceRemovedReason() : E_FAIL;
+        Log("[host] allocator Reset failed 0x%08X, device removed reason 0x%08X",
+            static_cast<unsigned>(ahr), static_cast<unsigned>(hres));
+        return false;
+    }
+    if (FAILED(h.list->Reset(h.alloc[slot], nullptr)))
+    {
+        const HRESULT hres = h.dev ? h.dev->GetDeviceRemovedReason() : E_FAIL;
+        Log("[host] command list Reset failed, device removed reason 0x%08X",
+            static_cast<unsigned>(hres));
+        return false;
+    }
+    return true;
 }
 
 static UINT64 EndCommands()
