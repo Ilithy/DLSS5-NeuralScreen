@@ -187,8 +187,7 @@ STRINGS = {
         "lang_en": "English",
         "lang_fr": "Français",
     },
-
-        "fr": {
+    "fr": {
         "theme": "Thème",
         "monitor": "Moniteur",
         "autostart": "Démarrer avec Windows",
