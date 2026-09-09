@@ -541,7 +541,15 @@ class Display:
         the window when the menu closes. The capture affinity is re-applied
         because the window is recreated (user: menu lost outside a small
         window).
+
+        While the mode-switch overlay is up this is a NO-OP: the layer was
+        already expanded to the full screen by enter_switch_mode, and the
+        layering attributes (LWA_COLORKEY/ALPHA) belong to the veil until
+        exit_switch_mode re-applies the pipeline's ones - tearing them down
+        mid-spinner turns the translucent veil opaque (audit M1).
         """
+        if self._switch_active:
+            return
         try:
             # set_mode returns a NEW surface - it must become self.screen,
             # otherwise main keeps drawing the menu on the old (window-sized)
@@ -715,12 +723,18 @@ class Display:
         # (set_fullscreen_layer owns the size in that state) - shrinking it
         # here is exactly the clipped-menu regression (user: menu cut off
         # near the middle after a window-mode switch).
+        #
+        # A pending resize WINS over the restore-to-_switch_ret: on a monitor
+        # switch the pending size IS the new monitor's resolution (the overlay
+        # was expanded to it by enter_switch_mode) - falling through to the
+        # else would shrink the layer back to the OLD monitor size and leave
+        # stale geometry for the whole session (audit C1).
         pending = self._switch_pending
         self._switch_pending = None
         if pending is not None and not self.menu.visible and \
                 (self.screen.get_width(), self.screen.get_height()) != pending:
             self.resize(pending[0], pending[1])
-        else:
+        elif pending is None:
             ret = self._switch_ret
             # The layer was expanded to the full screen for the overlay; put
             # it back on the size the pipeline expects when no explicit
@@ -758,17 +772,16 @@ class Display:
         r = 44  # spinner radius (in 4K pixels, scaled down via ui_scale)
         r = int(r * self.ui_scale)
         t = time.monotonic() - self._switch_t0
-        # 12 dots around a circle, all but the trailing ones dimmed: a
-        # simple rotating spinner, one full turn per ~1.2 seconds.
+        # 12 dots around a circle, a comet: the leading dot (i=0, same angle
+        # as the bright head below) is the brightest, the trail fades out
+        # towards i=11. One full turn per ~1.2 seconds.
         for i in range(12):
             ang = i * (2 * math.pi / 12) + t * 1.6
             dx = math.cos(ang) * r
             dy = math.sin(ang) * r
-            # Brightness: the dot i ticks in 12 steps; the brightest is i=0
-            # at ang=0, fading towards the tail (i=11). The phase trick:
-            # brightness = 0.35 + 0.65 * cos(i * 2pi/12 + t*1.6) would light
-            # ALL dots; a cleaner fade is the arc approach below.
-            shade = max(0, min(255, int(255 * (i / 12))))
+            # Brightness falls off with the distance BEHIND the head: i=0 at
+            # the head's angle is full, i=11 (the tail) is dark.
+            shade = max(0, min(255, int(255 * (1 - i / 12))))
             pygame.draw.circle(self.screen, (shade, shade, shade),
                                (cx + int(dx), cy + int(dy)), max(4, r // 10))
         # A bright leading dot on top.

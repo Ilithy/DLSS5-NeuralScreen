@@ -2890,6 +2890,10 @@ def main() -> int:
                     tray._set_state(nr=False)
                     consecutive_restarts = 0
                     work_frame = None
+                    # No frame will ever arrive - the switch overlay must not
+                    # hang over the desktop forever (audit M2: the veil is
+                    # removed only on a received frame).
+                    display.exit_switch_mode()
                     continue
                 print(f"[main] worker silent/dead on frame {frame_index} ({exc}) - restarting "
                       f"({consecutive_restarts}/{MAX_CONSECUTIVE_RESTARTS})")
@@ -2965,6 +2969,12 @@ def main() -> int:
                     # switch overlay must come down or the menu stays hidden
                     # behind the veil forever (user: clipped/blank after Num5).
                     display.exit_switch_mode()
+                    # reveal() is THE only way to show the window while
+                    # _reveal_pending is set (audit H1): this branch is hit on
+                    # every frame when the WNDO window is unavailable and DDA/
+                    # WGCW works (fallback config) - without the call the HUD
+                    # and the menu stay invisible forever in that setup.
+                    display.reveal()
                     display.draw_overlay()
                 else:
                     display.exit_switch_mode()  # the next frame replaces the overlay
