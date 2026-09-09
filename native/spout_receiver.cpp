@@ -25,9 +25,11 @@ int main()
 
     spoutDX receiver;
     if (!receiver.OpenDirectX11(dev)) { printf("OpenDirectX11 failed\n"); return 1; }
-    receiver.SetReceiverName("NeuralScreenTest");
+    // No fixed name: connect to the ACTIVE sender (NeuralScreen when the
+    // worker runs, NeuralScreenTest for the standalone test sender).
+    receiver.SetReceiverName(nullptr);
 
-    printf("receiver waiting for NeuralScreenTest...\n");
+    printf("receiver waiting for the active sender...\n");
     bool got = false;
     bool ever_connected = false;
     ID3D11Texture2D *rx_tex = nullptr;
@@ -98,9 +100,24 @@ int main()
                         const BYTE *src = (const BYTE *)map.pData;
                         size_t idx = ((size_t)rh / 2 * map.RowPitch) + (rw / 2) * 4;
                         BYTE pr = src[idx + 2], pg = src[idx + 1], pb = src[idx];
-                        printf("received %ux%u, centre RGB(%u,%u,%u) expected (%u,%u,%u)\n",
-                               rw, rh, pr, pg, pb, R, G, B);
-                        got = (pr == R && pg == G && pb == B);
+                        const char *name = receiver.GetSenderName();
+                        const bool is_test = name && strstr(name, "NeuralScreenTest") != nullptr;
+                        if (is_test)
+                        {
+                            printf("received %ux%u, centre RGB(%u,%u,%u) expected (%u,%u,%u)\n",
+                                   rw, rh, pr, pg, pb, R, G, B);
+                            got = (pr == R && pg == G && pb == B);
+                        }
+                        else
+                        {
+                            // Live sender (the worker): any non-black frame
+                            // proves the transport. The desktop is dark, so
+                            // "not black" means the pixels really moved.
+                            const bool alive = (pr + pg + pb) > 0;
+                            printf("received %ux%u from %s, centre RGB(%u,%u,%u) alive=%d\n",
+                                   rw, rh, name ? name : "?", pr, pg, pb, (int)alive);
+                            got = alive;
+                        }
                         ctx->Unmap(staging, 0);
                     }
                     staging->Release();

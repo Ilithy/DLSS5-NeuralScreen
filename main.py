@@ -494,7 +494,7 @@ def _drain_stderr(worker, logs: list[str], stop: threading.Event) -> None:
             # there is no telling what was actually created. [present] is
             # let through too: the overlay window lifecycle (created, hidden,
             # revealed, resize) is part of the startup/shutdown diagnostics.
-            if "[present]" in line or (
+            if "[present]" in line or "[spout]" in line or (
                     os.environ.get("NS_PHASE") == "1" and (
                         "[phase]" in line or "[pure]" in line or "[host]" in line)):
                 print(line)
