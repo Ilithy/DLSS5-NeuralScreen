@@ -56,8 +56,7 @@ def zip_integrity():
         "docs/TECHNICAL.md", "docs/TECHNICAL.ru.md",
         "README.md", "README.ru.md", "NeuralScreen.vbs", "NeuralScreen.bat",
         "native/nvngx.dll", "native/nvngx_dlssnr.dll",
-        "runtime/pythonw.exe", "docs/menu-light.png", "docs/menu-dark.png",
-        "docs/menu-settings.png",
+        "runtime/pythonw.exe",
     ]
     with zipfile.ZipFile(zpath) as z:
         names = set(z.namelist())

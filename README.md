@@ -6,8 +6,8 @@ same neural network that DLSS 5 games use, and comes back sharper.
 
 <table>
 <tr>
-<td><img src="docs/menu-light.png" alt="Menu, light theme" width="420"></td>
-<td><img src="docs/menu-dark.png" alt="Menu, dark theme" width="420"></td>
+<td><img src="docs/screenshot-main-light.png" alt="Menu, light theme" width="420"></td>
+<td><img src="docs/screenshot-main-dark.png" alt="Menu, dark theme" width="420"></td>
 </tr>
 </table>
 
@@ -38,6 +38,10 @@ cannot work - below the minimum architecture). To try: download
 `nvngx_dlssnr_310.8.SF-v2.zip` from https://github.com/RankFTW/rhi-repo/releases,
 replace `native\nvngx_dlssnr.dll` (back up first), run and check the menu:
 the GPU dot goes green only when feature 18 was actually created.
+
+**If you try it on an RTX 30 card, please report back** - open an issue
+with your card model and whether the dot went green. Every data point
+helps us keep the support table honest.
 
 **Speed warning:** on RTX 30 the pass is slow - single digits to ~20 FPS at 1440p. Lower the *Resolution the network runs at* slider.
 
@@ -111,10 +115,6 @@ window and processing stops with it; restore it and the picture comes back.
 ## The menu
 
 <table>
-<tr>
-<td><img src="docs/screenshot-main-light.png" alt="Main page, light theme" width="380"></td>
-<td><img src="docs/screenshot-main-dark.png" alt="Main page, dark theme" width="380"></td>
-</tr>
 <tr>
 <td><img src="docs/screenshot-windows.png" alt="Window list" width="380"></td>
 <td><img src="docs/screenshot-settings.png" alt="Settings page" width="380"></td>

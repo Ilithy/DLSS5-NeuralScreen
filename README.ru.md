@@ -6,8 +6,8 @@
 
 <table>
 <tr>
-<td><img src="docs/menu-light.png" alt="Меню, светлая тема" width="420"></td>
-<td><img src="docs/menu-dark.png" alt="Меню, тёмная тема" width="420"></td>
+<td><img src="docs/screenshot-main-light.png" alt="Меню, светлая тема" width="420"></td>
+<td><img src="docs/screenshot-main-dark.png" alt="Меню, тёмная тема" width="420"></td>
 </tr>
 </table>
 
@@ -38,6 +38,10 @@ RTX 30 (RTX 20 не может работать - ниже минимально�
 https://github.com/RankFTW/rhi-repo/releases, замените
 `native\nvngx_dlssnr.dll` (сначала бэкап), запустите и посмотрите в меню:
 точка у видеокарты зелёная только когда feature 18 реально создался.
+
+**Если попробуете на RTX 30 - пожалуйста, отпишитесь** - откройте issue
+с моделью карты и тем, загорелась ли точка. Каждое подтверждение
+помогает нам держать таблицу поддержки честной.
 
 **Скорость:** на RTX 30 проход медленный - единицы или до ~20 FPS в 1440p. Снизьте ползунок «Разрешение работы сети».
 
@@ -112,10 +116,6 @@ https://github.com/RankFTW/rhi-repo/releases, замените
 ## Меню
 
 <table>
-<tr>
-<td><img src="docs/screenshot-main-light.png" alt="Главная, светлая тема" width="380"></td>
-<td><img src="docs/screenshot-main-dark.png" alt="Главная, тёмная тема" width="380"></td>
-</tr>
 <tr>
 <td><img src="docs/screenshot-windows.png" alt="Список окон" width="380"></td>
 <td><img src="docs/screenshot-settings.png" alt="Страница настроек" width="380"></td>
