@@ -560,8 +560,8 @@ class OverlayMenu:
                                else f"{split_val:.2f}"))
 
             section(s["sec_view"])
-            segmented("lang", s["language"], self.lang, ["en", "ru"],
-                      ["EN", "RU"])
+            segmented("lang", s["language"], self.lang, ["en", "ru", "fr"],
+                      ["EN", "RU", "FR"])
             segmented("theme", s["theme"], self.state.get("theme", "light"),
                       ["light", "dark"], [s["theme_light"], s["theme_dark"]])
             # The window list moved to its own page: the drop-down was
