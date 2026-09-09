@@ -186,6 +186,8 @@ class OverlayMenu:
             "monitor": "0",
             "monitors": [],
             "autostart": False,
+            "windows": [],
+            "window_current": "",
             # The header shows the version; the channel label lives in the
             # settings page (user rule 2026-09-08).
             "version": "",
@@ -227,6 +229,9 @@ class OverlayMenu:
         # Which list is currently expanded (profile / language / theme).
         # Cycling with arrows is awkward once there are more than two options.
         self.open_choice: str | None = None
+        # The window under the cursor on the windows page: the hwnd whose
+        # outline is highlighted on the real screen (None = nothing).
+        self.hover_window: int | None = None
         # Menu page: the main window or the settings behind the gear.
         self.page = "main"
         # The command we are currently waiting for a keypress for (or None).
@@ -355,6 +360,7 @@ class OverlayMenu:
         ctrl_h = self._u(CTRL_H)
         gap = self._u(ROW_GAP)
         inner_w = w - pad * 2
+        act_h = self._u(ACTION_H)
 
         items: list[Item] = []
         # Header icons: help, settings and the collapse button. The collapse
@@ -440,7 +446,31 @@ class OverlayMenu:
                               extra={"label": label}))
             cy += ctrl_h + gap
 
-        if self.page == "settings":
+        # The windows page: the full list of capturable windows, one row per
+        # window. Hovering a row highlights the real window's outline on the
+        # screen (main draws the frame); clicking switches the capture.
+        if self.page == "windows":
+            section(s["sec_windows"])
+            wins = self.state.get("windows") or []
+            if not wins:
+                items.append(Item("button", "no_windows",
+                                  pygame.Rect(pad, cy, inner_w, act_h),
+                                  extra={"label": s.get("win_none", "No windows"),
+                                         "filled": False}))
+                cy += act_h + pad
+            else:
+                row_h = self._u(CTRL_H) + self._u(8)
+                for idx, wname in enumerate(wins):
+                    items.append(Item("option", "window",
+                                      pygame.Rect(pad, cy, inner_w, row_h),
+                                      payload=wname,
+                                      extra={"label": wname,
+                                             "selected": wname == str(
+                                                 self.state.get("window_current", ""))}))
+                    cy += row_h + self._u(4)
+            cy += gap
+
+        elif self.page == "settings":
             section(s["sec_capture"])
             monitors = self.state.get("monitors") or []
             if monitors:
@@ -532,10 +562,15 @@ class OverlayMenu:
                       ["EN", "RU"])
             segmented("theme", s["theme"], self.state.get("theme", "light"),
                       ["light", "dark"], [s["theme_light"], s["theme_dark"]])
-            windows = self.state.get("windows") or []
-            if windows:
-                choice("window", s.get("window", "Window"),
-                       str(self.state.get("window_current", "")), windows)
+            # The window list moved to its own page: the drop-down was
+            # cramped and gave no feedback about what each entry actually
+            # is. The button opens the page where hovering a row highlights
+            # the real window's outline on the screen.
+            items.append(Item("button", "windows",
+                              pygame.Rect(pad, cy, inner_w, act_h),
+                              extra={"label": s["windows_btn"],
+                                     "filled": False}))
+            cy += act_h + pad
 
         # The footer: actions with the hotkey printed underneath. "Collapse"
         # and "Exit" used to look equally harmless, even though one hides the
@@ -544,7 +579,7 @@ class OverlayMenu:
         self._rule_rel = pygame.Rect(pad, cy, inner_w, 1)
         cy += self._u(14)
         act_h = self._u(ACTION_H)
-        if self.page == "settings":
+        if self.page in ("settings", "windows"):
             items.append(Item("action", "back",
                               pygame.Rect(pad, cy, inner_w, act_h),
                               extra={"label": s["back"],
@@ -684,6 +719,17 @@ class OverlayMenu:
             return out
         if event.type == pygame.MOUSEMOTION:
             self._mouse = event.pos
+            # The windows page: hovering a row highlights the real window's
+            # outline on the screen. The hwnd is the hex prefix of the row.
+            self.hover_window = None
+            if self.page == "windows":
+                for it in self.items:
+                    if it.kind == "option" and it.rect.collidepoint(event.pos):
+                        try:
+                            self.hover_window = int(str(it.payload).split(":")[0], 16)
+                        except (ValueError, IndexError):
+                            self.hover_window = None
+                        break
             if self._grip.collidepoint(event.pos):
                 self.hover = "grip"
             elif self._edge.collidepoint(event.pos):
@@ -757,7 +803,7 @@ class OverlayMenu:
             elif item.kind == "toggle":
                 out.append(("nr",) if item.key == "nr" else ("toggle", item.key))
             elif item.kind == "button":
-                out.append(("button", item.key))
+                out.extend(self._button_click(item.key))
             elif item.kind == "option":
                 out.extend(self._pick(item.key, str(item.payload)))
                 self.open_choice = None
@@ -829,6 +875,7 @@ class OverlayMenu:
             self.page = "main"
             self.scroll = 0
             self.capturing = None
+            self.hover_window = None
             return [("capture", None)]
         if key == "window":
             # The one-window button: the same action as the Num5 hotkey -
@@ -837,6 +884,15 @@ class OverlayMenu:
             return [("button", "window_mode")]
         if key == "screenshot":
             return [("button", "screenshot")]
+        return [("button", key)]
+
+    def _button_click(self, key: str) -> list[tuple]:
+        """A plain button. The windows button opens the window list page."""
+        if key == "windows":
+            self.page = "windows"
+            self.scroll = 0
+            self.capturing = None
+            return [("capture", None)]
         return [("button", key)]
 
     def _pick(self, key: str, value: str) -> list[tuple]:
@@ -1011,7 +1067,10 @@ class OverlayMenu:
              "hotkey": self._draw_hotkey,
              # The header icons sit above the scroll area - we draw them after
              # the clip is lifted, otherwise they get cut off.
-             "icon": lambda *_: None}[item.kind](surface, item, s)
+             "icon": lambda *_: None,
+             # The windows page rows are drawn by _draw_options (they are
+             # option items, like the entries of an expanded list).
+             "option": lambda *_: None}[item.kind](surface, item, s)
         self._draw_options(surface)
         surface.set_clip(prev_clip)
         for item in self.items:
@@ -1179,8 +1238,15 @@ class OverlayMenu:
         item.extra["strip"] = strip
 
     def _draw_options(self, surface) -> None:
-        """The entries of the expanded list - above the rest of the content."""
-        for opt in getattr(self, "options", []):
+        """The entries of the expanded list - above the rest of the content.
+
+        The windows page rows are option items too, but they live in
+        self.items (they are the page's content, not a pop-up list) - draw
+        both sets.
+        """
+        rows = list(getattr(self, "options", []))
+        rows += [i for i in self.items if i.kind == "option"]
+        for opt in rows:
             selected = opt.extra.get("selected")
             pygame.draw.rect(surface,
                              _rgb(self.c["accent"] if selected else self.c["bg"]),

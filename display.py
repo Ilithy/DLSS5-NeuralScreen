@@ -869,8 +869,37 @@ class Display:
         self._draw_alerts()
         self.menu.set_stats(self._hud)
         self.menu.draw(self.screen)
+        self._draw_window_highlight()
         self._sync_cursor()
         pygame.display.flip()
+
+    def _draw_window_highlight(self) -> None:
+        """The amber outline around the window hovered in the windows page.
+
+        The menu reports the hwnd under the cursor (menu.hover_window);
+        the frame is drawn in the overlay's own coordinates, so it sits on
+        top of everything, exactly like the menu itself. The outline is
+        amber (#FFBF00, the brand accent), 3 px, with a 1 px dark inner
+        line so it reads on both light and dark windows.
+        """
+        hwnd = getattr(self.menu, "hover_window", None)
+        if not hwnd:
+            return
+        try:
+            rect = wintypes.RECT()
+            if not user32.GetWindowRect(ctypes.c_void_p(hwnd), ctypes.byref(rect)):
+                return
+            if rect.right <= rect.left or rect.bottom <= rect.top:
+                return
+            r = pygame.Rect(rect.left, rect.top,
+                            rect.right - rect.left, rect.bottom - rect.top)
+            lw = 3
+            pygame.draw.rect(self.screen, (0x0D, 0x11, 0x17), r, lw + 2,
+                             border_radius=4)
+            pygame.draw.rect(self.screen, (0xFF, 0xBF, 0x00), r, lw,
+                             border_radius=4)
+        except Exception:
+            pass
 
     def set_hud(self, data: dict) -> None:
         """Update HUD data: fps, status, resolution, params, frames."""
