@@ -98,8 +98,12 @@
 
 <table>
 <tr>
-<td><img src="docs/menu-light.png" alt="Основная страница" width="380"></td>
-<td><img src="docs/menu-settings.png" alt="Страница настроек" width="380"></td>
+<td><img src="docs/screenshot-main-light.png" alt="Главная, светлая тема" width="380"></td>
+<td><img src="docs/screenshot-main-dark.png" alt="Главная, тёмная тема" width="380"></td>
+</tr>
+<tr>
+<td><img src="docs/screenshot-windows.png" alt="Список окон" width="380"></td>
+<td><img src="docs/screenshot-settings.png" alt="Страница настроек" width="380"></td>
 </tr>
 </table>
 
@@ -182,13 +186,15 @@ Windows не рисует ничего — это правило системы.
 - **Задержка конвейера 40–60 мс** — интерактивно нормально, соревновательно
   нет; **разрешение обработки ограничено 2560×1440** (сеть отказывается
   работать в 4K), вывод всегда в вашем родном разрешении.
-
+- **Встроенный `nvngx_dlssnr.dll` — community-пересборка** утёкшего
+  pre-release рантайма NVIDIA 310.8.0 (ядра sm_89 + sm_120: RTX 40 и RTX 50)
+  — см. Лицензию ниже.
 ## Как это устроено
-Как работает, что замерено и почему: **[docs/TECHNICAL.ru.md](docs/TECHNICAL.ru.md)**.
-English version: **[README.md](README.md)**.
+Как работает, что замерено и почему: **[docs/TECHNICAL.ru.md](docs/TECHNICAL.ru.md)**. English version: **[README.md](README.md)**.
 
 ## Лицензия
 
-Код здесь под MIT. `nvngx_dlssnr.dll` — утёкшая pre-release сборка (310.8.0),
-включена как есть, без изменений и без гарантий; относитесь к ней как к
-research-only ПО.
+Код здесь под MIT. `nvngx_dlssnr.dll` — community-пересборка утёкшего
+pre-release рантайма NVIDIA 310.8.0 (оригинал несёт ядра sm_120 только
+для RTX 50; эта сборка добавляет sm_89 для RTX 40). Включена как есть,
+нами не изменялась, без гарантий; относитесь к ней как к research-only ПО.

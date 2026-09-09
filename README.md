@@ -21,7 +21,9 @@ actually doing.*
 - **An NVIDIA RTX card.** 50-series is the officially supported one. 20, 30 and
   40-series work too — the kernels are there and NVIDIA's own check is what
   blocks them; NeuralScreen works around it. Confirmed working on a 40-series.
-  **Speed warning:** on 20/30-series the neural pass is slow — single digits to ~20 FPS at 1440p, not the 60+ of a 50-series. The effect is real, the frame rate is not. Lower the *Resolution the network runs at* slider — it is the main speed lever.
+  **Speed warning:** on 20/30-series the neural pass is slow — single digits to
+  ~20 FPS at 1440p, not the 60+ of a 50-series. Lower the *Resolution the
+  network runs at* slider — the main speed lever.
 - **Nothing installed.** The release archive brings its own Python.
 ## Install
 
@@ -64,7 +66,7 @@ While the menu is open it takes the mouse and keyboard, so it works on top of a
 game. Closed, clicks go straight through it as if it were not there.
 
 Startup and mode switches do not flash: the overlay appears with the first
-real frame, and a brief blur-with-spinner covers the pipeline rebuild.
+real frame, a brief blur-with-spinner covers the pipeline rebuild.
 
 ### One window instead of the screen
 
@@ -79,9 +81,8 @@ footer returns to the whole screen; the mode is shown under the GPU line.
 There is one practical reason to use it: in this mode **OBS and the NVIDIA App
 can see the processed picture**. Whole-screen mode has to hide the overlay from
 screen capture, otherwise the program would capture its own output and feed on
-it — and with the NVIDIA App that hiding does not merely make the overlay
-invisible, it stops the recording from starting at all. One window has no such
-loop, so nothing has to hide.
+it — and with the NVIDIA App that hiding stops the recording from starting at
+all. One window has no such loop, so nothing has to hide.
 
 **To record the processed picture with the NVIDIA App:** point the mouse at
 the window you want (a game in windowed/borderless mode, a browser, anything),
@@ -99,8 +100,12 @@ comes back.
 
 <table>
 <tr>
-<td><img src="docs/menu-light.png" alt="Main page" width="380"></td>
-<td><img src="docs/menu-settings.png" alt="Settings page" width="380"></td>
+<td><img src="docs/screenshot-main-light.png" alt="Main page, light theme" width="380"></td>
+<td><img src="docs/screenshot-main-dark.png" alt="Main page, dark theme" width="380"></td>
+</tr>
+<tr>
+<td><img src="docs/screenshot-windows.png" alt="Window list" width="380"></td>
+<td><img src="docs/screenshot-settings.png" alt="Settings page" width="380"></td>
 </tr>
 </table>
 
@@ -180,16 +185,16 @@ second per frame; a press may feel lost. The picture is the priority.
 - **Pipeline latency** is 40–60 ms — fine interactively, not competitively;
   **processing resolution is capped at 2560×1440** (the network refuses 4K),
   output is always your full native resolution.
-- **The bundled `nvngx_dlssnr.dll` is a leaked pre-release build** (310.8.0)
-  — see License below.
+- **The bundled `nvngx_dlssnr.dll` is a community re-targeted build** of
+  NVIDIA's leaked pre-release 310.8.0 runtime (sm_89 + sm_120: RTX 40 and
+  RTX 50) — see License below.
 
 ## Under the hood
 
-How it works, what was measured and why: **[docs/TECHNICAL.md](docs/TECHNICAL.md)**.
-Русская версия: **[README.ru.md](README.ru.md)**.
+How it works, what was measured and why: **[docs/TECHNICAL.md](docs/TECHNICAL.md)**. Русская версия: **[README.ru.md](README.ru.md)**.
 
 ## License
 
-The code here is MIT. NVIDIA's `nvngx_dlssnr.dll` is a leaked pre-release
-build (310.8.0), included as-is, unmodified, no guarantees; treat it as
-research-only software.
+The code here is MIT. NVIDIA's `nvngx_dlssnr.dll` is a community
+re-targeted build of NVIDIA's leaked pre-release 310.8.0 runtime (the
+original carries sm_120 kernels for RTX 50 only; this build adds sm_89 for RTX 40). Included as-is, unmodified by us, no guarantees; research-only.
