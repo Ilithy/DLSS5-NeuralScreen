@@ -661,6 +661,8 @@ class Display:
         self._switch_active = True
         self._switch_t0 = time.monotonic()
         self._switch_ret = (cw, ch)
+        print(f"[main] switch overlay ON (layer {cw}x{ch} -> {fw}x{fh}, "
+              f"frame={'yes' if last_frame is not None else 'none'})")
         try:
             bg = None
             if last_frame is not None:
@@ -702,6 +704,7 @@ class Display:
         on its way (the caller shows it right after)."""
         if not self._switch_active:
             return
+        print("[main] switch overlay OFF")
         self._switch_active = False
         self._switch_bg = None
         self._switch_dim = None

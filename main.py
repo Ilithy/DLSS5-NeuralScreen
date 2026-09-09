@@ -1866,6 +1866,12 @@ def main() -> int:
                 print("[main] window mode needs capture in the worker "
                       "(capture_in_worker is off)", file=sys.stderr)
                 return
+            # The switch overlay goes up BEFORE the probe: the probe can take
+            # ~1 s (WGCW round trip with the running worker) and the old
+            # pipeline is already dead by then - without the overlay the
+            # desktop sits bare (user: black gap on one-window mode switch).
+            # enter_switch_mode is idempotent and covers the rebuild too.
+            display.enter_switch_mode(output_rgba, *capture.resolution)
             if hwnd:
                 try:
                     aw, ah = _probe_window_capture(hwnd)
@@ -1880,6 +1886,7 @@ def main() -> int:
                     display.alert(UI_STRINGS[lang]["win_fail"])
                     print(f"[main] the worker cannot capture that window: {exc}",
                           file=sys.stderr)
+                    display.exit_switch_mode()  # the overlay was raised before the probe
                     return
                 if aw < 64 or ah < 64:
                     # Below the work-resolution floor there is nothing to
@@ -1893,6 +1900,7 @@ def main() -> int:
                     print(f"[main] the window is {aw}x{ah} - too small to process",
                           file=sys.stderr)
                     display.alert(UI_STRINGS[lang]["win_fail"])
+                    display.exit_switch_mode()  # the overlay was raised before the probe
                     return
                 _teardown_pipeline()
                 window_hwnd = int(hwnd)
