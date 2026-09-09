@@ -55,6 +55,11 @@ def measure(capturable: bool, cam) -> dict:
     user32 = ctypes.windll.user32
     w, h = user32.GetSystemMetrics(0), user32.GetSystemMetrics(1)
     disp = D.Display(w, h, click_through=True)
+    # The overlay is created HIDDEN on purpose (no blank flash during the
+    # NGX warm-up) and shown only after the first real frame - reveal() is
+    # that moment. The visibility test needs the window physically up in
+    # BOTH states; only the WDA flag differs between them.
+    disp.reveal()
     if capturable:
         if not user32.SetWindowDisplayAffinity(disp.get_hwnd(), WDA_NONE):
             disp.close()
