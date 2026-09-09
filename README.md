@@ -66,9 +66,10 @@ delete the folder.
 
 ## Using it
 
-The program sits in the tray and draws over your desktop. Press **Num2** for
-the menu. The hotkeys live on the numpad, so **Num Lock has to be on** - with
-it off those keys send Insert/End/arrows instead and nothing happens.
+The program sits in the tray (with a taskbar button) and draws over your
+desktop. Press **Num2** for the menu. The hotkeys live on the numpad, so
+**Num Lock has to be on** - with it off those keys send Insert/End/arrows
+instead and nothing happens.
 
 | Key | What it does |
 |---|---|
@@ -88,29 +89,13 @@ game. Closed, clicks go straight through it as if it were not there.
 Startup and mode switches do not flash: the overlay appears with the first
 real frame, a brief blur-with-spinner covers the pipeline rebuild.
 
-### One window instead of the screen
+### Whole screen or one window
 
-**Num5** points everything at a single window — the one under the mouse
-cursor (falling back to the last focused window) — and the overlay sits on
-that window and follows it. **Num5** again goes back to the whole screen.
-
-The menu does the same without the hotkey: **Select window...** opens the
-window list (hovering outlines the real window), **Fullscreen** in the
-footer returns to the whole screen; the mode is shown under the GPU line.
-
-There is one practical reason to use it: in this mode **OBS and the NVIDIA App
-can see the processed picture**. Whole-screen mode has to hide the overlay from
-screen capture, otherwise the program would capture its own output and feed on
-it — and with the NVIDIA App that hiding stops the recording from starting at
-all. One window has no such loop, so nothing has to hide.
-
-**To record the processed picture with the NVIDIA App:** point the mouse at
-the window you want (a game in windowed/borderless mode, a browser, anything),
-press **Num5**, then start the recording. The overlay and the processed picture
-are now part of the screen capture. Press **Num5** again to go back to the
-whole screen. The desktop itself is not a window: pressing **Num5** while
-pointing at the wallpaper captures the last real window instead. Minimise the
-window and processing stops with it; restore it and the picture comes back.
+NeuralScreen renders the whole screen by default. To process one window
+instead (a game, a browser): point at it, press **Num5** or pick
+**Select window...** in the menu. The overlay follows the window. Back
+to the whole screen: **Num5** again or **Fullscreen** in the menu.
+Minimising the window pauses processing.
 
 ## The menu
 
@@ -145,17 +130,19 @@ with Windows, key assignments — is behind the sliders icon.
 
 ## Recording and screenshots
 
-**Num0** records what you see, with the system sound, into an MP4 in
-`recordings`. **Num3** saves a screenshot. If the menu is open it appears in
-both, on purpose.
+**Num0** records what you see, with system sound, into an MP4 in
+`recordings`. **Num3** saves a screenshot. The menu shows up in both if
+open - on purpose.
 
-Recording has to be done from inside the program: OBS, ShadowPlay and NVIDIA
-App cannot see the overlay. That is deliberate — the program captures your
-screen in order to process it, so if its own output were visible to capture it
-would feed on itself. In **one-window mode** (Num5) the input is a single
-window instead of the desktop, so there is no self-capture loop: the overlay
-stops hiding from screen capture, and external recorders (OBS display capture,
-NVIDIA App) see the processed picture. Full-screen mode keeps hiding it.
+**Record the processed picture externally:**
+- **OBS (recommended):** launch with `NS_SPOUT=1` (environment variable,
+  e.g. `set NS_SPOUT=1` then `NeuralScreen.exe`). The worker publishes the
+  output as a Spout2 shared texture - add a **Spout2 Capture** source in OBS
+  (free plugin) and record. Works in full-screen mode too. Off by default.
+- **NVIDIA App / OBS display capture:** use one-window mode - point at the
+  window, **Num5**, record, **Num5** when done. In this mode the overlay is
+  visible to screen capture; in full-screen mode it hides (the program
+  captures the screen itself, and a visible overlay would feed on itself).
 
 ## If something is not working
 
