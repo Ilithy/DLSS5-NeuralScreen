@@ -135,7 +135,13 @@ def parse_binding(text: str) -> tuple[int, int] | None:
     """
     if not text:
         return None
-    parts = [p.strip().upper() for p in text.split("+") if p.strip()]
+    stripped = text.strip()
+    # A leading or trailing '+' is malformed ("+Q", "Q+", "Ctrl+") - the
+    # split below would silently drop the empty part and accept "+Q" as
+    # "Q". Reject the whole string instead.
+    if stripped.startswith("+") or stripped.endswith("+"):
+        return None
+    parts = [p.strip().upper() for p in stripped.split("+") if p.strip()]
     if not parts:
         return None
     mods = 0

@@ -2469,6 +2469,13 @@ def main() -> int:
                     print(f"[main] the window 0x{target:X} is gone", file=sys.stderr)
                     display.alert(UI_STRINGS[lang]["win_fail"])
                     return
+                # Bring the chosen window to the front: the capture follows
+                # it, and a window buried under others would show through
+                # the overlay as a half-covered picture (user: the chosen
+                # window must come to the foreground, no overlaps).
+                user32 = ctypes.windll.user32
+                user32.BringWindowToTop(ctypes.c_void_p(target))
+                user32.SetForegroundWindow(ctypes.c_void_p(target))
                 print(f"[main] window mode on from the menu - target hwnd "
                       f"0x{target:X}")
                 _switch_window(target)
