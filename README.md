@@ -26,6 +26,7 @@ actually doing.*
   | **RTX 40** (Ada) | ✅ works - through the built-in architecture hook (the bundled runtime is NVIDIA's own sm_120 build; the hook makes it run on Ada) |
   | **RTX 30** (Ampere) | ❌ not in this release - no sm_86 kernels. See *Trying RTX 30/20* below. |
   | **RTX 20** (Turing) | ❌ cannot run the neural pass at all - below the minimum architecture (DLSS5-Feeder issue #73) |
+  | **Laptops with hybrid graphics (Optimus)** | ⚠️ works only when the display is driven by the NVIDIA GPU - force the dGPU (MUX switch, or an external monitor on the dGPU port). On the iGPU it fails on the first frame |
 
 - **Nothing installed.** The release archive brings its own Python.
 
