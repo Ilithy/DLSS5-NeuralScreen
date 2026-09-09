@@ -2641,7 +2641,14 @@ def main() -> int:
                             stamp = f"{stamp}-{time.time() % 1 * 1000:03.0f}"
                             path = str(rec_dir / f"neuralscreen-{stamp}.mp4")
                             try:
-                                recorder = VideoRecorder(path, width, height, fps=60,
+                                # 30 fps, not 60: every recorded frame is a
+                                # full 33 MB round-trip from the worker
+                                # (FRAME_FLAG_WANT_PIXELS -> pipe), and the
+                                # measurement showed 60 fps recording costs
+                                # ~36% of the FPS (101 -> 65). Halving the
+                                # frame rate halves that cost; the picture
+                                # quality per frame is identical.
+                                recorder = VideoRecorder(path, width, height, fps=30,
                                                          audio=record_audio)
                             except Exception as exc:
                                 print(f"[main] recording did not start: {exc}", file=sys.stderr)
