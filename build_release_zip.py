@@ -18,9 +18,9 @@ os.chdir(BASE)
 
 VERSION = "1.5.1"
 # The bundle is architecture-agnostic by design: the dcc0dc24 runtime and
-# the 0x1B0 spoof work on RTX 20/30/40/50 (v1.3.0 behaviour). The manifest
+# the 0x1B0 spoof work on RTX 30/40/50 (v1.3.0 behaviour). The manifest
 # still records what is inside so a mismatch is catchable.
-TARGET_ARCHS = "RTX 20/30/40/50 (Ampere/Ada/Blackwell; Turing via spoof)"
+TARGET_ARCHS = "RTX 30/40/50 (sm_86/89/120 kernels, spoof 0x1B0; RTX 20 cannot run - below minimum)"
 
 files = subprocess.check_output(["git", "ls-files"], text=True).splitlines()
 extra = [
