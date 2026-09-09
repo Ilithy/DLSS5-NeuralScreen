@@ -108,9 +108,8 @@ The settings worth touching:
 - **Profile** — how strong the effect is, from *Faithful* to *Extreme*. Start
   at *Strong / Cinematic* and go from there. The four sliders underneath are
   the same thing in detail.
-- **Before / after wipe** — leaves the left part of the screen untouched so you
-  can see what the effect is actually doing. Set it back to 0 when you are done
-  looking.
+- **Before / after wipe** — leaves the left part of the screen untouched so
+  you can see what the effect is doing. Set it back to 0 when done.
 - **Resolution the network runs at** — one slider. At the top it is your whole
   screen, which is the default and the best picture. Every step down hands the
   network a smaller frame: with the slider off the default (full screen) the
@@ -151,20 +150,19 @@ the game to *borderless* or *windowed fullscreen*, which almost all modern
 games have.
 
 **The menu pointer is missing or frozen.** A fullscreen game hides the system
-cursor, and the game's own cursor (drawn into its frames) freezes when the game
-loses focus to the menu. The overlay only shows the system cursor; a game that
-hides it leaves the menu without a pointer. Switching the game to borderless
-fixes it.
+cursor, and the game's own cursor (drawn into its frames) freezes when the
+game loses focus to the menu. The overlay only shows the system cursor; a
+game that hides it leaves the menu without a pointer. Borderless fixes it.
 
-**The numpad hotkeys do nothing.** They need *Num Lock* to be on. With Num Lock
-off the numpad sends Insert/End/arrows and the keys simply do not exist. The
-program writes this to the log and shows it on screen.
+**The numpad hotkeys do nothing.** They need *Num Lock* to be on. With Num
+Lock off the numpad sends Insert/End/arrows and the keys simply do not exist.
+The program writes this to the log and shows it on screen.
 
 **The picture is soft.** Put *Resolution the network runs at* back to the top
 of its slider; only the very bottom of the slider starts to soften.
 
-**A key does nothing.** Something else on the machine has claimed it. Reassign
-it in the menu under the sliders icon.
+**A key does nothing.** Something else on the machine has claimed it.
+Reassign it in the menu under the sliders icon.
 
 **The menu is slow in a heavy game.** At 4K the pipeline can take up to a
 second per frame; hotkeys are processed between frames, so a press may feel
@@ -172,16 +170,19 @@ lost. The picture is the priority.
 
 ## Known limitations
 
-- **True fullscreen games** cannot have the overlay drawn over them — that is
-  a Windows rule. Borderless or windowed only.
-- **A second instance is not guarded** — two copies fight over the capture;
-  close the first one first.
-- **The window list** shows every visible window; picking one switches to it.
-  Num5 still takes the window under the cursor.
+- **True fullscreen games** cannot have the overlay drawn over them — a
+  Windows rule. Borderless or windowed only.
+- **A second instance is not guarded** — close the first one first.
+- **The window list** shows every visible window; Num5 takes the one under
+  the cursor.
 - **A second monitor** works but was not tested with a window between them.
-- **The menu position in window mode** starts bottom-right on every open;
-  where you drag it is remembered on close.
+- **The menu position in window mode** starts bottom-right; where you drag
+  it is remembered on close.
 - **HDR displays** are not supported: switch to SDR (Win+Alt+B).
+- **Laptops with hybrid graphics** (Optimus: the display is rendered by the
+  iGPU) are not supported - the evaluation fails on the first frame. Force
+  the discrete GPU, use a MUX switch, or an external monitor on the dGPU
+  port.
 - **Pipeline latency** is 40–60 ms — fine interactively, not competitively.
 - **Processing resolution is capped at 2560×1440** (the network refuses 4K);
   output is always your full native resolution.
@@ -196,5 +197,4 @@ How it works, what was measured and why the decisions went the way they did:
 ## License
 
 The code here is MIT. NVIDIA's `nvngx_dlssnr.dll` is not mine — it is
-included in the release archive and comes from NVIDIA under their own
-terms.
+included in the release archive and comes from NVIDIA under their own terms.
