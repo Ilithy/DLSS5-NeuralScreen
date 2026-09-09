@@ -169,7 +169,16 @@ def main() -> int:
         if autocheck.wait_for(offset, "window capture inside the worker (WGCW)", 30.0) is None:
             print("FAIL: the hotkey did not put the program into window mode")
             return 1
-        pump(2.0)
+        # The switch overlay (blur + spinner) is up while the new worker
+        # warms up; the test must not capture the screen under the veil. It
+        # comes down on the first processed frame, so wait for the pipeline
+        # to actually deliver one (NR ON | FPS) - a fixed sleep races the
+        # warm-up, and a dying NGX (evaluation failed on frame 0, worker
+        # restart 1/3) makes it longer than 2 s (flaky 0.0% in the suite).
+        if autocheck.wait_for(offset, "NR ON | FPS", 30.0) is None:
+            print("FAIL: no processed frame after the window-mode switch")
+            return 1
+        pump(0.5)
 
         # The menu must be fully visible: in window mode the overlay is
         # visible to an outside capture, and the panel reaches the right
