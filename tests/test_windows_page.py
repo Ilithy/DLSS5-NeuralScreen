@@ -29,6 +29,7 @@ STATE = {
                "local_structure": 1.50, "skin_structure": 1.00},
     "split": 0.0, "open_on_start": True,
     "gpu_text": "RTX 5070 Ti · Blackwell", "gpu_ok": True,
+    "window_mode": True,
     "windows": ["1A2B3C: Notepad", "4D5E6F: Chrome - YouTube"],
     "window_current": "1A2B3C: Notepad",
 }
@@ -126,6 +127,18 @@ def main() -> int:
             failures.append("Back should return to the main page")
         if menu.hover_window is not None:
             failures.append("Back should clear the window highlight")
+
+    # 7. The capture mode line: window mode when window_mode is set,
+    #    fullscreen otherwise.
+    menu.layout(3840, 2160)
+    mode = menu.state.get("window_mode")
+    print(f"window_mode state: {mode}")
+    if mode is not True:
+        failures.append("window_mode should be True in the test state")
+    if "mode_window" not in overlay_ui.STRINGS["en"]:
+        failures.append("missing mode_window i18n key")
+    if "mode_fullscreen" not in overlay_ui.STRINGS["en"]:
+        failures.append("missing mode_fullscreen i18n key")
 
     print("=" * 60)
     if failures:

@@ -2381,6 +2381,7 @@ def main() -> int:
                 "split": split_pos,
                 "gpu_text": gpu_text,
                 "gpu_ok": gpu_ok,
+                "window_mode": window_hwnd is not None,
                 "monitor": str(monitor),
                 "monitors": [f"{i}: {w}x{h}" for i, w, h in list_monitors()],
                 "windows": [f"{h:X}: {t}" for h, t in wins],
@@ -2519,23 +2520,15 @@ def main() -> int:
                 elif name == "screenshot":
                     tray_commands.put("screenshot_menu")
                 elif name == "window_mode":
-                    # The one-window button in the footer: the same action
-                    # as the Num5 hotkey - the window under the cursor
-                    # wins, with the last focused window as the fallback.
+                    # The fullscreen button in the footer: the same action
+                    # as the Num5 hotkey - in window mode it returns to the
+                    # whole screen, in fullscreen mode it is a no-op with an
+                    # alert (the user asked for a visible "already active").
                     if window_hwnd is not None:
                         print("[main] window mode off - back to the whole screen")
                         _switch_window(0)
                     else:
-                        target = window_under_cursor() or last_foreground
-                        if target:
-                            print(f"[main] window mode on - target hwnd "
-                                  f"0x{target:X}")
-                            _switch_window(target)
-                        else:
-                            print("[main] window mode: no window to capture "
-                                  "(only our own windows have had the focus)",
-                                  file=sys.stderr)
-                            display.alert(UI_STRINGS[lang]["win_none"])
+                        display.alert(UI_STRINGS[lang]["fs_active"])
                 elif name == "github":
                     # The hotkeys, profiles and requirements are described
                     # only in the README - there was no way to learn about

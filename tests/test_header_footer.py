@@ -88,24 +88,26 @@ def main() -> int:
         if ("button", "close") not in out:
             failures.append(f"the min icon should emit (button, close), got {out}")
 
-    # 3. The footer on the main page: screenshot, record, one-window.
+    # 3. The footer on the main page: screenshot, record, fullscreen.
     actions = [i for i in menu.items if i.kind == "action"]
     keys = [i.key for i in actions]
     print(f"footer actions: {keys}")
-    if "window" not in keys:
-        failures.append(f"the footer should hold the one-window button, got {keys}")
+    if "fullscreen" not in keys:
+        failures.append(f"the footer should hold the fullscreen button, got {keys}")
+    if "window" in keys:
+        failures.append("the one-window button should be gone from the footer")
     if "collapse" in keys:
         failures.append("the collapse button should be gone from the footer")
 
-    # 4. The one-window button emits the window_mode command.
-    win_btn = next((i for i in actions if i.key == "window"), None)
-    if win_btn is None:
-        failures.append("no one-window button in the footer")
+    # 4. The fullscreen button emits the window_mode command.
+    fs_btn = next((i for i in actions if i.key == "fullscreen"), None)
+    if fs_btn is None:
+        failures.append("no fullscreen button in the footer")
     else:
-        out = click(menu, win_btn)
-        print(f"one-window click -> {out}")
+        out = click(menu, fs_btn)
+        print(f"fullscreen click -> {out}")
         if ("button", "window_mode") not in out:
-            failures.append(f"the one-window button should emit "
+            failures.append(f"the fullscreen button should emit "
                             f"(button, window_mode), got {out}")
 
     # 5. The settings page: only the back (close) icon, no min.
@@ -131,7 +133,7 @@ def main() -> int:
     if failures:
         print(f"FAIL: {len(failures)} - {failures}")
         return 1
-    print("OK: the header collapse and the one-window button behave")
+    print("OK: the header collapse and the fullscreen button behave")
     return 0
 
 

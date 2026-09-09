@@ -183,6 +183,7 @@ class OverlayMenu:
             # True/False/None (None - the worker has not answered yet).
             "gpu_text": "",
             "gpu_ok": None,
+            "window_mode": False,
             "monitor": "0",
             "monitors": [],
             "autostart": False,
@@ -386,8 +387,9 @@ class OverlayMenu:
 
         # The GPU line: a status dot and the card model. A separate line rather
         # than a cell in the readings block - this is not a pipeline reading
-        # but the answer to "does this work on my card at all".
-        gpu_h = self._u(SMALL_SIZE) + self._u(8)
+        # but the answer to "does this work on my card at all". The capture
+        # mode (fullscreen / window) sits on the second line below it.
+        gpu_h = self._u(SMALL_SIZE) * 2 + self._u(10)
         self._gpu_rel = pygame.Rect(pad, cy, inner_w, gpu_h)
         cy += gpu_h + gap
 
@@ -588,8 +590,8 @@ class OverlayMenu:
         else:
             row = [("screenshot", s["screenshot"], self.hotkeys.get("screenshot_menu", ""), False),
                    ("record", s["record_stop"] if self.state.get("recording")
-                    else s["record"], self.hotkeys.get("record", ""), True),
-                   ("window", s["one_window"], self.hotkeys.get("window_mode", ""), False)]
+                   else s["record"], self.hotkeys.get("record", ""), True),
+                   ("fullscreen", s["fullscreen"], self.hotkeys.get("window_mode", ""), False)]
             bgap = self._u(BTN_GAP)
             bw = (inner_w - bgap * (len(row) - 1)) // len(row)
             for idx, (key, label, hk, filled) in enumerate(row):
@@ -868,19 +870,20 @@ class OverlayMenu:
         return []
 
     def _action_click(self, key: str) -> list[tuple]:
-        """The footer. "One window" points the capture at a window, "Exit"
-        unloads the program - which is why they are different actions with
-        different captions rather than a single cross."""
+        """The footer. "Fullscreen" returns the capture to the whole screen
+        (the window-mode exit), "Exit" unloads the program - which is why
+        they are different actions with different captions rather than a
+        single cross."""
         if key == "back":
             self.page = "main"
             self.scroll = 0
             self.capturing = None
             self.hover_window = None
             return [("capture", None)]
-        if key == "window":
-            # The one-window button: the same action as the Num5 hotkey -
-            # the window under the cursor wins, with the last focused
-            # window as the fallback.
+        if key == "fullscreen":
+            # The fullscreen button: the same action as the Num5 hotkey in
+            # window mode - back to the whole screen. In fullscreen mode it
+            # is a no-op (main shows the "already active" alert).
             return [("button", "window_mode")]
         if key == "screenshot":
             return [("button", "screenshot")]
@@ -1149,6 +1152,16 @@ class OverlayMenu:
                             cy - name.get_height() // 2))
         surface.blit(note, (rect.right - note.get_width(),
                             cy - note.get_height() // 2))
+        # The capture mode under the card: fullscreen or window mode. The
+        # user asked for a visible answer to "what mode am I in right now"
+        # (the fullscreen button is the window-mode exit, so the state must
+        # be readable at a glance).
+        mode = (s["mode_window"] if self.state.get("window_mode")
+                else s["mode_fullscreen"])
+        mode_line = self._small_font.render(mode, True,
+                                            _rgb(self.c["muted"]))
+        surface.blit(mode_line, (rect.x + r * 2 + self._u(8),
+                                  rect.y + rect.h + self._u(2)))
 
     def _rec_text(self, s: dict) -> str:
         """Recording state: the duration is more useful than a bare "on"."""
