@@ -33,6 +33,7 @@
 #include <d3d12.h>
 #include <dxgi1_4.h>
 #include <d3dcompiler.h>
+#include "spout_bridge.h"
 #include <cstdio>
 #include <cstdarg>
 #include <cstdint>
@@ -1662,6 +1663,8 @@ static bool PresentFrame(VideoState &v)
         };
         h.list->ResourceBarrier(_countof(pre), pre);
         h.list->CopyResource(bb, v.output);
+        SpoutBridgeCopy(h.list, v.output, v.upscale ? v.full_w : v.w,
+                        v.upscale ? v.full_h : v.hgt);
         D3D12_RESOURCE_BARRIER post[] = {
             Transition(bb, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PRESENT),
             Transition(v.output, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS),
@@ -1669,7 +1672,10 @@ static bool PresentFrame(VideoState &v)
         h.list->ResourceBarrier(_countof(post), post);
         const UINT64 fv = EndCommands();
         if (WaitFenceValue(h.fence, fv, 2000))
+        {
             ok = SUCCEEDED(g_present_swap->Present(0, 0));
+            SpoutBridgeSend();
+        }
         else
             Log("[present] fence wait timed out");
     }
@@ -1699,6 +1705,8 @@ static bool PresentBypass(VideoState &v)
         };
         h.list->ResourceBarrier(_countof(pre), pre);
         h.list->CopyResource(bb, v.color.tex);
+        SpoutBridgeCopy(h.list, v.color.tex, v.upscale ? v.full_w : v.w,
+                        v.upscale ? v.full_h : v.hgt);
         D3D12_RESOURCE_BARRIER post[] = {
             Transition(bb, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PRESENT),
             Transition(v.color.tex, D3D12_RESOURCE_STATE_COPY_SOURCE,
@@ -1707,7 +1715,10 @@ static bool PresentBypass(VideoState &v)
         h.list->ResourceBarrier(_countof(post), post);
         const UINT64 fv = EndCommands();
         if (WaitFenceValue(h.fence, fv, 2000))
+        {
             ok = SUCCEEDED(g_present_swap->Present(0, 0));
+            SpoutBridgeSend();
+        }
         else
             Log("[present] bypass fence wait timed out");
     }
@@ -4661,6 +4672,7 @@ int main(int argc, char **argv)
 
     if (!InitDisguise()) return 1;
     if (!InitNgx()) { Log("[host] NGX unavailable"); return 1; }
+    SpoutBridgeInit(h.dev);
 
     if (test) return RunTest();
     if (video) return RunVideo();
