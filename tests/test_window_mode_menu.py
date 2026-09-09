@@ -170,13 +170,14 @@ def main() -> int:
             print("FAIL: the hotkey did not put the program into window mode")
             return 1
         # The switch overlay (blur + spinner) is up while the new worker
-        # warms up; the test must not capture the screen under the veil. It
-        # comes down on the first processed frame, so wait for the pipeline
-        # to actually deliver one (NR ON | FPS) - a fixed sleep races the
-        # warm-up, and a dying NGX (evaluation failed on frame 0, worker
-        # restart 1/3) makes it longer than 2 s (flaky 0.0% in the suite).
-        if autocheck.wait_for(offset, "NR ON | FPS", 30.0) is None:
-            print("FAIL: no processed frame after the window-mode switch")
+        # warms up; it comes down on the first processed frame. Waiting for
+        # "NR ON | FPS" is NOT enough: that line is printed every frame and
+        # the PRE-SWITCH one is already in the log, so the wait returns
+        # instantly and the test captures the screen under the veil (0.0%
+        # panel in the suite). The exact signal is the overlay coming down.
+        if autocheck.wait_for(offset, "switch overlay OFF", 30.0) is None:
+            print("FAIL: the switch overlay never came down after the "
+                  "window-mode switch (the worker may be restarting)")
             return 1
         pump(0.5)
 
