@@ -63,10 +63,8 @@ Every key can be reassigned in the menu, under the sliders icon.
 While the menu is open it takes the mouse and keyboard, so it works on top of a
 game. Closed, clicks go straight through it as if it were not there.
 
-Startup and mode switches do not flash: the overlay windows are created hidden
-and revealed together with the first real frame, and switching modes (Num5,
-monitor change) shows a brief semi-transparent blur with a spinner while the
-pipeline rebuilds — the picture returns sharp.
+Startup and mode switches do not flash: the overlay appears with the first
+real frame, and a brief blur-with-spinner covers the pipeline rebuild.
 
 ### One window instead of the screen
 
@@ -163,44 +161,30 @@ off the numpad sends Insert/End/arrows and the keys simply do not exist. The
 program writes this to the log and shows it on screen.
 
 **The picture is soft.** Put *Resolution the network runs at* back to the top
-of its slider. (With the residual composite the picture stays sharp down to
-the reduced resolutions; only the very bottom of the slider starts to soften.)
+of its slider; only the very bottom of the slider starts to soften.
 
 **A key does nothing.** Something else on the machine has claimed it. Reassign
 it in the menu under the sliders icon.
 
-**The menu is slow to react in a heavy game.** At 4K with a demanding scene
-the pipeline can take up to a second per frame, and the hotkeys are processed
-between frames — a press may feel lost. The picture itself is the priority;
-the menu catches up when the load drops.
+**The menu is slow in a heavy game.** At 4K the pipeline can take up to a
+second per frame; hotkeys are processed between frames, so a press may feel
+lost. The picture is the priority.
 
 ## Known limitations
 
 - **True fullscreen games** cannot have the overlay drawn over them — that is
   a Windows rule. Borderless or windowed only.
-- **A second instance of the program is not guarded.** Two copies fight over
-  the screen capture; the tests refuse to run while one is up, but the
-  program itself does not stop you. Close the first one before starting
-  another.
-- **The window list** in the menu shows every visible window; picking one
-  switches to it. Num5 still takes the window under the cursor for the
-  quick path.
-- **A second monitor** is supported but was not tested with a window between
-  monitors.
-- **The menu position in window mode** starts in the bottom-right corner of
-  the screen on every open; drag it where you want and it is remembered on
-  close.
-- **HDR displays** are not supported: the whole pipeline works in SDR
-  (sRGB). On an HDR screen the picture comes out too bright and washed out —
-  switch the display to SDR (Win+Alt+B) while the program runs.
-- **Pipeline latency** is 40–60 ms (a few frames at typical desktop rates) —
-  the neural pass itself is a fraction of a millisecond per megapixel, but
-  the capture → process → present chain adds up. Fine for interactive use,
-  not for competitive play.
-- **The processing resolution is capped at 2560×1440** on the widest side —
-  the neural network itself refuses to run at 4K (tested, it hangs). The
-  output is always your full native resolution; only the network's internal
-  work size is reduced.
+- **A second instance is not guarded** — two copies fight over the capture;
+  close the first one first.
+- **The window list** shows every visible window; picking one switches to it.
+  Num5 still takes the window under the cursor.
+- **A second monitor** works but was not tested with a window between them.
+- **The menu position in window mode** starts bottom-right on every open;
+  where you drag it is remembered on close.
+- **HDR displays** are not supported: switch to SDR (Win+Alt+B).
+- **Pipeline latency** is 40–60 ms — fine interactively, not competitively.
+- **Processing resolution is capped at 2560×1440** (the network refuses 4K);
+  output is always your full native resolution.
 
 ## Under the hood
 
