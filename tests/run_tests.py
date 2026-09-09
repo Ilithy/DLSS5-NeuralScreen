@@ -63,6 +63,7 @@ ABOUT = {
     "test_resize.py": "the on-the-fly resize reconfigures the feature without a restart",
     "test_reveal.py": "the present window stays hidden until the first Present",
     "test_split.py": "the before/after wipe leaves the left side untouched",
+    "test_taskbar_window.py": "the taskbar button exists, opens the menu, closes cleanly",
     "test_wgc_capture.py": "the worker captures one window (the single-window input)",
     "test_window_filter.py": "the window list holds only real taskbar windows",
     "test_windows_page.py": "the windows page lists, highlights and switches",

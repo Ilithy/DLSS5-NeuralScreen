@@ -105,6 +105,7 @@ from i18n import STRINGS as UI_STRINGS
 REPO_URL = "https://github.com/perseval-BLR/DLSS5-NeuralScreen"
 CHANNEL_URL = "https://www.youtube.com/@perseval_BLR/videos"
 from tray import TrayController
+from taskbar import TaskbarWindow
 
 # --- Worker protocol (matches dlss5_converter/core.py) -------------------
 # v3 (magic D5V3): a header with full_w/full_h - the worker resizes the frames
@@ -1429,6 +1430,15 @@ def main() -> int:
         tray._set_state(nr=True, scale=work_scale)
         tray.start()
         print("[main] tray icon started")
+
+        # Taskbar button: the overlay and the worker window are tool
+        # windows, so the program lived only in the tray. A 1x1 APPWINDOW
+        # window gives the program a real taskbar button; clicking it sends
+        # the same "settings" command as a left click on the tray (user
+        # rule 2026-09-09: the program must always show in the taskbar).
+        taskbar = TaskbarWindow(tray_commands, "NeuralScreen")
+        taskbar.start()
+        print("[main] taskbar window started")
 
         # Global hotkeys: RegisterHotKey rather than polling the key state.
         # The system gives the keypress to us alone and does not pass it to the
@@ -3238,6 +3248,10 @@ def main() -> int:
             pass
         try:
             tray.stop()
+        except Exception:
+            pass
+        try:
+            taskbar.stop()
         except Exception:
             pass
         print("[main] resources released")
