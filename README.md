@@ -72,6 +72,10 @@ real frame, and a brief blur-with-spinner covers the pipeline rebuild.
 cursor (falling back to the last focused window) — and the overlay sits on
 that window and follows it. **Num5** again goes back to the whole screen.
 
+The menu does the same without the hotkey: **Select window...** opens the
+window list (hovering outlines the real window), **Fullscreen** in the
+footer returns to the whole screen; the mode is shown under the GPU line.
+
 There is one practical reason to use it: in this mode **OBS and the NVIDIA App
 can see the processed picture**. Whole-screen mode has to hide the overlay from
 screen capture, otherwise the program would capture its own output and feed on
@@ -97,6 +101,10 @@ comes back.
 <tr>
 <td><img src="docs/menu-light.png" alt="Main page" width="380"></td>
 <td><img src="docs/menu-settings.png" alt="Settings page" width="380"></td>
+</tr>
+<tr>
+<td><img src="docs/screenshot-main-dark.png" alt="Dark theme" width="380"></td>
+<td><img src="docs/screenshot-windows.png" alt="Window list" width="380"></td>
 </tr>
 </table>
 
@@ -168,33 +176,24 @@ second per frame; a press may feel lost. The picture is the priority.
   Windows rule. Borderless or windowed only.
 - **A second instance is not guarded** — close the first one first.
 - **The window list** shows every visible window; Num5 takes the one under
-  the cursor.
-- **A second monitor** works but was not tested with a window between them.
-- **The menu position in window mode** starts bottom-right; where you drag
-  it is remembered on close.
+  the cursor. **A second monitor** works but was not tested with a window
+  between them; the menu position in window mode starts bottom-right.
 - **HDR displays** are not supported: switch to SDR (Win+Alt+B).
-- **Laptops with hybrid graphics** (Optimus: the display is rendered by the
-  iGPU) are not supported - the evaluation fails on the first frame. Force
-  the discrete GPU, use a MUX switch, or an external monitor on the dGPU
-  port.
-- **Pipeline latency** is 40–60 ms — fine interactively, not competitively.
-- **Processing resolution is capped at 2560×1440** (the network refuses 4K);
+- **Laptops with hybrid graphics** (Optimus) are not supported - the
+  evaluation fails on the first frame. Force dGPU / MUX / dGPU monitor.
+- **Pipeline latency** is 40–60 ms — fine interactively, not competitively;
+  **processing resolution is capped at 2560×1440** (the network refuses 4K),
   output is always your full native resolution.
 - **The bundled `nvngx_dlssnr.dll` is a leaked pre-release build** (310.8.0)
   — see License below.
 
 ## Under the hood
 
-How it works, what was measured and why the decisions went the way they did:
-**[docs/TECHNICAL.md](docs/TECHNICAL.md)**.
-
+How it works, what was measured and why: **[docs/TECHNICAL.md](docs/TECHNICAL.md)**.
 Русская версия: **[README.ru.md](README.ru.md)**.
 
 ## License
 
-The code here is MIT. NVIDIA's `nvngx_dlssnr.dll` is not mine — it is
-included in the release archive and comes from NVIDIA under their own terms.
-It is a pre-release/internal build (310.8.0) that leaked into the modding
-ecosystem; it is redistributed as-is, unmodified, with no guarantees from
-NVIDIA. Its Authenticode signature no longer matches (the file was
-re-packaged), so treat it as research-only software.
+The code here is MIT. NVIDIA's `nvngx_dlssnr.dll` is a leaked pre-release
+build (310.8.0), included as-is, unmodified, no guarantees; treat it as
+research-only software.
