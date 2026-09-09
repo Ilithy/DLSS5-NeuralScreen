@@ -1342,8 +1342,30 @@ def main() -> int:
         # Shared memory for the input frame: its size does not depend on
         # work_scale (see SharedFrameBuffer), so it is created once per process.
         shm = SharedFrameBuffer(width, height)
+        # Which card this is and whether NR works on it. The model comes from
+        # nvapi, but the support verdict comes from the worker rather than the
+        # architecture: only it knows whether feature 18 was created.
+        gpu_info = gpu_probe()
+        gpu_text = gpu_describe(gpu_info)
+        gpu_ok: bool | None = None
+        print(f"[main] GPU: {gpu_text or 'unknown'} "
+              f"(group 0x{gpu_info['arch_group']:X}, officially supported: "
+              f"{'yes' if gpu_info['official'] else 'no'})")
+        # The stock warm-up is 120 discarded evaluations. On a fast Blackwell
+        # card that is a second or two; on Turing/Ampere/Ada it can take far
+        # longer than the frame watchdog, which then kills the worker on
+        # frame 0 and starts a restart storm (seen on RTX 2070 at ~1 FPS and
+        # on RTX 3060 Ti at ~18 FPS). Unsupported/pre-Blackwell cards get a
+        # short warm-up; the actual effect is still evaluated normally
+        # afterwards.
+        effective_warmup = warmup
+        if not gpu_info["official"] and warmup > 4:
+            effective_warmup = 4
+            print(f"[main] pre-Blackwell GPU: warmup {warmup} -> "
+                  f"{effective_warmup} to avoid a false frame-0 watchdog "
+                  f"timeout")
         worker, worker_logs, reader, worker_stop = start_worker(
-            params, work_w, work_h, warmup, full_w, full_h, shm)
+            params, work_w, work_h, effective_warmup, full_w, full_h, shm)
         print(f"[main] worker started (pid {worker.pid}), header sent "
               f"({work_w}x{work_h})")
 
@@ -1356,15 +1378,6 @@ def main() -> int:
         startup_menu = bool(cfg.get("open_menu_on_start", True))
         # The before/after wipe: the share of the frame the worker leaves raw.
         split_pos = min(1.0, max(0.0, float(cfg.get("split", 0.0))))
-        # Which card this is and whether NR works on it. The model comes from
-        # nvapi, but the support verdict comes from the worker rather than the
-        # architecture: only it knows whether feature 18 was created.
-        gpu_info = gpu_probe()
-        gpu_text = gpu_describe(gpu_info)
-        gpu_ok: bool | None = None
-        print(f"[main] GPU: {gpu_text or 'unknown'} "
-              f"(group 0x{gpu_info['arch_group']:X}, officially supported: "
-              f"{'yes' if gpu_info['official'] else 'no'})")
         startup_pending = True
         # The menu size, position and theme - exactly as the user left them.
         display.menu.set_user_scale(float(cfg.get("menu_scale", 1.0)))
@@ -2238,7 +2251,9 @@ def main() -> int:
                 # The real refusal line from the worker is "[pure] direct
                 # feature 18 create failed"; "Unsupported GPU architecture"
                 # lives inside nvngx_dlssnr.dll and never reaches its stderr.
-                if "feature 18 create failed" in line:
+                # SAFE PASSTHROUGH (the worker stays alive and shows the raw
+                # frame) is the same verdict: no feature, no NR.
+                if "feature 18 create failed" in line or "NR feature unavailable" in line:
                     gpu_ok = False
                     return
 

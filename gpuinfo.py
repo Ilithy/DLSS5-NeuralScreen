@@ -21,16 +21,21 @@ _ID_GET_NAME = 0xCEEE8E9F
 
 # NV_GPU_ARCHITECTURE_ID: the group lives in the high bits. Neural Rendering
 # (feature 18) officially requires Blackwell — see NGXGpuArchitecture inside
-# nvngx_dlssnr.dll itself.
+# nvngx_dlssnr.dll itself. Verified against NVIDIA's nvapi.h (TU100=0x160,
+# GA100=0x170, AD100=0x190, GB200=0x1B0) and open-gpu-kernel-modules
+# nv_arch.h (Turing=0x160, Ampere=0x170, Hopper=0x180, Ada=0x190,
+# Blackwell GB1XX=0x1A0, GB2XX=0x1B0). Real-user logs confirm: RTX 2070
+# reports 0x160, RTX 3060 Ti reports 0x170.
 ARCH_NAMES = {
-    0x170: ("Turing", "20xx"),
-    0x180: ("Ampere", "30xx"),
+    0x160: ("Turing", "20xx"),
+    0x170: ("Ampere", "30xx"),
+    0x180: ("Hopper", ""),
     0x190: ("Ada", "40xx"),
-    0x1A0: ("Hopper", ""),
+    0x1A0: ("Blackwell", "50xx"),
     0x1B0: ("Blackwell", "50xx"),
     0x1C0: ("Blackwell", "50xx"),
 }
-ARCH_BLACKWELL = 0x1B0
+ARCH_BLACKWELL = 0x1A0
 
 
 class _ArchInfo(ctypes.Structure):

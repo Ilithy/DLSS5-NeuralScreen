@@ -227,10 +227,11 @@ static constexpr unsigned NVAPI_ID_INITIALIZE = 0x0150E828u;
 static constexpr unsigned NVAPI_ID_ENUM_GPUS  = 0xE5AC921Fu;
 static constexpr unsigned NVAPI_ID_GET_ARCH   = 0xD8265D24u;
 
-static constexpr unsigned NV_ARCH_TURING    = 0x170u;
-static constexpr unsigned NV_ARCH_AMPERE    = 0x180u;
+static constexpr unsigned NV_ARCH_TURING    = 0x160u;
+static constexpr unsigned NV_ARCH_AMPERE    = 0x170u;
+static constexpr unsigned NV_ARCH_HOPPER    = 0x180u;
 static constexpr unsigned NV_ARCH_ADA       = 0x190u;
-static constexpr unsigned NV_ARCH_BLACKWELL = 0x1B0u;
+static constexpr unsigned NV_ARCH_BLACKWELL = 0x1A0u;
 
 struct NvArchInfo
 {
@@ -3931,7 +3932,17 @@ static int RunVideo()
     // work-sized one, and the scaling on both sides is ours.
     if (!CreateFeature(vh.width, vh.height, flags, &create_result,
                        (v.nr_small || !upscale) ? 0 : vh.full_w,
-                       (v.nr_small || !upscale) ? 0 : vh.full_h)) return 4;
+                       (v.nr_small || !upscale) ? 0 : vh.full_h))
+    {
+        // A feature-create refusal is not a reason to kill the desktop
+        // overlay. Keep the worker alive and pass raw frames through (the
+        // bypass path below shows v.color). This prevents the restart storm
+        // and the black topmost window seen on unsupported or partially
+        // spoofed GPUs. A later RNSZ can retry feature creation.
+        h.feature = nullptr;
+        Log("[video] NR feature unavailable (0x%08X) - SAFE PASSTHROUGH",
+            static_cast<uint32_t>(create_result));
+    }
 
     VideoFrameHeader fh = {};
     std::vector<BYTE> color, mv, output;
@@ -4017,11 +4028,11 @@ static int RunVideo()
                                (v.nr_small || !rup) ? 0 : rc.full_w,
                                (v.nr_small || !rup) ? 0 : rc.full_h))
             {
-                Log("[video] RNSZ: feature create failed at %ux%u", rc.width, rc.height);
-                VideoResizeAck bad = { RESIZE_ACK_MAGIC, 0u, static_cast<uint32_t>(rr), 0u, fh.pts };
-                if (!WriteExact(stdout, &bad, sizeof(bad))) return 4;
+                h.feature = nullptr;
+                Log("[video] RNSZ: feature create failed at %ux%u - SAFE PASSTHROUGH",
+                    rc.width, rc.height);
             }
-            warmup_done = false;   // re-warm at the new resolution
+            warmup_done = (h.feature == nullptr);   // only warm a real NR feature
             VideoResizeAck ack = { RESIZE_ACK_MAGIC, 1u, static_cast<uint32_t>(rr), 0u, fh.pts };
             if (!WriteExact(stdout, &ack, sizeof(ack))) return 10;
             Log("[video] RNSZ applied: feature ready at %ux%u", rc.width, rc.height);
@@ -4185,15 +4196,25 @@ static int RunVideo()
         }
         if (!warmup_done)
         {
-            const uint32_t warmup = (std::min)(240u, (std::max)(1u, g_video_options.warmup));
-            for (uint32_t i = 0; i < warmup; ++i)
+            // No feature (SAFE PASSTHROUGH): nothing to warm up - the raw
+            // frame goes out as-is. Evaluating with a null handle would
+            // fault inside NGX.
+            if (h.feature == nullptr)
             {
-                if (!EvaluateVideo(v, i == 0 ? 1 : 0)) return 7;
+                warmup_done = true;
             }
-            warmup_done = true;
-            Log("[pure] direct feature 18 confirmed after %u discarded warmup frames", warmup);
+            else
+            {
+                const uint32_t warmup = (std::min)(240u, (std::max)(1u, g_video_options.warmup));
+                for (uint32_t i = 0; i < warmup; ++i)
+                {
+                    if (!EvaluateVideo(v, i == 0 ? 1 : 0)) return 7;
+                }
+                warmup_done = true;
+                Log("[pure] direct feature 18 confirmed after %u discarded warmup frames", warmup);
+            }
         }
-        const bool bypass = (fh.reserved & FRAME_FLAG_BYPASS) != 0;
+        const bool bypass = (fh.reserved & FRAME_FLAG_BYPASS) != 0 || h.feature == nullptr;
         if (!bypass)
         {
             const double t_eval = PhaseNow();
