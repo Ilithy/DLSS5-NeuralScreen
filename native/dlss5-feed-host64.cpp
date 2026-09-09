@@ -455,6 +455,8 @@ static bool InitDirectNr(const wchar_t *data_path)
 // Command submission (allocator ring), same shape as the add-on
 // ---------------------------------------------------------------------------
 
+static void LogDeviceRemoved(const char *where);   // defined below BeginCommands
+
 static bool BeginCommands()
 {
     const int slot = h.frame_slot;
@@ -465,8 +467,40 @@ static bool BeginCommands()
         if (WaitForSingleObject(h.fence_event, 2000) != WAIT_OBJECT_0)
         { Log("[host] GPU did not retire allocator slot %d", slot); return false; }
     }
-    if (FAILED(h.alloc[slot]->Reset())) return false;
+    if (FAILED(h.alloc[slot]->Reset()))
+    {
+        // The allocator Reset() is where a removed device surfaces first
+        // (issue #1: Win10 TDR, "BeginCommands err=0"). Log the reason and
+        // the DRED breadcrumbs - without them the log says only "code 6".
+        LogDeviceRemoved("allocator reset");
+        return false;
+    }
     return SUCCEEDED(h.list->Reset(h.alloc[slot], nullptr));
+}
+
+// Log the device-removed reason plus DRED breadcrumbs, once per removal.
+static void LogDeviceRemoved(const char *where)
+{
+    if (h.dev == nullptr) return;
+    const HRESULT reason = h.dev->GetDeviceRemovedReason();
+    Log("[host] device removed at %s: reason 0x%08X", where, (unsigned)reason);
+    ID3D12DeviceRemovedExtendedData1 *dred = nullptr;
+    if (FAILED(h.dev->QueryInterface(__uuidof(ID3D12DeviceRemovedExtendedData1),
+                                     reinterpret_cast<void **>(&dred))))
+        return;
+    D3D12_DRED_AUTO_BREADCRUMBS_OUTPUT crumbs = {};
+    if (SUCCEEDED(dred->GetAutoBreadcrumbsOutput(&crumbs)) && crumbs.pHeadAutoBreadcrumbNode)
+    {
+        const D3D12_AUTO_BREADCRUMB_NODE *n = crumbs.pHeadAutoBreadcrumbNode;
+        Log("[host] DRED: %u breadcrumbs, last value %u, command list %p",
+            n->BreadcrumbCount,
+            n->pLastBreadcrumbValue ? *n->pLastBreadcrumbValue : 0u,
+            (void *)n->pCommandList);
+    }
+    D3D12_DRED_PAGE_FAULT_OUTPUT pf = {};
+    if (SUCCEEDED(dred->GetPageFaultAllocationOutput(&pf)) && pf.PageFaultVA != 0)
+        Log("[host] DRED: page fault at VA 0x%llX", (unsigned long long)pf.PageFaultVA);
+    dred->Release();
 }
 
 static UINT64 EndCommands()
@@ -759,6 +793,45 @@ static bool InitDisguise()
                        reinterpret_cast<void **>(&h.dev));
     nvidia->Release();
     if (FAILED(hr)) { Log("[host] D3D12CreateDevice failed 0x%08X", hr); return false; }
+
+    // DRED breadcrumbs: when the device is removed (TDR on Win10, issue #1)
+    // the reason code and the faulting command list are the only way to tell
+    // WHERE it died. Without them the log says only "code 6" and the user
+    // cannot help. Enable the settings interface before any work is
+    // submitted; the device itself is queried for the breadcrumbs at the
+    // failure site (BeginCommands).
+    {
+        ID3D12DeviceRemovedExtendedDataSettings1 *dred1 = nullptr;
+        const HRESULT hr1 = h.dev->QueryInterface(__uuidof(ID3D12DeviceRemovedExtendedDataSettings1),
+                                                  reinterpret_cast<void **>(&dred1));
+        if (SUCCEEDED(hr1))
+        {
+            dred1->SetAutoBreadcrumbsEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);
+            dred1->SetPageFaultEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);
+            dred1->Release();
+            Log("[host] DRED breadcrumbs enabled (settings1)");
+        }
+        else
+        {
+            // Older SDKs / OS builds: the v1 settings interface.
+            ID3D12DeviceRemovedExtendedDataSettings *dred = nullptr;
+            const HRESULT hr0 = h.dev->QueryInterface(__uuidof(ID3D12DeviceRemovedExtendedDataSettings),
+                                                      reinterpret_cast<void **>(&dred));
+            if (SUCCEEDED(hr0))
+            {
+                dred->SetAutoBreadcrumbsEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);
+                dred->SetPageFaultEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);
+                dred->Release();
+                Log("[host] DRED breadcrumbs enabled (settings)");
+            }
+            else
+            {
+                // Pre-1903 Windows 10: the settings interface does not exist.
+                Log("[host] DRED settings unavailable (settings1=0x%08X, settings=0x%08X)",
+                    (unsigned)hr1, (unsigned)hr0);
+            }
+        }
+    }
 
     factory->Release();
     D3D12_COMMAND_QUEUE_DESC qd = {};

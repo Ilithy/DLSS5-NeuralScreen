@@ -44,6 +44,7 @@ ABOUT = {
     "test_bypass.py": "NR OFF shows the raw capture and the pipeline survives",
     "test_capture_visibility.py": "outside capture sees the overlay only without WDA",
     "test_config.py": "the config loader validates, clamps and resolves",
+    "test_dred_diag.py": "the worker logs DRED/device-removed diagnostics at startup",
     "test_hotkey_once.py": "one press of a hotkey fires exactly one command",
     "test_hotkey_rebind.py": "hotkeys can be reassigned from the config",
     "test_hotkey_bindings.py": "parsing, aliases and defaults survive binding changes",
