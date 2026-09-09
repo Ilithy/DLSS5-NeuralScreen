@@ -12,6 +12,7 @@ files = subprocess.check_output(["git", "ls-files"], text=True).splitlines()
 extra = [
     "NeuralScreen.exe",
     "NeuralScreen.vbs",
+    "NeuralScreen-diag.vbs",
     "README.ru.md",
     "native/nvngx.dll",
     "native/nvngx_dlssnr.dll",
