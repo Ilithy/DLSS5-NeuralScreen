@@ -124,8 +124,8 @@ not.
 | `width`, `height` | output resolution (**actual monitor resolution is used automatically when config is stale**) |
 | `fullscreen` | borderless fullscreen window |
 | `warmup` | NGX warmup frames at start |
-| `work_scale` | 0.25–1.0, the resolution the network runs at, relative to the screen. Only has an effect with `nr_small` on |
-| `nr_small` | process at a reduced resolution and compose the result onto the native frame: faster, sharp (the residual composite). Default `true` |
+| `work_scale` | 0.1–1.0, the resolution the network runs at, relative to the screen. Only has an effect with `nr_small` on |
+| `nr_small` | process at a reduced resolution and compose the result onto the native frame: faster, sharp (the residual composite). Default `false` |
 | `profile` | `Faithful`, `Natural`, `Strong / Cinematic`, `Extreme / Overdrive` |
 | `intensity`, `local_tone`, `local_structure`, `skin_structure` | `null` = take from profile |
 | `lang` | `ru` / `en` |
@@ -136,7 +136,7 @@ not.
 | `split` | 0–1, share of the frame left unprocessed for the before/after wipe; 0 — off |
 | `theme` | `light` / `dark` |
 | `open_menu_on_start` | open the menu on launch; `false` — a short alert instead |
-| `hotkeys` | `{"toggle": "Num1", ...}` — see Controls. Names: `Num0`-`Num9`, `Numdot`, `Numplus`, `Numminus`, `Nummul`, `Numdiv`, `F1`-`F12`, `Insert`, `Home`, letters, digits, with `Ctrl+`/`Alt+`/`Shift+` |
+| `hotkeys` | `{"toggle": "Num1", ...}` — see README, "Using it". Names: `Num0`-`Num9`, `Numdot`, `Numplus`, `Numminus`, `Nummul`, `Numdiv`, `F1`-`F12`, `Insert`, `Home`, letters, digits, with `Ctrl+`/`Alt+`/`Shift+` |
 | `menu_offset`, `menu_scale`, `menu_height` | where the menu sits, its scale and height. Written by the app, not meant to be edited by hand (`menu_height: null` — fit the content) |
 
 ## Architecture
@@ -304,10 +304,11 @@ full screen       16.05     42.9
 reduced            7.25     65.3
 ```
 
-**On by default** (the user's working setup), and the softness that used to
-come with it is gone: the result is composed onto the pristine 1:1 native
-frame by the **matched residual composite** (see below), so text and edges
-keep full resolution while the cheap low-res network does the relighting.
+**Off by default** (set it with the resolution slider in the menu), and the
+softness that used to come with a reduced work size is gone: the result is
+composed onto the pristine 1:1 native frame by the **matched residual
+composite** (see below), so text and edges keep full resolution while the
+cheap low-res network does the relighting.
 Measured end to end on the 4K desktop: 47.9 FPS at full screen vs 71.9 FPS at
 work_scale 0.65 with the composite — a 50% gain with the native anchor intact.
 

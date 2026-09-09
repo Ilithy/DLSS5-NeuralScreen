@@ -118,8 +118,8 @@ recv                    17.5        31.6           24.5 мс
 | `width`, `height` | разрешение вывода (**реальное разрешение монитора берётся автоматически, если конфиг устарел**) |
 | `fullscreen` | безрамочное окно на весь монитор |
 | `warmup` | прогревочные кадры NGX при старте |
-| `work_scale` | 0.25–1.0, разрешение работы сети относительно экрана. Действует только при включённом `nr_small` |
-| `nr_small` | обрабатывать в пониженном разрешении и ложить результат на нативный кадр: быстрее, резко (residual composite). По умолчанию `true` |
+| `work_scale` | 0.1–1.0, разрешение работы сети относительно экрана. Действует только при включённом `nr_small` |
+| `nr_small` | обрабатывать в пониженном разрешении и ложить результат на нативный кадр: быстрее, резко (residual composite). По умолчанию `false` |
 | `profile` | `Faithful`, `Natural`, `Strong / Cinematic`, `Extreme / Overdrive` |
 | `intensity`, `local_tone`, `local_structure`, `skin_structure` | `null` = взять из профиля |
 | `lang` | `ru` / `en` |
@@ -130,7 +130,7 @@ recv                    17.5        31.6           24.5 мс
 | `split` | 0–1, доля кадра без обработки для шторки «до/после»; 0 — выключено |
 | `theme` | `light` / `dark` |
 | `open_menu_on_start` | открывать меню при запуске; `false` — вместо него короткий алерт |
-| `hotkeys` | `{"toggle": "Num1", ...}` — см. «Управление». Имена: `Num0`-`Num9`, `Numdot`, `Numplus`, `Numminus`, `Nummul`, `Numdiv`, `F1`-`F12`, `Insert`, `Home`, буквы, цифры, с `Ctrl+`/`Alt+`/`Shift+` |
+| `hotkeys` | `{"toggle": "Num1", ...}` — см. README, «Как пользоваться». Имена: `Num0`-`Num9`, `Numdot`, `Numplus`, `Numminus`, `Nummul`, `Numdiv`, `F1`-`F12`, `Insert`, `Home`, буквы, цифры, с `Ctrl+`/`Alt+`/`Shift+` |
 | `menu_offset`, `menu_scale`, `menu_height` | где стоит меню, его масштаб и высота. Пишет программа, руками править не нужно (`menu_height: null` — по содержимому) |
 
 ## Архитектура

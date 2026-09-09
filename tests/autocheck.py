@@ -1,4 +1,4 @@
-"""NeuralScreen v1.2 self-checks - the static part (no GUI).
+"""NeuralScreen v1.4 self-checks - the static part (no GUI).
 
 Run:  runtime\\python.exe autocheck.py
 The GUI part (menu, recording) is run separately - see the end of the output.
@@ -46,9 +46,9 @@ def fresh_worker():
 
 
 def zip_integrity():
-    zpath = ROOT / "neuralscreen-v1.3.0-full.zip"
+    zpath = ROOT / "neuralscreen-v1.4.0-full.zip"
     if not zpath.exists():
-        return False, "no neuralscreen-v1.3.0-full.zip"
+        return False, "no neuralscreen-v1.4.0-full.zip"
     required = [
         "main.py", "gpuinfo.py", "overlay_ui.py", "i18n.py", "recorder.py",
         "display.py", "guides.py", "hotkeys.py", "tray.py", "capture.py",

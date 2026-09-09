@@ -1,9 +1,12 @@
 """Display module for the DLSS 5 Desktop NR prototype.
 
-Borderless fullscreen window with a branded HUD overlay (dark #0D1117,
-amber #FFBF00 accent, Consolas). The window is excluded from screen
-capture via SetWindowDisplayAffinity(WDA_EXCLUDEFROMCAPTURE) so that
-screen-capture tools (dxcam, OBS) do not see it.
+Borderless fullscreen window for the frame + the in-overlay settings
+menu. The window is hidden at creation and revealed on the first real
+frame (no blank flash at launch); it is excluded from screen capture
+via SetWindowDisplayAffinity(WDA_EXCLUDEFROMCAPTURE) so that
+screen-capture tools (dxcam, OBS) do not see it. Mode switches (Num5,
+monitor change) are covered by a semi-transparent blur + spinner
+overlay (enter_switch_mode / exit_switch_mode).
 
 Usage:
     disp = Display(2560, 1440)
@@ -920,8 +923,7 @@ class Display:
 
         This is the local path, for when our own window has the focus - the
         global hotkeys are RegisterHotKey in hotkeys.py. Num1 matches the
-        default binding; F10 stays because it was the default before and is
-        still what a habit reaches for.
+        default binding; F10 stays as a local-path compatibility key.
         """
         events = []
         for event in pygame.event.get():

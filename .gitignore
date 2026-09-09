@@ -21,7 +21,7 @@ runtime/
 # Program log (pythonw launch without a console)
 NeuralScreen.log
 
-# Recordings made with Insert
+# Recordings made with Num0
 recordings/
 
 # Release archives in the root (rebuilt at release time)

@@ -63,6 +63,11 @@ Every key can be reassigned in the menu, under the sliders icon.
 While the menu is open it takes the mouse and keyboard, so it works on top of a
 game. Closed, clicks go straight through it as if it were not there.
 
+Startup and mode switches do not flash: the overlay windows are created hidden
+and revealed together with the first real frame, and switching modes (Num5,
+monitor change) shows a brief semi-transparent blur with a spinner while the
+pipeline rebuilds — the picture returns sharp.
+
 ### One window instead of the screen
 
 **Num5** points everything at a single window — the one under the mouse
@@ -185,6 +190,17 @@ the menu catches up when the load drops.
 - **The menu position in window mode** starts in the bottom-right corner of
   the screen on every open; drag it where you want and it is remembered on
   close.
+- **HDR displays** are not supported: the whole pipeline works in SDR
+  (sRGB). On an HDR screen the picture comes out too bright and washed out —
+  switch the display to SDR (Win+Alt+B) while the program runs.
+- **Pipeline latency** is 40–60 ms (a few frames at typical desktop rates) —
+  the neural pass itself is a fraction of a millisecond per megapixel, but
+  the capture → process → present chain adds up. Fine for interactive use,
+  not for competitive play.
+- **The processing resolution is capped at 2560×1440** on the widest side —
+  the neural network itself refuses to run at 4K (tested, it hangs). The
+  output is always your full native resolution; only the network's internal
+  work size is reduced.
 
 ## Under the hood
 
@@ -195,5 +211,6 @@ How it works, what was measured and why the decisions went the way they did:
 
 ## License
 
-The code here is MIT. NVIDIA's `nvngx_dlssnr.dll` is not mine and is not
-included — it comes from NVIDIA under their own terms.
+The code here is MIT. NVIDIA's `nvngx_dlssnr.dll` is not mine — it is
+included in the release archive and comes from NVIDIA under their own
+terms.

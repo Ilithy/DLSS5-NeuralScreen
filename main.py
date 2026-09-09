@@ -5,13 +5,18 @@ The loop: desktop capture (capture.ScreenCapture) -> motion guides
 --live mode) -> fullscreen output (display.Display).
 
 Controls (global hotkeys, RegisterHotKey + a polling fallback - see
-hotkeys.py):
+hotkeys.py). Num Lock must be on: the numpad sends Insert/End/arrows
+without it:
     Num1          - NR on/off
     Num2          - the settings menu
     Num3          - screenshot
     Num0          - recording
-    Ctrl+Alt+Up/Down - processing scale
+    Num4 / Num6   - processing resolution down / up
+    Num5          - process one window instead of the whole screen
     Ctrl+Alt+Q    - quit (the same as "Exit" in the tray)
+
+Every key can be reassigned in the settings menu (config.json
+"hotkeys").
 
 Run:
     python main.py [--config config.json]
@@ -45,7 +50,7 @@ LOG_PATH = Path(__file__).resolve().parent / "NeuralScreen.log"
 
 # The version shown in the menu header. Kept in sync with native/launcher.rc
 # (FileVersion/ProductVersion) and build_release_zip.py at release time.
-APP_VERSION = "1.3.0"
+APP_VERSION = "1.4.0"
 
 # The channel label: the header shows the version, the channel lives in the
 # settings page (user rule 2026-09-08).

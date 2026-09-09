@@ -9,11 +9,10 @@ set "NS_PY=%NEURALSCREEN_PYTHON%"
 if not defined NS_PY if exist "%~dp0runtime\python.exe" set "NS_PY=%~dp0runtime\python.exe"
 if not defined NS_PY set "NS_PY=python"
 
-rem --- NGX runtime: 165 MB redistributable, not stored in git ---------------
+rem --- NGX runtime: 165 MB redistributable, ships in the release archive -----
 if not exist "%~dp0native\nvngx_dlssnr.dll" (
     echo [NeuralScreen] native\nvngx_dlssnr.dll not found.
-    echo Copy the DLSS Ray Reconstruction / Neural Rendering runtime there.
-    echo See README.md, section "Requirements".
+    echo Re-download the release archive, or see README.md, section "What you need".
     pause
     exit /b 1
 )
@@ -23,7 +22,7 @@ if not exist "%~dp0native\nvngx.dll" (
     echo [NeuralScreen] native\nvngx.dll not found - building it.
     call "%~dp0native\build-host.bat"
     if errorlevel 1 (
-        echo [NeuralScreen] Worker build failed. See README.md, section "Build".
+        echo [NeuralScreen] Worker build failed. See native\build-host.bat.
         pause
         exit /b 1
     )

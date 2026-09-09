@@ -48,8 +48,8 @@ End If
 ' --- NGX runtime check (165 MB, not kept in git) ---
 If Not fso.FileExists(dir & "\native\nvngx_dlssnr.dll") Then
     MsgBox "NeuralScreen: native\nvngx_dlssnr.dll not found." & vbCrLf & _
-           "Copy the NVIDIA DLSS 5 Neural Rendering runtime there." & _
-           "See README.md, section Requirements.", 16, "NeuralScreen"
+           "Re-download the release archive, or see README.md, section " & _
+           "What you need.", 16, "NeuralScreen"
     WScript.Quit 1
 End If
 
