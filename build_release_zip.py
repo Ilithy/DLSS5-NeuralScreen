@@ -1,4 +1,12 @@
-"""Build the NeuralScreen v1.5.0 release archive: git files + artifacts + runtime."""
+"""Build the NeuralScreen v1.5.1 release archive: git files + artifacts + runtime.
+
+The archive carries a VERSION.txt manifest (git commit, runtime SHA-256,
+target architectures) so a user can tell exactly which build they have.
+The build refuses to package a runtime whose kernels do not match the
+expected set (the v1.5.0 mistake: a zip that claimed "everything" but
+carried a Blackwell-only DLL).
+"""
+import hashlib
 import os
 import subprocess
 import zipfile
@@ -7,6 +15,12 @@ from pathlib import Path
 # The script must work from any directory: every path is relative to git.
 BASE = Path(__file__).resolve().parent
 os.chdir(BASE)
+
+VERSION = "1.5.1"
+# The bundle is architecture-agnostic by design: the dcc0dc24 runtime and
+# the 0x1B0 spoof work on RTX 20/30/40/50 (v1.3.0 behaviour). The manifest
+# still records what is inside so a mismatch is catchable.
+TARGET_ARCHS = "RTX 20/30/40/50 (Ampere/Ada/Blackwell; Turing via spoof)"
 
 files = subprocess.check_output(["git", "ls-files"], text=True).splitlines()
 extra = [
@@ -156,8 +170,85 @@ for f in files + extra:
         continue
     uniq.append(norm)
 
-out = "neuralscreen-v1.5.0-full.zip"
+out = f"neuralscreen-v{VERSION}-full.zip"
+
+# The runtime kernel check: the v1.5.0 zip shipped a Blackwell-only DLL as
+# if it were universal. The kernel names live inside CUDA fatbin records
+# (compressed cubins - plain string search finds nothing). Port of the
+# proven parser from DLSS5-Autopilot (core/gpu.py, MIT).
+import struct
+import collections
+
+_FATBIN_MAGIC = struct.pack("<I", 0xBA55ED50)
+SM_NAMES = {75: "sm_75", 86: "sm_86", 89: "sm_89", 120: "sm_120"}
+KNOWN_SM = set(SM_NAMES) | {50, 52, 53, 60, 61, 62, 70, 72, 80, 90, 100, 101, 110}
+
+
+def dll_architectures(path: str) -> set[int]:
+    """Supported sm versions, from the CUDA fatbin records inside the DLL."""
+    try:
+        d = Path(path).read_bytes()
+    except OSError:
+        return set()
+    found: collections.Counter[int] = collections.Counter()
+    off = 0
+    while True:
+        i = d.find(_FATBIN_MAGIC, off)
+        if i < 0:
+            break
+        off = i + 4
+        try:
+            hsize = struct.unpack_from("<H", d, i + 6)[0]
+            fatsize = struct.unpack_from("<Q", d, i + 8)[0]
+            if hsize < 16 or not (0 < fatsize <= len(d)):
+                continue
+            p, end = i + hsize, i + hsize + fatsize
+            while p < end - 32:
+                ehdr = struct.unpack_from("<I", d, p + 4)[0]
+                payload = struct.unpack_from("<Q", d, p + 8)[0]
+                if ehdr < 24 or ehdr > 4096 or not (0 < payload <= len(d)):
+                    break
+                for so in (24, 28, 20):
+                    if p + so + 4 > len(d):
+                        continue
+                    sm = struct.unpack_from("<I", d, p + so)[0]
+                    if sm in KNOWN_SM:
+                        found[sm] += 1
+                        break
+                p += ehdr + payload
+        except Exception:
+            continue
+    return set(found)
+
+
+dll_path = Path("native/nvngx_dlssnr.dll")
+dll_data = dll_path.read_bytes()
+dll_sha = hashlib.sha256(dll_data).hexdigest()
+print(f"runtime: {dll_path.name} {len(dll_data)} bytes, sha256 {dll_sha[:16]}...")
+archs = dll_architectures(str(dll_path))
+print(f"  kernels found: {', '.join(sorted(SM_NAMES.get(a, f'sm_{a}') for a in archs)) or 'NONE'}")
+for want in (75, 86, 89, 120):
+    if want not in archs:
+        raise SystemExit(
+            f"RUNTIME MISMATCH: sm_{want} not found in {dll_path.name} - the "
+            f"archive would not run on the claimed cards. Refusing to build.")
+    print(f"  kernel sm_{want}: ok")
+
+# The manifest: built-from commit, runtime identity, target architectures.
+# The user can verify which build they have without asking anyone.
+commit = subprocess.check_output(
+    ["git", "rev-parse", "HEAD"], text=True).strip()
+version_txt = (
+    f"NeuralScreen {VERSION}\n"
+    f"commit: {commit}\n"
+    f"runtime: nvngx_dlssnr.dll sha256 {dll_sha}\n"
+    f"kernel archs: {', '.join(sorted(SM_NAMES.get(a, f'sm_{a}') for a in archs))}\n"
+    f"targets: {TARGET_ARCHS}\n"
+    f"built: {subprocess.check_output(['git', 'log', '-1', '--format=%cd', '--date=iso'], text=True).strip()}\n"
+)
+
 with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as z:
+    z.writestr("VERSION.txt", version_txt)
     for f in uniq:
         if not os.path.isfile(f):
             print("MISSING:", f)

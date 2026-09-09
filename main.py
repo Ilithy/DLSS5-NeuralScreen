@@ -50,7 +50,7 @@ LOG_PATH = Path(__file__).resolve().parent / "NeuralScreen.log"
 
 # The version shown in the menu header. Kept in sync with native/launcher.rc
 # (FileVersion/ProductVersion) and build_release_zip.py at release time.
-APP_VERSION = "1.5.0"
+APP_VERSION = "1.5.1"
 
 # The channel label: the header shows the version, the channel lives in the
 # settings page (user rule 2026-09-08).
@@ -495,7 +495,7 @@ def _drain_stderr(worker, logs: list[str], stop: threading.Event) -> None:
             # there is no telling what was actually created. [present] is
             # let through too: the overlay window lifecycle (created, hidden,
             # revealed, resize) is part of the startup/shutdown diagnostics.
-            if "[present]" in line or "[spout]" in line or (
+            if "[present]" in line or "[spout]" in line or "[arch]" in line or (
                     os.environ.get("NS_PHASE") == "1" and (
                         "[phase]" in line or "[pure]" in line or "[host]" in line)):
                 print(line)

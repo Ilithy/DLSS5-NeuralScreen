@@ -46,9 +46,9 @@ def fresh_worker():
 
 
 def zip_integrity():
-    zpath = ROOT / "neuralscreen-v1.5.0-full.zip"
+    zpath = ROOT / "neuralscreen-v1.5.1-full.zip"
     if not zpath.is_file():
-        return False, "no neuralscreen-v1.5.0-full.zip"
+        return False, "no neuralscreen-v1.5.1-full.zip"
     required = [
         "main.py", "gpuinfo.py", "overlay_ui.py", "i18n.py", "recorder.py",
         "display.py", "guides.py", "hotkeys.py", "tray.py", "capture.py",
@@ -56,7 +56,7 @@ def zip_integrity():
         "docs/TECHNICAL.md", "docs/TECHNICAL.ru.md",
         "README.md", "README.ru.md", "NeuralScreen.vbs", "NeuralScreen.bat",
         "native/nvngx.dll", "native/nvngx_dlssnr.dll",
-        "runtime/pythonw.exe",
+        "runtime/pythonw.exe", "VERSION.txt",
     ]
     with zipfile.ZipFile(zpath) as z:
         names = set(z.namelist())

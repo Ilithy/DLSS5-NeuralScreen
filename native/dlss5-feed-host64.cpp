@@ -232,7 +232,13 @@ static constexpr unsigned NV_ARCH_TURING    = 0x160u;
 static constexpr unsigned NV_ARCH_AMPERE    = 0x170u;
 static constexpr unsigned NV_ARCH_HOPPER    = 0x180u;
 static constexpr unsigned NV_ARCH_ADA       = 0x190u;
-static constexpr unsigned NV_ARCH_BLACKWELL = 0x1A0u;
+// The spoof target. This is NOT the NVAPI name table (Turing 0x160, Ampere
+// 0x170, Ada 0x190, Blackwell GB1XX 0x1A0 / GB2XX 0x1B0 - see gpuinfo.py) -
+// it is the value the feature DLL is willing to accept. The leaked runtimes
+// (dcc0dc24 and the 310.8.SF family) refuse feature 18 below 0x1B0, which
+// is why v1.4.1+ (spoof 0x1A0, from commit 7e186fb) regressed RTX 30/40
+// while v1.3.0 (spoof 0x1B0) worked on every generation. Keep it 0x1B0.
+static constexpr unsigned NV_ARCH_BLACKWELL = 0x1B0u;
 
 struct NvArchInfo
 {
@@ -392,7 +398,8 @@ static int SetupArchSpoof()
     { Log("[arch] could not install the patch, err=%lu", GetLastError()); return -1; }
     Log("[arch] patch installed: %d cards cached, architecture 0x%X%s",
         g_arch_count, info.architecture,
-        forced ? " (NS_ARCH_FORCE=1, no spoofing)" : " -> 0x1B0");
+        forced ? " (NS_ARCH_FORCE=1, no spoofing)"
+               : " (spoofed to the DLL's accepted value)");
     return 1;
 }
 
