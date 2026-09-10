@@ -129,6 +129,59 @@ def main() -> int:
         if menu.page != "main":
             failures.append("the close icon should return to the main page")
 
+    # 7. Language and theme live on the SETTINGS page, not the main one
+    #    (user rule 10.09: the main page is the main page - appearance
+    #    controls moved behind the gear). The main page must not offer
+    #    them, the settings page must.
+    def seg_keys(page: str) -> list:
+        menu.page = page
+        menu.layout(3840, 2160)
+        return [i.key for i in menu.items if i.kind == "segmented"]
+
+    main_segs = seg_keys("main")
+    print(f"main page segmented: {main_segs}")
+    if "lang" in main_segs or "theme" in main_segs:
+        failures.append(f"lang/theme must not be on the main page, got {main_segs}")
+    set_segs = seg_keys("settings")
+    print(f"settings page segmented: {set_segs}")
+    if "lang" not in set_segs or "theme" not in set_segs:
+        failures.append(f"the settings page must hold lang and theme, got {set_segs}")
+
+    # 8. Clicking the theme segment on the settings page emits the same
+    #    ("theme", ...) action main already handles. The segment cells are
+    #    built during drawing (item.extra["cells"]), so the menu must be
+    #    drawn once before the click - exactly like the real loop does.
+    #    The settings page is taller than the panel, so the segment may sit
+    #    below the viewport - scroll it into view first (the real loop
+    #    scrolls the same way).
+    menu.page = "settings"
+    menu.layout(3840, 2160)
+    theme_seg = next((i for i in menu.items
+                      if i.kind == "segmented" and i.key == "theme"), None)
+    if theme_seg is None:
+        failures.append("no theme segment on the settings page")
+    else:
+        vp = menu._viewport
+        if theme_seg.rect.bottom > vp.bottom:
+            menu.scroll = theme_seg.rect.bottom - vp.bottom + 20
+            menu.layout(3840, 2160)
+        # draw() re-runs layout() with the SURFACE size - the test surface is
+        # 64x64, which would re-layout the panel for a 64px screen. Draw on a
+        # real-size surface instead, exactly like the live loop does.
+        menu.draw(pygame.Surface((3840, 2160)))
+        # draw() re-runs layout() - the items are recreated, so the segment
+        # must be looked up again (the old object is no longer in the list).
+        theme_seg = next((i for i in menu.items
+                          if i.kind == "segmented" and i.key == "theme"), None)
+        if theme_seg is None:
+            failures.append("no theme segment after the redraw")
+        else:
+            out = click(menu, theme_seg)
+            print(f"theme click -> {out}")
+            if not any(k == "theme" for k, *_ in out):
+                failures.append(f"the theme segment should emit a theme "
+                                f"action, got {out}")
+
     print("=" * 60)
     if failures:
         print(f"FAIL: {len(failures)} - {failures}")

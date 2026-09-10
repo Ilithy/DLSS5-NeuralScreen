@@ -502,6 +502,17 @@ class OverlayMenu:
                                          self._u(SMALL_SIZE) + self._u(6))
             cy += self._hint_rel.h + gap
 
+            # Appearance: language and theme moved here from the main page
+            # (user rule 10.09: the main page is the main page - settings
+            # live behind the gear). The segmented controls emit the same
+            # ("lang", ...) / ("theme", ...) actions main already handles.
+            section(s["sec_view"])
+            segmented("lang", s["language"], self.lang, ["en", "ru"],
+                      ["EN", "RU"])
+            segmented("theme", s["theme"], self.state.get("theme", "light"),
+                      ["light", "dark"], [s["theme_light"], s["theme_dark"]])
+            cy += gap
+
             # The channel label: the header shows the version, the channel
             # lives here (user rule 2026-09-08). A button item - the only
             # non-interactive kind the drawer supports - with the label as
@@ -560,10 +571,6 @@ class OverlayMenu:
                                else f"{split_val:.2f}"))
 
             section(s["sec_view"])
-            segmented("lang", s["language"], self.lang, ["en", "ru"],
-                      ["EN", "RU"])
-            segmented("theme", s["theme"], self.state.get("theme", "light"),
-                      ["light", "dark"], [s["theme_light"], s["theme_dark"]])
             # The window list moved to its own page: the drop-down was
             # cramped and gave no feedback about what each entry actually
             # is. The button opens the page where hovering a row highlights
